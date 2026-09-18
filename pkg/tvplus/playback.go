@@ -52,7 +52,7 @@ type playbackRequest struct {
 // Playback requests stream URLs for a channel. contentID may carry the tvp_
 // prefix. Channels outside the account's plan return ErrNotSubscribed.
 func (c *Client) Playback(contentID string) (*PlaybackResponse, error) {
-	cr := c.Credentials
+	cr := c.Credentials()
 	if cr == nil || cr.AuthToken == "" {
 		return nil, errors.New("tvplus: not logged in")
 	}
@@ -135,7 +135,7 @@ func hdneaFrom(stream string) string {
 // tv.media.jio.com/fallback. extID is the channel's JioTV ID (PlaybackData.ExtID).
 // The request also needs the stream's __hdnea__ as a cookie.
 func (c *Client) KeyHeaders(extID string) map[string]string {
-	cr := c.Credentials
+	cr := c.Credentials()
 	if cr == nil {
 		return nil
 	}
@@ -159,7 +159,7 @@ func (c *Client) KeyHeaders(extID string) map[string]string {
 // LicenseHeaders returns the headers the app sends with Widevine license
 // requests to PlaybackData.KeyURL. The license token itself is in the URL.
 func (c *Client) LicenseHeaders(d PlaybackData) map[string]string {
-	cr := c.Credentials
+	cr := c.Credentials()
 	if cr == nil {
 		return nil
 	}

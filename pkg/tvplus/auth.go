@@ -191,7 +191,7 @@ type verifyOTPResponse struct {
 }
 
 // VerifyOTP completes a login and exchanges the SSO token for an access token.
-// On success c.Credentials is set. If the exchange fails, the returned
+// The login is stored on the client. If the exchange fails, the returned
 // credentials still hold the SSO token, so the OTP is not wasted.
 func (c *Client) VerifyOTP(number, identifier, otp string) (*Credentials, error) {
 	n, err := normalizeNumber(number)
@@ -218,11 +218,11 @@ func (c *Client) VerifyOTP(number, identifier, otp string) (*Credentials, error)
 		SubscriberID: v.SessionAttributes.User.SubscriberID,
 		Unique:       v.SessionAttributes.User.Unique,
 	}
-	c.Credentials = creds
+	c.SetCredentials(creds)
 	if err := c.ExchangeToken(); err != nil {
 		return creds, err
 	}
-	return creds, nil
+	return c.Credentials(), nil
 }
 
 type exchangeResponse struct {
@@ -234,7 +234,7 @@ type exchangeResponse struct {
 
 // ExchangeToken turns the SSO token into an access and refresh token.
 func (c *Client) ExchangeToken() error {
-	cr := c.Credentials
+	cr := c.Credentials()
 	if cr == nil || cr.SSOToken == "" {
 		return errors.New("tvplus: not logged in")
 	}
@@ -255,12 +255,13 @@ func (c *Client) ExchangeToken() error {
 	if x.SubscriberID != "" {
 		cr.SubscriberID = x.SubscriberID
 	}
+	c.SetCredentials(cr)
 	return nil
 }
 
 // Refresh renews the access token with the refresh token. No OTP is needed.
 func (c *Client) Refresh() error {
-	cr := c.Credentials
+	cr := c.Credentials()
 	if cr == nil || cr.RefreshToken == "" {
 		return errors.New("tvplus: no refresh token")
 	}
@@ -282,6 +283,7 @@ func (c *Client) Refresh() error {
 	if out.RefreshToken != "" {
 		cr.RefreshToken = out.RefreshToken
 	}
+	c.SetCredentials(cr)
 	return nil
 }
 

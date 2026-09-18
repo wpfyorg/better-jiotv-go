@@ -67,12 +67,14 @@ func DefaultEndpoints() Endpoints {
 	}
 }
 
-// Client is a JioTV+ API client. Device and Credentials may be set directly;
-// Credentials is nil until login.
+// Client is a JioTV+ API client. It is safe for concurrent use. Credentials
+// are nil until login; use SetCredentials to restore a saved login.
 type Client struct {
-	HTTP        *fasthttp.Client
-	Device      Device
-	Credentials *Credentials
+	HTTP   *fasthttp.Client
+	Device Device
+
+	credsMu sync.RWMutex
+	creds   *Credentials
 
 	mu        sync.Mutex
 	endpoints Endpoints
@@ -91,6 +93,29 @@ func NewClient(httpClient *fasthttp.Client, device Device) *Client {
 		endpoints: DefaultEndpoints(),
 		now:       time.Now,
 	}
+}
+
+// Credentials returns a copy of the current login, or nil.
+func (c *Client) Credentials() *Credentials {
+	c.credsMu.RLock()
+	defer c.credsMu.RUnlock()
+	if c.creds == nil {
+		return nil
+	}
+	cp := *c.creds
+	return &cp
+}
+
+// SetCredentials replaces the current login. nil logs out.
+func (c *Client) SetCredentials(cr *Credentials) {
+	var cp *Credentials
+	if cr != nil {
+		v := *cr
+		cp = &v
+	}
+	c.credsMu.Lock()
+	c.creds = cp
+	c.credsMu.Unlock()
 }
 
 // SetEndpoints overrides the base URLs and marks them as fresh, so the remote

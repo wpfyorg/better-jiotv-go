@@ -224,7 +224,7 @@ func TestLoginFlow(t *testing.T) {
 		Unique: "00000000-0000-0000-0000-000000000001", UserID: "00000000-0000-0000-0000-00000000000u",
 		AuthToken: "FAKE_AUTH_TOKEN", RefreshToken: "00000000-0000-0000-0000-00000000000r",
 	}
-	if *creds != want || c.Credentials != creds {
+	if *creds != want || *c.Credentials() != want {
 		t.Errorf("credentials = %+v, want %+v", *creds, want)
 	}
 }
@@ -258,7 +258,7 @@ func TestRefresh(t *testing.T) {
 	ts, c := newTestServer(t, map[string]http.HandlerFunc{
 		"/tokenservice/apis/v1.1/refreshtoken": serve([]byte(`{"authToken":"NEW_AUTH"}`)),
 	})
-	c.Credentials = testCredentials()
+	c.SetCredentials(testCredentials())
 	if err := c.Refresh(); err != nil {
 		t.Fatal(err)
 	}
@@ -271,8 +271,8 @@ func TestRefresh(t *testing.T) {
 	if body["refreshToken"] != "refresh" || body["appName"] != appName || body["deviceId"] != testDevice.AndroidID {
 		t.Errorf("refresh body = %v", body)
 	}
-	if c.Credentials.AuthToken != "NEW_AUTH" || c.Credentials.RefreshToken != "refresh" {
-		t.Errorf("credentials after refresh = %+v", c.Credentials)
+	if got := c.Credentials(); got.AuthToken != "NEW_AUTH" || got.RefreshToken != "refresh" {
+		t.Errorf("credentials after refresh = %+v", got)
 	}
 }
 
@@ -401,7 +401,7 @@ func TestPlayback(t *testing.T) {
 	ts, c := newTestServer(t, map[string]http.HandlerFunc{
 		"/playback/v2/302084": serve(fixture(t, "playback.json")),
 	})
-	c.Credentials = testCredentials()
+	c.SetCredentials(testCredentials())
 
 	resp, err := c.Playback("tvp_302084")
 	if err != nil {
@@ -456,7 +456,7 @@ func TestPlaybackNotSubscribed(t *testing.T) {
 			w.Write(fixture(t, "playback_401.json"))
 		},
 	})
-	c.Credentials = testCredentials()
+	c.SetCredentials(testCredentials())
 	if _, err := c.Playback("300396"); !errors.Is(err, ErrNotSubscribed) {
 		t.Errorf("err = %v, want ErrNotSubscribed", err)
 	}

@@ -9,4 +9,7 @@ const (
 
 	// EPG-related tasks
 	EPGTaskID = "jiotv_epg"
+
+	// JioTV+ access token upkeep
+	TVPlusRefreshTokenTaskID = "tvplus_refresh_token"
 )

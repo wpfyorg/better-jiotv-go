@@ -46,6 +46,10 @@ func WebEPGHandler(c *fiber.Ctx) error {
 	// Get channel ID from URL
 	channelID := c.Params("channelID")
 
+	if isTVPlusChannel(channelID) {
+		return tvPlusWebEPG(c, channelID)
+	}
+
 	if strings.HasPrefix(channelID, "sl") {
 		channelID = channelID[2:]
 	}

@@ -4,6 +4,7 @@
     "disable_ts_handler": false,
     "disable_logout": false,
     "drm": true,
+    "tvplus": false,
     "title": "",
     "disable_url_encryption": false,
     "path_prefix": "",

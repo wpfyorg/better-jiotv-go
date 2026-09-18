@@ -56,6 +56,18 @@ DRM is a method of restricting access to copyrighted data. The latest version of
 
 For more detailed information about the DRM feature, including setup and limitations, please see [DRM Documentation](./drm.md).
 
+### JioTV+:
+
+| Purpose | Config Value | Environment Variable | Default |
+| ----- | ------------ | -------------------- | ------- |
+| Add channels from JioTV+ (the JioFiber/AirFiber set-top box service). | `tvplus` | `JIOTV_TVPLUS` | `false` |
+
+JioTV+ carries about 100 channels that JioTV does not, mostly Star, Zee, Sun and Sony channels. They need a JioFiber or AirFiber account with a plan that includes them.
+
+When enabled, the web interface shows a "Connect JioTV+" button. JioTV+ has its own login: enter the mobile number registered to the fibre account, pick the connection, and type the OTP. The login is kept in the store next to the JioTV login and refreshed automatically.
+
+JioTV+ channels get IDs starting with `tvp_` and appear in the channel list, `playlist.m3u` and the EPG. Channels that JioTV already carries are not duplicated. The login uses one JioTV+ device slot on the account.
+
 ### Title:
 
 | Purpose | Config Value | Environment Variable | Default |
@@ -186,6 +198,9 @@ disable_logout = false
 # Enable Or Disable DRM. Default: true
 drm = true
 
+# Enable JioTV+ channels (the JioFiber/AirFiber set-top box catalogue). Needs a separate JioTV+ login. Default: false
+tvplus = false
+
 # Title of the webpage. Default: JioTV Go
 title = ""
 
@@ -231,6 +246,7 @@ debug: false
 disable_ts_handler: false
 disable_logout: false
 drm: true
+tvplus: false
 title: ""
 disable_url_encryption: false
 path_prefix: ""
@@ -255,6 +271,7 @@ The file is also available at [configs/jiotv-config.json](https://github.com/jio
     "disable_ts_handler": false,
     "disable_logout": false,
     "drm": true,
+    "tvplus": false,
     "title": "",
     "disable_url_encryption": false,
     "path_prefix": "",

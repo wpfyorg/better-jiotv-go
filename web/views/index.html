@@ -33,10 +33,26 @@
       </div>
     </div>
     {{end}}
+    {{if .TVPlus.Enabled}}
+    <div class="container mx-auto px-4 pt-4">
+      <div class="flex flex-wrap items-center gap-3 rounded-2xl border border-base-300/60 p-3">
+        <span class="font-bold">JioTV+</span>
+        {{if .TVPlus.Connected}}
+        <span class="text-sm text-base-content/60">Connected. JioTV+ channels are marked TV+.</span>
+        <a href="/tvplus/logout" class="btn btn-ghost btn-sm ml-auto">Disconnect</a>
+        {{else}}
+        <span class="text-sm text-base-content/60">Add the channels from your JioFiber or AirFiber plan.</span>
+        <button type="button" onclick="tvPlusOpen()" class="btn btn-primary btn-sm ml-auto">Connect JioTV+</button>
+        {{end}}
+      </div>
+    </div>
+    {{ template "tvplus_dialog" . }}
+    {{end}}
     <div class="container mx-auto flex-grow">{{ template "channel_list" . }}</div>
     {{ template "login_dialog" . }}
     <script src="/static/internal/utils.js"></script>
     <script src="/static/internal/index.js"></script>
+    {{if .TVPlus.Enabled}}<script src="/static/internal/tvplus.js"></script>{{end}}
     <script src="/static/internal/common.js"></script>
     <script src="/static/internal/remote.js"></script>
     {{ template "footer" . }}

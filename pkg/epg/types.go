@@ -9,7 +9,7 @@ import (
 // Channel XML tag structure for the EPG
 type Channel struct {
 	XMLName xml.Name `xml:"channel"`      // XML tag name
-	ID      int      `xml:"id,attr"`      // ID is attribute of channel tag
+	ID      string   `xml:"id,attr"`      // ID is attribute of channel tag
 	Display string   `xml:"display-name"` // Display name of the channel
 }
 

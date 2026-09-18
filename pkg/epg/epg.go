@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"math/big"
+	"strconv"
 
 	"os"
 	"sync"
@@ -34,6 +35,18 @@ const (
 	defaultRandomHour   = 2
 	defaultRandomMinute = 30
 )
+
+// Source returns extra channels and programmes to include in the EPG, such as
+// channels from another catalogue.
+type Source func() ([]Channel, []Programme, error)
+
+var extraSources []Source
+
+// RegisterSource adds a source whose channels and programmes are appended to
+// every generated EPG. It must be called before Init.
+func RegisterSource(source Source) {
+	extraSources = append(extraSources, source)
+}
 
 // Init initializes EPG generation and schedules it for the next day.
 func Init() {
@@ -134,7 +147,7 @@ func genXML() ([]byte, error) {
 	var programmesMu sync.Mutex
 
 	// Define a worker function for fetching EPG data
-	fetchEPG := func(channel Channel, bar *progressbar.ProgressBar) {
+	fetchEPG := func(channel ChannelObject, bar *progressbar.ProgressBar) {
 		var channelProgrammes []Programme
 		req := fasthttp.AcquireRequest()
 		req.Header.SetUserAgent(headers.UserAgentOkHttp)
@@ -143,23 +156,23 @@ func genXML() ([]byte, error) {
 		resp := fasthttp.AcquireResponse()
 
 		for offset := 0; offset < 2; offset++ {
-			reqUrl := fmt.Sprintf(EPG_URL, offset, channel.ID)
+			reqUrl := fmt.Sprintf(EPG_URL, offset, channel.ChannelID)
 			req.SetRequestURI(reqUrl)
 
 			if err := client.Do(req, resp); err != nil {
 				// Handle error
-				utils.Log.Printf("Error fetching EPG for channel %d, offset %d: %v", channel.ID, offset, err)
+				utils.Log.Printf("Error fetching EPG for channel %d, offset %d: %v", channel.ChannelID, offset, err)
 				continue
 			}
 			if status := resp.StatusCode(); status != fasthttp.StatusOK {
-				utils.Log.Printf("Error fetching EPG for channel %d, offset %d: HTTP status %d", channel.ID, offset, status)
+				utils.Log.Printf("Error fetching EPG for channel %d, offset %d: HTTP status %d", channel.ChannelID, offset, status)
 				continue
 			}
 
 			var epgResponse EPGResponse
 			if err := json.Unmarshal(resp.Body(), &epgResponse); err != nil {
 				// Handle error
-				utils.Log.Printf("Error unmarshaling EPG response for channel %d, offset %d: %v", channel.ID, offset, err)
+				utils.Log.Printf("Error unmarshaling EPG response for channel %d, offset %d: %v", channel.ChannelID, offset, err)
 				// Print response body for debugging
 				utils.Log.Printf("Response body: %s", resp.Body())
 				continue
@@ -168,7 +181,7 @@ func genXML() ([]byte, error) {
 			for _, programme := range epgResponse.EPG {
 				startTime := formatTime(time.UnixMilli(programme.StartEpoch))
 				endTime := formatTime(time.UnixMilli(programme.EndEpoch))
-				channelProgrammes = append(channelProgrammes, NewProgramme(channel.ID, startTime, endTime, programme.Title, programme.Description, programme.ShowCategory, programme.Poster))
+				channelProgrammes = append(channelProgrammes, NewProgramme(channel.ChannelID, startTime, endTime, programme.Title, programme.Description, programme.ShowCategory, programme.Poster))
 			}
 		}
 		programmesMu.Lock()
@@ -196,14 +209,14 @@ func genXML() ([]byte, error) {
 
 	for _, channel := range channelsResponse.Channels {
 		channels = append(channels, Channel{
-			ID:      channel.ChannelID,
+			ID:      strconv.Itoa(channel.ChannelID),
 			Display: channel.ChannelName,
 		})
 	}
 	utils.Log.Println("Fetched", len(channels), "channels")
 	// Use a worker pool to fetch EPG data concurrently
 	const numWorkers = 20 // Adjust the number of workers based on your needs
-	channelQueue := make(chan Channel, len(channels))
+	channelQueue := make(chan ChannelObject, len(channelsResponse.Channels))
 	var wg sync.WaitGroup
 
 	// Create a progress bar
@@ -221,11 +234,22 @@ func genXML() ([]byte, error) {
 		}()
 	}
 	// Queue channels for processing
-	for _, channel := range channels {
+	for _, channel := range channelsResponse.Channels {
 		channelQueue <- channel
 	}
 	close(channelQueue)
 	wg.Wait()
+
+	for _, source := range extraSources {
+		sourceChannels, sourceProgrammes, err := source()
+		if err != nil {
+			utils.Log.Printf("Skipping extra EPG source: %v", err)
+			continue
+		}
+		channels = append(channels, sourceChannels...)
+		programmes = append(programmes, sourceProgrammes...)
+		utils.Log.Println("Added", len(sourceChannels), "channels from extra EPG source")
+	}
 	if len(programmes) == 0 {
 		return nil, fmt.Errorf("no EPG programmes were fetched")
 	}

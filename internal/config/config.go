@@ -22,6 +22,8 @@ type JioTVConfig struct {
 	DisableLogout bool `yaml:"disable_logout" env:"JIOTV_DISABLE_LOGOUT" json:"disable_logout" toml:"disable_logout"`
 	// Enable Or Disable DRM. Default: true
 	DRM bool `yaml:"drm" env:"JIOTV_DRM" json:"drm" toml:"drm"`
+	// Enable JioTV+ channels (the JioFiber/AirFiber set-top box catalogue). Needs a separate JioTV+ login. Default: false
+	TVPlus bool `yaml:"tvplus" env:"JIOTV_TVPLUS" json:"tvplus" toml:"tvplus"`
 	// Title of the webpage. Default: JioTV Go
 	Title string `yaml:"title" env:"JIOTV_TITLE" json:"title" toml:"title"`
 	// Enable Or Disable URL Encryption. URL Encryption prevents hackers from injecting URLs into the server. Default: true

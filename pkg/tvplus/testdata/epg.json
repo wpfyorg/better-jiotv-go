@@ -1,0 +1,88 @@
+{
+ "code": 200,
+ "message": "success",
+ "data": {
+  "300396": [
+   {
+    "description": "Despite being from an affluent family, Leela longs for her distant father's love. She finds comfort and healing in her strong bond with Ram.",
+    "endEpoch": 1789671360000,
+    "programDate": "2026-09-18T00:00:00Z",
+    "startEpoch": 1789669800000,
+    "thumbnail": "https://jiotvimages.cdn.jio.com/dare_images/shows/epgdata/f8200f4a42be1cab3c9b59d3f17040db.jpg",
+    "thumbnailHash": "WggKDYRwWlqomHeTdqh2dQyG01BY",
+    "title": "Dilon Ki Ram Leela",
+    "programId": "2609181351000",
+    "showId": "CHN-123970000PRG-SH065751290000",
+    "catchupShowId": "e1e3039e3a235b30857686bdac4abcf5",
+    "episodeCount": 26
+   },
+   {
+    "description": "After her husband abandons her for not giving birth to a son, a resilient Ganga Mai dedicates herself to raising her three daughters with unwavering strength, grace, and affection.",
+    "endEpoch": 1789672980000,
+    "programDate": "2026-09-18T00:00:00Z",
+    "startEpoch": 1789671360000,
+    "thumbnail": "https://jiotvimages.cdn.jio.com/dare_images/shows/epgdata/60912c97f319366a743cec949cea84ab.jpg",
+    "thumbnailHash": "X2kKHYhoY5ZfmHl0h3h5dp9I9qqG",
+    "title": "Ganga Mai Ki Betiyaan",
+    "programId": "2609181351001",
+    "showId": "CHN-123970000PRG-SH060367130000",
+    "catchupShowId": "2588e3e19d6c58a2a748b8d14602e9ba",
+    "episodeCount": 357
+   },
+   {
+    "description": "Though they have different perspectives, the amiable and endearing Vasudha works as a housekeeper in Chandrika, a business tycoon's house.",
+    "endEpoch": 1789675200000,
+    "programDate": "2026-09-18T00:00:00Z",
+    "startEpoch": 1789672980000,
+    "thumbnail": "https://jiotvimages.cdn.jio.com/dare_images/shows/epgdata/e230f198c2723004bf9f387e53c8d812.jpg",
+    "thumbnailHash": "nUkKHYRQV3pcpndyiGp4lw13leAO",
+    "title": "Vasudha",
+    "programId": "2609181351002",
+    "showId": "CHN-123970000PRG-SH052928370000",
+    "catchupShowId": "9fbf1089ea44529bbbd14178b049e45b",
+    "episodeCount": 688
+   }
+  ],
+  "302084": [
+   {
+    "description": "Virat is an IPS officer who loves Pakhi deeply. However, things become complicated when he has to let go of his love, Pakhi, and marry Sai.",
+    "endEpoch": 1789673400000,
+    "programDate": "2026-09-18T00:00:00Z",
+    "startEpoch": 1789669800000,
+    "thumbnail": "https://jiotvimages.cdn.jio.com/dare_images/shows/epgdata/86499ae500b97dbe669e7e0657acfaec.jpg",
+    "thumbnailHash": "0FgKFYIJVHd0fIaHdlmIdwuF2OCb",
+    "title": "Ghum Hai Kisikey Pyaar Meiin",
+    "programId": "2609181116000",
+    "showId": "CHN-033825000PRG-SH048581280000",
+    "catchupShowId": "c87937699d3a5e5fa137415812fabd7c",
+    "episodeCount": 1599
+   },
+   {
+    "description": "Two wealthy cousins, Sadhna and Ragini, navigate societal biases when Sadhna's beauty earns admiration while Ragini faces discrimination for her looks.",
+    "endEpoch": 1789677600000,
+    "programDate": "2026-09-18T00:00:00Z",
+    "startEpoch": 1789673400000,
+    "thumbnail": "https://jiotvimages.cdn.jio.com/dare_images/shows/epgdata/69341248e78f4b440b3d864ed709eeb8.jpg",
+    "thumbnailHash": "USgKFYZPmXaGeYeHmliXaF0moAGG",
+    "title": "Sapna Babul Ka Bidaai",
+    "programId": "2609181116001",
+    "showId": "CHN-033825000PRG-SH052720420000",
+    "catchupShowId": "57f686f8dda85c44916971e06c37955b",
+    "episodeCount": 739
+   },
+   {
+    "description": "Gopi and Rashi, cousins, are married into the same wealthy family. As they strive to cope with family relations, they also attempt to become better versions of themselves.",
+    "endEpoch": 1789692000000,
+    "programDate": "2026-09-18T00:00:00Z",
+    "startEpoch": 1789677600000,
+    "thumbnail": "https://jiotvimages.cdn.jio.com/dare_images/shows/epgdata/766291d9cd628e6382dc831633313f32.jpg",
+    "thumbnailHash": "W5oGFYSq8dZ9iYZziYiHic86+sSm",
+    "title": "Saath Nibhaana Saathiya",
+    "programId": "2609181116002",
+    "showId": "CHN-033825000PRG-SH053833200000",
+    "catchupShowId": "39e66761047152758e1342506bc0d070",
+    "episodeCount": 2718
+   }
+  ]
+ }
+}

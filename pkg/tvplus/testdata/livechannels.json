@@ -1,0 +1,106 @@
+{
+ "code": 200,
+ "message": "success",
+ "data": {
+  "300000": {
+   "contentId": "300000",
+   "extId": "175",
+   "name": "Aastha",
+   "language": "Hindi",
+   "genres": [
+    "Devotional"
+   ],
+   "quality": "SD",
+   "provider": "JioCinema",
+   "subProvider": "JioCinema-Free",
+   "isPremium": false,
+   "openToNonJio": true,
+   "playViaSDK": false,
+   "playbackType": "playback",
+   "channelNumber": 1055,
+   "order": 311,
+   "thumbnail": "https://img.media.jio.com/imagespublic/17/63/Aastha_1570454431609_tv.jpg",
+   "logoUrl": ""
+  },
+  "302084": {
+   "contentId": "302084",
+   "extId": "1116",
+   "name": "Star Plus",
+   "language": "Hindi",
+   "genres": [
+    "Entertainment"
+   ],
+   "quality": "SD",
+   "provider": "Hotstar",
+   "subProvider": "Hotstar-Premium",
+   "isPremium": true,
+   "openToNonJio": false,
+   "playViaSDK": false,
+   "playbackType": "playback",
+   "channelNumber": 117,
+   "order": 2,
+   "thumbnail": "https://img.media.jio.com/tvpimages/66/40/302084_1753189751700_l_medium.jpg",
+   "logoUrl": ""
+  },
+  "300396": {
+   "contentId": "300396",
+   "extId": "1351",
+   "name": "Zee TV",
+   "language": "Hindi",
+   "genres": [
+    "Entertainment"
+   ],
+   "quality": "SD",
+   "provider": "Zee5",
+   "subProvider": "Zee5-Premium",
+   "isPremium": true,
+   "openToNonJio": false,
+   "playViaSDK": false,
+   "playbackType": "playback",
+   "channelNumber": 143,
+   "order": 9,
+   "thumbnail": "https://img.media.jio.com/tvpimages/85/63/300396_1751285548502_l_medium.jpg",
+   "logoUrl": ""
+  },
+  "304189": {
+   "contentId": "304189",
+   "extId": "194408",
+   "name": "Sun TV",
+   "language": "Tamil",
+   "genres": [
+    "Entertainment"
+   ],
+   "quality": "SD",
+   "provider": "JioCinema",
+   "subProvider": "JioCinema-Premium",
+   "isPremium": true,
+   "openToNonJio": false,
+   "playViaSDK": true,
+   "playbackType": "playback",
+   "channelNumber": 1504,
+   "order": 590,
+   "thumbnail": "https://img.media.jio.com/tvpimages/22/88/304189_1778668335015_l_medium.jpg",
+   "logoUrl": ""
+  },
+  "301249": {
+   "contentId": "301249",
+   "extId": "2000",
+   "name": "Plus Test 1",
+   "language": "Bengali",
+   "genres": [
+    "News"
+   ],
+   "quality": "SD",
+   "provider": "JioCinema",
+   "subProvider": "JioCinema-Free",
+   "isPremium": false,
+   "openToNonJio": true,
+   "playViaSDK": false,
+   "playbackType": "deeplink",
+   "channelNumber": 5210,
+   "order": 1134,
+   "thumbnail": "https://img.media.jio.com/imagespublic/41/85/301249_1652105367408_l_medium.jpg",
+   "logoUrl": ""
+  }
+ }
+}

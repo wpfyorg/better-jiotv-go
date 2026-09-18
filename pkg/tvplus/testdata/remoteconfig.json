@@ -1,0 +1,12 @@
+{
+ "code": 200,
+ "message": "success",
+ "data": {
+  "apiBasePath": "https://content-jiotvplus.media.jio.com",
+  "userSpecifcApiBasePath": "https://api-jiotvplus.media.jio.com",
+  "loginSendOtp": "apis/v3.2/stbotplogin/sendotp",
+  "loginVerifyOtp": "apis/v3.2/stbotplogin/verifyotp",
+  "wvProxyUrl": "http://vodwvproxy.media.jio.com/proxy",
+  "cdnUrlExpiry": 1800
+ }
+}

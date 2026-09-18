@@ -330,7 +330,7 @@ func getDrmMpd(channelID, quality string) (*DrmMpdOutput, error) {
 	}
 
 	// Get live stream URL from JioTV API
-	liveResult, err := TV.Live(channelID)
+	liveResult, err := getLiveResult(channelID)
 	if err != nil {
 		return nil, err
 	}
@@ -465,6 +465,13 @@ func LiveMpdHandler(c *fiber.Ctx) error {
 		})
 	}
 
+	if isTVPlusChannel(channelID) {
+		// JioTV+ DASH manifests are refused by the CDN; play the HLS stream.
+		return c.Render("views/player_hls", fiber.Map{
+			"play_url": utils.BuildHLSPlayURL(quality, channelID),
+		})
+	}
+
 	// Ensure tokens are fresh before requesting MPD
 	EnsureFreshCredentials()
 
@@ -573,6 +580,23 @@ func DRMKeyHandler(c *fiber.Ctx) error {
 		return internalUtils.ForbiddenError(c, err)
 	}
 
+	if tvPlusHeaders, ok := tvPlusLicenseHeaders(channel_id); ok {
+		// JioTV+ licenses are authorised by the token in the license URL;
+		// send the headers the JioTV+ app sends.
+		for key, value := range tvPlusHeaders {
+			c.Request().Header.Set(key, value)
+		}
+		c.Request().Header.Set("User-Agent", PLAYER_USER_AGENT)
+		c.Request().Header.Set("Content-Type", "application/octet-stream")
+		c.Request().Header.Del("Accept")
+		c.Request().Header.Del("Origin")
+		if err := proxy.Do(c, decoded_url, TV.Client); err != nil {
+			return err
+		}
+		c.Response().Header.Del(fiber.HeaderServer)
+		return nil
+	}
+
 	// Add headers to the request
 	c.Request().Header.Set("accesstoken", TV.AccessToken)
 	c.Request().Header.Set("Connection", "keep-alive")
@@ -636,7 +660,7 @@ func MpdHandler(c *fiber.Ctx) error {
 	}
 
 	if channelID != "" {
-		if liveResult, liveErr := TV.Live(channelID); liveErr == nil && liveResult != nil {
+		if liveResult, liveErr := getLiveResult(channelID); liveErr == nil && liveResult != nil {
 			if freshUrl := selectBestLiveMPDURL(liveResult, quality); freshUrl != "" {
 				decryptedUrl = freshUrl
 				parsedUrl, err = url.Parse(decryptedUrl)
@@ -990,6 +1014,11 @@ func LiveManifestMpdHandler(c *fiber.Ctx) error {
 	quality := c.Query("q")
 	if quality == "" {
 		quality = "auto"
+	}
+
+	if isTVPlusChannel(channelID) {
+		// JioTV+ DASH manifests are refused by the CDN; serve the HLS stream.
+		return c.Redirect(utils.BuildHLSPlayURL(quality, channelID), fiber.StatusFound)
 	}
 
 	EnsureFreshCredentials()

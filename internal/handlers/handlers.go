@@ -146,6 +146,8 @@ func Init() {
 
 	// Initialize custom channels at startup if configured
 	television.InitCustomChannels()
+
+	InitTVPlus()
 }
 
 // ErrorMessageHandler handles error messages
@@ -188,6 +190,8 @@ func IndexHandler(c *fiber.Ctx) error {
 	language := c.Query("language")
 	category := c.Query("category")
 
+	channels.Result = withTVPlusChannels(channels.Result)
+
 	// Process logo URLs for all channels
 	hostURL := c.Protocol() + "://" + c.Hostname()
 	for i, channel := range channels.Result {
@@ -206,6 +210,7 @@ func IndexHandler(c *fiber.Ctx) error {
 		"Channels":         nil,
 		"PremiumProviders": premiumProviders,
 		"IsNotLoggedIn":    !utils.CheckLoggedIn(),
+		"TVPlus":           tvPlusStatus(),
 		"Categories":       television.CategoryMap,
 		"Languages":        television.LanguageMap,
 		"Qualities": map[string]string{
@@ -435,7 +440,7 @@ func refreshChannelToken(channelID string) (*television.LiveURLOutput, error) {
 
 	// Use singleflight to ensure only one concurrent TV.Live request per channelID
 	v, err, _ := tokenRefreshGroup.Do(channelID, func() (interface{}, error) {
-		return TV.Live(channelID)
+		return getLiveResult(channelID)
 	})
 
 	if err != nil {
@@ -601,7 +606,7 @@ func LiveHandler(c *fiber.Ctx) error {
 		// Continue with the request - tokens might still work
 	}
 
-	liveResult, err := TV.Live(id)
+	liveResult, err := getLiveResult(id)
 	if err != nil {
 		utils.Log.Println(err)
 		return internalUtils.InternalServerError(c, err)
@@ -654,7 +659,7 @@ func LiveQualityHandler(c *fiber.Ctx) error {
 		// Continue with the request - tokens might still work
 	}
 
-	liveResult, err := TV.Live(id)
+	liveResult, err := getLiveResult(id)
 	if err != nil {
 		utils.Log.Println(err)
 		return internalUtils.InternalServerError(c, err)
@@ -965,13 +970,20 @@ func RenderKeyHandler(c *fiber.Ctx) error {
 		}
 	}
 
-	// Copy headers from the Television headers map to the request
-	for key, value := range TV.Headers {
-		c.Request().Header.Set(key, value) // Assuming only one value for each header
+	if tvPlusHeaders, ok := tvPlusKeyHeaders(channel_id); ok {
+		// JioTV+ channels use the TV+ login and the channel's JioTV ID
+		for key, value := range tvPlusHeaders {
+			c.Request().Header.Set(key, value)
+		}
+	} else {
+		// Copy headers from the Television headers map to the request
+		for key, value := range TV.Headers {
+			c.Request().Header.Set(key, value) // Assuming only one value for each header
+		}
+		c.Request().Header.Set("srno", "230203144000")
+		c.Request().Header.Set("ssotoken", TV.SsoToken)
+		c.Request().Header.Set("channelId", channel_id)
 	}
-	c.Request().Header.Set("srno", "230203144000")
-	c.Request().Header.Set("ssotoken", TV.SsoToken)
-	c.Request().Header.Set("channelId", channel_id)
 	// Strip browser-added headers before proxying upstream. The key endpoint
 	// rejects requests carrying an Origin header with 403, which breaks
 	// AES-128 channels for any browser-based player served from a different
@@ -1090,6 +1102,7 @@ func ChannelsHandler(c *fiber.Ctx) error {
 	if err != nil {
 		return ErrorMessageHandler(c, err)
 	}
+	apiResponse.Result = withTVPlusChannels(apiResponse.Result)
 	// hostUrl should be request URL like http://localhost:5001
 	hostURL := strings.ToLower(c.Protocol()) + "://" + c.Hostname()
 
@@ -1279,7 +1292,11 @@ func PlayHandler(c *fiber.Ctx) error {
 	}
 
 	var player_url string
-	if EnableDRM {
+	if isTVPlusChannel(id) {
+		// JioTV+ DASH manifests are refused by the CDN; the HLS stream
+		// (AES-128) plays everywhere.
+		player_url = "/player/" + id + "?q=" + quality
+	} else if EnableDRM {
 		// Sony channels should always use DRM player for consistency
 		// This avoids routing issues and 403 errors from mixed player usage
 		// While SONY_LIST was deprecated and its contents merged with drmList,

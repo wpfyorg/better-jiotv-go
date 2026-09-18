@@ -4,13 +4,17 @@ import (
 	"fmt"
 	"log" // Added import for *log.Logger type
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/jiotv-go/jiotv_go/v3/internal/config"
 	"github.com/jiotv-go/jiotv_go/v3/internal/constants"
+	"github.com/jiotv-go/jiotv_go/v3/internal/constants/tasks"
 	"github.com/jiotv-go/jiotv_go/v3/internal/handlers"
 	"github.com/jiotv-go/jiotv_go/v3/internal/middleware"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/epg"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/scheduler"
+	"github.com/jiotv-go/jiotv_go/v3/pkg/tvplus"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/utils"
 	"github.com/jiotv-go/jiotv_go/v3/web"
 
@@ -56,6 +60,10 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 	// Config, Logger and Store are assumed to be initialized in main.go
 
 	// if config EPG is true or file epg.xml.gz exists
+	if config.Cfg.TVPlus {
+		epg.RegisterSource(handlers.TVPlusEPGSource)
+	}
+
 	if config.Cfg.EPG || utils.FileExists("epg.xml.gz") {
 		go epg.Init()
 	}
@@ -64,10 +72,17 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 	scheduler.Init()
 	defer scheduler.Stop()
 
+	if config.Cfg.TVPlus {
+		scheduler.Add(tasks.TVPlusRefreshTokenTaskID, 30*time.Minute, handlers.RefreshTVPlusTokenTask)
+	}
+
 	engine := html.NewFileSystem(http.FS(web.GetViewFiles()), ".html")
 	if config.Cfg.Debug {
 		engine.Reload(true)
 	}
+	engine.AddFunc("isTVPlus", func(channelID string) bool {
+		return strings.HasPrefix(channelID, tvplus.IDPrefix)
+	})
 
 	app := fiber.New(fiber.Config{
 		Views:             engine,
@@ -108,6 +123,9 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 	app.Post("/login/sendOTP", handlers.LoginSendOTPHandler)
 	app.Post("/login/verifyOTP", handlers.LoginVerifyOTPHandler)
 	app.Get("/logout", handlers.LogoutHandler)
+	app.Post("/tvplus/login/sendOTP", handlers.TVPlusSendOTPHandler)
+	app.Post("/tvplus/login/verifyOTP", handlers.TVPlusVerifyOTPHandler)
+	app.Get("/tvplus/logout", handlers.TVPlusLogoutHandler)
 	app.Get("/live/mpd/:channelID", handlers.LiveManifestMpdHandler)
 	app.Post("/live/key/:channelID", handlers.LiveManifestKeyHandler)
 	app.Get("/live/:id", handlers.LiveHandler)

@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>JioTV Go</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        background-color: black;
+        overflow-y: hidden;
+      }
+
+      /* Unmute button styling */
+      .unmute-overlay {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        z-index: 1000;
+        background: rgba(43, 125, 233, 0.92);
+        color: white;
+        border: none;
+        border-radius: 50%;
+        width: 80px;
+        height: 80px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.3s ease;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      }
+
+      .unmute-overlay:hover {
+        background: rgba(43, 125, 233, 1);
+        transform: translate(-50%, -50%) scale(1.1);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4);
+      }
+
+      .unmute-overlay svg {
+        width: 32px;
+        height: 32px;
+        fill: currentColor;
+      }
+
+      .unmute-overlay.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      /* Increase Shaka Player control icons size */
+      .shaka-video-container .material-icons-round {
+        font-size: 28px !important;
+      }
+    </style>
+    <script src="/static/external/shaka-player.ui.js"></script>
+    <!-- Shaka Player UI compiled library default CSS: -->
+    <link rel="stylesheet" href="/static/external/shaka-player-controls.css" />
+  </head>
+
+  <body>
+    <div data-shaka-player-container>
+      <!-- The data-shaka-player tag will make the UI library use this video element.
+            If no video is provided, the UI will automatically make one inside the container div. -->
+      <video
+        autoplay
+        data-shaka-player
+        id="jiotv_go_player"
+        style="width: 100%; height: 100%"
+      ></video>
+
+      <!-- Unmute button overlay -->
+      <button id="unmute-btn" class="unmute-overlay" title="Click to unmute">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+          <path
+            d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"
+          />
+        </svg>
+      </button>
+    </div>
+    <script>
+      document.addEventListener("shaka-ui-load-failed", () => {
+        const hlsPlayerFallbackUrl = "{{ .hls_player_fallback_url }}";
+        const hlsFallbackUrl = "{{ .hls_fallback_url }}";
+        const targetUrl = hlsPlayerFallbackUrl || hlsFallbackUrl;
+        if (targetUrl) {
+          window.location.replace(targetUrl);
+        }
+      });
+
+      document.addEventListener("shaka-ui-loaded", async () => {
+        const video = document.getElementById("jiotv_go_player");
+        const hlsPlayerFallbackUrl = "{{ .hls_player_fallback_url }}";
+        const hlsFallbackUrl = "{{ .hls_fallback_url }}";
+        const playerMode = "{{ .player_mode }}";  // "hd" or "auto"
+        let hasFallenBack = false;
+        let lastTokenRefreshTime = Date.now();
+        const TOKEN_REFRESH_INTERVAL = 60000; // Refresh every 60 seconds (tokens expire ~90-120s)
+        let segmentFail403Count = 0;
+        const MAX_403_FAILURES = 2;
+
+        const fallbackToHLS = (reason) => {
+          if (hasFallenBack) {
+            return;
+          }
+          // Prefer the HLS player page so the browser renders the stream instead of the raw playlist.
+          const targetUrl = hlsPlayerFallbackUrl || hlsFallbackUrl;
+          if (!targetUrl) {
+            console.error("No HLS fallback URL available");
+            return;
+          }
+          hasFallenBack = true;
+          console.warn("Falling back to HLS:", reason, "URL:", targetUrl);
+          window.location.replace(targetUrl);
+        };
+
+        const ua = navigator.userAgent.toLowerCase();
+        const isWindows = ua.includes("windows");
+
+        const ui = video["ui"];
+        const config = {
+          // Resolution selector in the control bar, not buried in the
+          // three-dot overflow menu.
+          controlPanelElements: [
+            "play_pause",
+            "time_and_duration",
+            "spacer",
+            "mute",
+            "volume",
+            "quality",
+            "fullscreen",
+            "overflow_menu",
+          ],
+          overflowMenuButtons: [
+            "captions",
+            "language",
+            "chapter",
+            "picture_in_picture",
+            "cast",
+            "playback_rate",
+            "recenter_vr",
+            "toggle_stereoscopic",
+            "save_video_frame",
+          ],
+          seekBarColors: {
+            base: "rgba(43, 125, 233, 0.3)",
+            buffered: "rgba(43, 125, 233, 0.5)",
+            played: "rgb(43, 125, 233)",
+          },
+          volumeBarColors: {
+            base: "rgba(43, 125, 233, 0.3)",
+            level: "rgb(43, 125, 233)",
+          },
+        };
+        ui.configure(config);
+
+        const controls = ui.getControls();
+        const player = controls.getPlayer();
+        let playbackStarted = false;
+        let consecutiveErrors = 0;
+
+        const markPlaybackStarted = () => {
+          playbackStarted = true;
+          consecutiveErrors = 0;
+        };
+
+        video.addEventListener("playing", markPlaybackStarted);
+        video.addEventListener("loadeddata", markPlaybackStarted);
+
+        // Default to unmuted playback. If autoplay is blocked, we fallback to muted.
+        video.muted = false;
+
+        // Enhanced error handler with recovery logic
+        player.addEventListener("error", (event) => {
+          const errorCode = event && event.detail && event.detail.code;
+          const errorSeverity = event && event.detail && event.detail.severity;
+          console.error("Shaka player error event", {code: errorCode, severity: errorSeverity, detail: event && event.detail});
+          
+          // Count consecutive errors
+          consecutiveErrors++;
+          
+          // In auto mode, allow more errors before falling back (has fallback safety)
+          // In HD mode, fallback sooner if we have critical errors
+          const fallbackThreshold = playerMode === "auto" ? 5 : 3;
+          
+          // Fallback for fatal DRM/network/content errors - only in HD mode for critical errors
+          // In auto mode, only fallback on actual fatal errors
+          if (playerMode === "hd" && (errorCode === 6001 || errorCode === 1001)) {
+            fallbackToHLS("Shaka player critical error " + errorCode);
+          } else if (playerMode === "auto" && errorCode === 6001) {
+            // In auto mode, only fallback on Widevine errors
+            fallbackToHLS("Widevine DRM error: " + errorCode);
+          } else if (consecutiveErrors > fallbackThreshold) {
+            fallbackToHLS("Too many consecutive errors: " + errorCode);
+          }
+          
+          // For recoverable errors, reset counter on play
+          if (errorSeverity === "recoverable") {
+            console.log("Recoverable error, continuing playback");
+          }
+        });
+
+        const licenseUrl = "{{ .license_url }}";
+        const isDRM = !!licenseUrl;
+
+        if (licenseUrl) {
+          // Fast Widevine-only capability check. shaka.Player.probeSupport()
+          // probes EVERY key system - including PlayReady on Windows, whose
+          // CDM is extremely slow to respond - and can stall the page for
+          // minutes before playback even starts. JioTV streams are Widevine
+          // only, so a single requestMediaKeySystemAccess call is enough.
+          try {
+            await navigator.requestMediaKeySystemAccess("com.widevine.alpha", [
+              {
+                initDataTypes: ["cenc"],
+                videoCapabilities: [
+                  { contentType: 'video/mp4; codecs="avc1.42E01E"' },
+                ],
+              },
+            ]);
+          } catch (e) {
+            fallbackToHLS("Widevine not supported");
+            return;
+          }
+        }
+
+        if (licenseUrl) {
+          player.configure({
+            drm: {
+              servers: {
+                "com.widevine.alpha": licenseUrl,
+              },
+              advanced: {
+                "com.widevine.alpha": {
+                  videoRobustness: "SW_SECURE_CRYPTO",
+                  audioRobustness: "SW_SECURE_CRYPTO",
+                },
+              },
+            },
+          });
+        }
+
+        player.configure({
+          manifest: {
+            dash: {
+              // JioTV live MPDs have no UTCTiming element; point Shaka at the
+              // server clock (/dashtime returns an ISO timestamp and a Date
+              // header) so the live edge is computed from server time instead
+              // of the client clock. A skewed clock makes Shaka fetch far more
+              // segments than needed while it hunts for the live edge.
+              clockSyncUri: "/dashtime",
+            },
+          },
+          streaming: {
+            // Cap retries: each failed segment would otherwise multiply into
+            // several requests with long backoff, which turns a few expired
+            // HDNEA tokens into hundreds of slow segment requests.
+            retryParameters: {
+              maxAttempts: 2,
+              backoffFactor: 2,
+              timeout: 30000,
+            },
+            // JioTV premium streams use very short segments, so a large
+            // buffering goal multiplies the segment requests needed before
+            // playback can start. Keep the DRM buffer lean and the HLS
+            // fallback at the original, more generous values.
+            bufferBehind: isDRM ? 2 : 5,
+            bufferingGoal: isDRM ? 6 : 30,
+            rebufferingGoal: 2,
+          },
+        });
+
+        const RequestType = shaka.net.NetworkingEngine.RequestType;
+        let requestCount = 0;
+
+        // Enhanced request filter with better segment URL handling
+        player
+          .getNetworkingEngine()
+          .registerRequestFilter(function (type, request, context) {
+            // Only modify segment requests to our render.dash endpoint
+            if (
+              type == shaka.net.NetworkingEngine.RequestType.SEGMENT &&
+              request.uris[0].includes("/render.dash")
+            ) {
+              const newUrl = new URL(request.uris[0]);
+              const channelHost = "{{ .channel_host }}";
+              const channelPath = "{{ .channel_path }}";
+              
+              if (
+                channelHost !== "" &&
+                channelPath !== "" &&
+                !newUrl.pathname.includes("/render.dash/host/") &&
+                !newUrl.searchParams.has("host") &&
+                !newUrl.searchParams.has("path")
+              ) {
+                newUrl.searchParams.append("host", channelHost);
+                newUrl.searchParams.append("path", channelPath);
+              }
+              request.uris = [newUrl.toString()];
+              requestCount++;
+              
+              // Log segment requests in debug mode
+              if (requestCount % 50 === 0) {
+                console.log("Segment request count:", requestCount);
+              }
+            }
+          });
+
+        // Response filter to detect and handle 403 errors in segments
+        player
+          .getNetworkingEngine()
+          .registerResponseFilter(function (type, response, context) {
+            if (type == shaka.net.NetworkingEngine.RequestType.SEGMENT) {
+              const status = response.status[0];
+              if (Array.isArray(status) && status.length > 0) {
+                const statusCode = status[0];
+                if (statusCode === 403) {
+                  segmentFail403Count++;
+                  console.warn("403 error on segment request, count:", segmentFail403Count);
+                  
+                  // If in auto mode and we have 403 failures, we can retry by refreshing
+                  // The server-side token refresh should handle this
+                  if (playerMode === "auto" && segmentFail403Count > MAX_403_FAILURES) {
+                    // This will trigger fallback through error handler
+                    throw new shaka.util.Error(
+                      shaka.util.Error.Severity.CRITICAL,
+                      shaka.util.Error.Category.NETWORK,
+                      shaka.util.Error.Code.HTTP_ERROR,
+                      403,
+                      "Too many 403 errors on segments"
+                    );
+                  }
+                }
+              }
+            }
+          });
+
+        try {
+          await player.load("{{ .play_url }}");
+          try {
+            video.muted = false;
+            await video.play();
+          } catch (autoplayError) {
+            // Retry once in muted mode for stricter autoplay policies.
+            console.warn("Autoplay blocked, retrying muted", autoplayError);
+            video.muted = true;
+            try {
+              await video.play();
+            } catch (retryError) {
+              console.warn("Muted autoplay retry failed", retryError);
+            }
+          }
+          console.log("The video has now been loaded!");
+        } catch (e) {
+          console.error("Error loading video", e);
+          fallbackToHLS("player.load failed: " + (e && e.code ? e.code : "unknown"));
+        }
+
+        if (isWindows) {
+          setTimeout(() => {
+            if (!playbackStarted && !video.error) {
+              fallbackToHLS("MPD playback timeout on Windows");
+            }
+          }, 15000);
+        }
+
+        // Unmute button functionality
+        const unmuteBtn = document.getElementById("unmute-btn");
+
+        const updateUnmuteButton = () => {
+          if (video.muted) {
+            unmuteBtn.classList.remove("hidden");
+          } else {
+            unmuteBtn.classList.add("hidden");
+          }
+        };
+
+        unmuteBtn.addEventListener("click", () => {
+          video.muted = false;
+          video.volume = 0.8; // Set to 80% volume
+          updateUnmuteButton();
+        });
+
+        // Listen for mute state changes (e.g., via Shaka UI controls)
+        video.addEventListener("volumechange", updateUnmuteButton);
+
+        // Listen for stalled events (potential network issue)
+        video.addEventListener("stalled", () => {
+          console.warn("Video playback stalled - checking if recovery needed");
+          // In auto mode, give it more time to recover
+          if (playerMode === "auto" && playbackStarted) {
+            console.log("Auto mode: waiting for network recovery...");
+          }
+        });
+        
+        video.addEventListener("playing", () => {
+          segmentFail403Count = 0;  // Reset 403 counter on successful play
+        });
+
+        // Initial state
+        updateUnmuteButton();
+
+        // Rotate to landscape on fullscreen enter
+        video.addEventListener("fullscreenchange", () => {
+          if (document.fullscreenElement) {
+            if (screen.orientation) {
+              screen.orientation.lock("landscape").catch((e) => {
+                if (e.name !== "NotSupportedError") {
+                  console.error(e);
+                }
+              });
+            }
+          } else {
+            if (screen.orientation) {
+              screen.orientation.unlock();
+            }
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

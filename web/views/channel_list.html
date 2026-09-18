@@ -70,6 +70,20 @@
     <span>Hide channels requiring a separate subscription</span>
     <span id="locked-channel-count" class="ml-auto text-xs text-base-content/50"></span>
   </label>
+  <label
+    for="tvplus-only-toggle"
+    class="flex cursor-pointer items-center gap-2.5 px-4 pt-3 text-sm text-base-content/70"
+    style="display: none;"
+  >
+    <input
+      id="tvplus-only-toggle"
+      type="checkbox"
+      class="checkbox checkbox-sm checkbox-primary"
+      onchange="toggleTVPlusOnly(this.checked)"
+    />
+    <span>Show only JioTV+ channels</span>
+    <span id="tvplus-channel-count" class="ml-auto text-xs text-base-content/50"></span>
+  </label>
   <div id="favorite-channels-section" class="px-4 pt-6" style="display: none;">
     <h2 class="section-title mb-3">Favourites</h2>
     <div id="favorite-channels-container" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3 sm:gap-4">
@@ -85,6 +99,7 @@
       data-channel-id="{{$channel.ID}}"
       data-catchup-available="{{if $channel.IsCatchupAvailable}}true{{else}}false{{end}}"
       {{if $channel.RequiresSubscription}}data-requires-subscription="true"{{end}}
+      {{if isTVPlus $channel.ID}}data-tvplus="true"{{end}}
       tabindex="0"
     >
       <div class="flex h-full flex-col items-center justify-center p-3 sm:p-4">
@@ -95,6 +110,9 @@
           class="h-14 w-14 sm:h-16 sm:w-16 rounded-2xl logo-tile ring-1 ring-base-300/60"
         />
         <span class="text-sm sm:text-base font-bold mt-2.5 text-center leading-snug line-clamp-2">{{$channel.Name}}</span>
+        {{if isTVPlus $channel.ID}}
+        <span class="badge badge-secondary badge-sm mt-1.5 text-[0.65rem]" title="From JioTV+">TV+</span>
+        {{end}}
         {{if $channel.RequiresSubscription}}
         <span
           class="badge badge-outline badge-sm mt-1.5 gap-1 text-[0.65rem] opacity-70"

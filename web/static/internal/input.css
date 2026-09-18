@@ -191,6 +191,10 @@ a.card[data-channel-id]:focus-visible {
   display: none !important;
 }
 
+.tvplus-only .card:not([data-tvplus="true"]) {
+  display: none !important;
+}
+
 /* --- Accessibility -------------------------------------------------------- */
 
 @media (prefers-reduced-motion: reduce) {

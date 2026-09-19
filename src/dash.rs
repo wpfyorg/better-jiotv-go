@@ -91,7 +91,7 @@ fn cdn_host_and_dir(url_str: &str) -> Option<(String, String)> {
     Some((host, dir))
 }
 
-async fn get_drm_mpd(state: &AppState, channel_id: &str, quality: &str) -> anyhow::Result<DrmMpdOutput> {
+pub(crate) async fn get_drm_mpd(state: &AppState, channel_id: &str, quality: &str) -> anyhow::Result<DrmMpdOutput> {
     let cache_key = format!("{channel_id}_{quality}");
     if let Some(cached) = state.dash_state.get_cached(&cache_key) {
         return Ok(cached);

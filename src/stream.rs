@@ -105,7 +105,7 @@ pub fn strip_hdnea_from_url(u: &str) -> String {
     }
 }
 
-fn to_absolute_stream_url(stream_url: &str, base_from_live: Option<&str>) -> String {
+pub(crate) fn to_absolute_stream_url(stream_url: &str, base_from_live: Option<&str>) -> String {
     if stream_url.is_empty() {
         return String::new();
     }
@@ -125,7 +125,7 @@ fn to_absolute_stream_url(stream_url: &str, base_from_live: Option<&str>) -> Str
     format!("{base}{path}")
 }
 
-fn absolute_base_from_live(live: &LiveUrlOutput) -> Option<String> {
+pub(crate) fn absolute_base_from_live(live: &LiveUrlOutput) -> Option<String> {
     let candidates = [
         &live.bitrates.auto,
         &live.bitrates.high,

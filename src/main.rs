@@ -372,8 +372,11 @@ async fn login_otp(store: Arc<store::Store>) -> anyhow::Result<()> {
     std::io::stdin().read_line(&mut otp)?;
     let otp = otp.trim();
 
-    let creds = client.verify_otp(&number, otp).await?;
-    login::save(&store, &creds)?;
+    let device_id = device_id(&store)?;
+    let Some(creds) = client.verify_otp(&number, otp, &device_id).await? else {
+        anyhow::bail!("the OTP is wrong or has expired");
+    };
+    login::save(&store, &creds, login::TOUCH_ALL)?;
     println!("Login successful");
     Ok(())
 }

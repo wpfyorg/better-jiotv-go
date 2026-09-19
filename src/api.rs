@@ -223,6 +223,43 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
     Json(json!({"channels": out})).into_response()
 }
 
+#[derive(Deserialize)]
+pub struct JioTvOtpBody {
+    number: String,
+    #[serde(default)]
+    otp: String,
+}
+
+/// `POST /login/sendOTP`: sends a JioTV login OTP. Mirrors
+/// `LoginSendOTPHandler`.
+pub async fn jiotv_send_otp(State(state): State<SharedState>, Json(body): Json<JioTvOtpBody>) -> Response {
+    if body.number.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "Mobile Number is required");
+    }
+    match crate::login::LoginClient::new(state.http.clone()).send_otp(&body.number).await {
+        Ok(sent) => Json(json!({"status": sent})).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not send the OTP: {e}")),
+    }
+}
+
+/// `POST /login/verifyOTP`: completes the JioTV login and loads it. Mirrors
+/// `LoginVerifyOTPHandler`.
+pub async fn jiotv_verify_otp(State(state): State<SharedState>, Json(body): Json<JioTvOtpBody>) -> Response {
+    if body.number.is_empty() || body.otp.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "Mobile Number and OTP are required");
+    }
+    let creds = match crate::login::LoginClient::new(state.http.clone()).verify_otp(&body.number, &body.otp, &state.tv.device_id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return Json(json!({"status": "failed", "message": "Invalid OTP"})).into_response(),
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not verify the OTP: {e}")),
+    };
+    if crate::login::save(&state.store, &creds, crate::login::TOUCH_ALL).is_err() {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot save the login");
+    }
+    state.tv.set_credentials(creds);
+    Json(json!({"status": "success"})).into_response()
+}
+
 pub async fn jiotv_logout(State(state): State<SharedState>) -> Response {
     if state.config.disable_logout {
         return err(StatusCode::FORBIDDEN, "logout is disabled");

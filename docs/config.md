@@ -68,9 +68,9 @@ When enabled, the web interface shows a "Connect JioTV+" button. JioTV+ has its 
 
 JioTV+ channels get IDs starting with `tvp_` and appear in the channel list, `playlist.m3u` and the EPG. Channels that JioTV already carries are not duplicated. The login uses one JioTV+ device slot on the account.
 
-Without a JioTV login, JioTV channels that JioTV+ also carries (about 1000) play through JioTV+. With a JioTV login, they play through JioTV as before.
+Without a JioTV login, JioTV channels that JioTV+ also carries (about 1000) play through JioTV+. With a JioTV login, they play through JioTV as before. Without a JioTV login, `playlist.m3u` leaves out the JioTV channels that JioTV+ does not carry, since they cannot play.
 
-JioTV+ streams are Widevine DASH, like JioTV's DRM channels: the web player falls back to HLS where Widevine is missing (for example Safari), and `playlist.m3u` lists them with `KODIPROP` license lines. Set `drm` to `false` to get HLS everywhere; a few JioTV+ channels have no working HLS stream.
+JioTV+ streams are Widevine DASH, like JioTV's DRM channels: the web player falls back to HLS where Widevine is missing (for example Safari), and `playlist.m3u` lists them with `KODIPROP` license lines. Some channels only have HLS and a few only DASH. JioTV Go remembers which kind each channel has once it has been played and lists it that way; until then a wrong guess redirects to the other kind. Set `drm` to `false` to get HLS everywhere; a few JioTV+ channels have no working HLS stream.
 
 With JioTV+ connected, on-demand titles from JioCinema, MX Player and ZEE5 are available too. Other providers in the JioTV+ catalogue only open their own apps, so they are left out. The web interface has an "On demand" tab (browse, search, shows and episodes). IPTV players get them from `/k/<key>/vod.m3u`: JioCinema and ZEE5 as Widevine DASH with `KODIPROP` license lines, MX Player as HLS. MX Player streams are HEVC (H.265). The playlist is rebuilt from the catalogue every 6 hours.
 

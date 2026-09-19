@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"github.com/jiotv-go/jiotv_go/v3/internal/config"
 	internalUtils "github.com/jiotv-go/jiotv_go/v3/internal/utils"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/epg"
+	"github.com/jiotv-go/jiotv_go/v3/pkg/store"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/television"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/tvplus"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/utils"
@@ -28,6 +30,8 @@ const (
 	// tokens last two minutes, and DASH players reload the manifest every
 	// few seconds.
 	tvPlusLiveTTL = 60 * time.Second
+	// tvPlusDASHKey stores which TV+ channels have a DASH stream.
+	tvPlusDASHKey = "tvplus_dash"
 )
 
 var (
@@ -46,6 +50,9 @@ type tvPlusState struct {
 	mirrors   map[string]string // JioTV channel ID -> content ID of the same channel on TV+
 	cdnHosts  map[string]struct{}
 	live      map[string]tvPlusLiveEntry
+	// dash records, per content ID, whether the last playback response had a
+	// DASH stream. Some channels only have HLS, others only DASH.
+	dash map[string]bool
 
 	// pending holds an unfinished OTP login.
 	pending struct {
@@ -68,6 +75,7 @@ func newTVPlusState() *tvPlusState {
 		mirrors:  map[string]string{},
 		cdnHosts: map[string]struct{}{},
 		live:     map[string]tvPlusLiveEntry{},
+		dash:     map[string]bool{},
 	}
 }
 
@@ -96,6 +104,12 @@ func InitTVPlus() {
 	}
 	tvPlus.client.SetCredentials(creds)
 	tvPlus.live = map[string]tvPlusLiveEntry{}
+	if raw, err := store.Get(tvPlusDASHKey); err == nil && raw != "" {
+		dash := map[string]bool{}
+		if json.Unmarshal([]byte(raw), &dash) == nil {
+			tvPlus.dash = dash
+		}
+	}
 	if creds != nil {
 		utils.Log.Println("JioTV+ login loaded")
 	}
@@ -198,7 +212,17 @@ func tvPlusLive(contentID string) (*television.LiveURLOutput, error) {
 			}
 		}
 		tvPlus.live[contentID] = tvPlusLiveEntry{result: result, fetchedAt: time.Now()}
+		var dash []byte
+		if had, known := tvPlus.dash[contentID]; !known || had != hasDASH(result) {
+			tvPlus.dash[contentID] = hasDASH(result)
+			dash, _ = json.Marshal(tvPlus.dash)
+		}
 		tvPlus.mu.Unlock()
+		if dash != nil {
+			if err := store.Set(tvPlusDASHKey, string(dash)); err != nil {
+				utils.Log.Printf("JioTV+: cannot save stream types: %v", err)
+			}
+		}
 		return result, nil
 	})
 	if err != nil {
@@ -561,15 +585,49 @@ func tvPlusWebEPG(c *fiber.Ctx, channelID string) error {
 	return c.JSON(fiber.Map{"epg": epgEntries})
 }
 
-// isDRMChannel reports whether a channel is served as Widevine DASH. TV+
-// channels are, because some of their HLS streams are missing.
+// hasDASH reports whether a playback response has a DASH stream.
+func hasDASH(r *television.LiveURLOutput) bool {
+	b := r.Mpd.ResolvedBitrates()
+	return b.Auto != "" || b.High != "" || b.Medium != "" || b.Low != "" || r.Mpd.Result != ""
+}
+
+// isDRMChannel reports whether a channel is served as Widevine DASH.
+//
+// A channel played through TV+ uses DASH when its last playback response had
+// a DASH stream. Before it has been played, TV+-only channels are assumed to
+// have DASH and JioTV channels follow JioTV's DRM list: most clear JioTV
+// channels have no DASH stream on TV+.
 func isDRMChannel(channelID string) bool {
 	if !EnableDRM {
 		return false
 	}
-	if utils.ContainsString(channelID, drmList) {
+	contentID, viaTVPlus := tvPlusRoute(channelID)
+	if !viaTVPlus {
+		return utils.ContainsString(channelID, drmList)
+	}
+	tvPlus.mu.RLock()
+	dash, known := tvPlus.dash[contentID]
+	tvPlus.mu.RUnlock()
+	if known {
+		return dash
+	}
+	return isTVPlusChannel(channelID) || utils.ContainsString(channelID, drmList)
+}
+
+// channelPlayable is false for JioTV channels that need a JioTV login when
+// there is none and TV+, which stands in for it, does not carry them.
+func channelPlayable(channelID string) bool {
+	if jiotvLoggedIn() || !tvPlusConnected() || isCustomChannel(channelID) {
 		return true
 	}
-	_, viaTVPlus := tvPlusRoute(channelID)
-	return viaTVPlus
+	_, ok := tvPlusRoute(channelID)
+	return ok
+}
+
+// liveHLSPath is the IPTV HLS route of a channel.
+func liveHLSPath(channelID, quality string) string {
+	if quality == "" || quality == "auto" {
+		return "/live/" + channelID + ".m3u8"
+	}
+	return "/live/" + quality + "/" + channelID + ".m3u8"
 }

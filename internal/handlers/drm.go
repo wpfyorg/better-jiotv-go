@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/proxy"
+	"github.com/jiotv-go/jiotv_go/v3/internal/access"
 	"github.com/jiotv-go/jiotv_go/v3/internal/constants/headers"
 	internalUtils "github.com/jiotv-go/jiotv_go/v3/internal/utils"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/secureurl"
@@ -1024,7 +1025,8 @@ func LiveManifestMpdHandler(c *fiber.Ctx) error {
 		quality = "auto"
 	}
 
-	if _, viaTVPlus := tvPlusRoute(channelID); !viaTVPlus {
+	_, viaTVPlus := tvPlusRoute(channelID)
+	if !viaTVPlus {
 		EnsureFreshCredentials()
 	}
 
@@ -1035,6 +1037,11 @@ func LiveManifestMpdHandler(c *fiber.Ctx) error {
 	}
 
 	if drmMpdOutput.PlayUrl == "" {
+		// Some TV+ channels only have HLS. The playlist lists them as HLS
+		// once they have been played; until then, send the player there.
+		if viaTVPlus {
+			return c.Redirect(access.Prefix(c)+liveHLSPath(channelID, quality), fiber.StatusFound)
+		}
 		return internalUtils.NotFoundError(c, "No MPD URL found for channel "+channelID)
 	}
 

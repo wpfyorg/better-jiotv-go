@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/jiotv-go/jiotv_go/v3/internal/config"
@@ -78,7 +79,7 @@ func setupTVPlus(t *testing.T, loggedIn bool) map[string]http.Header {
 	previousLog, previousEnabled, previousState := pkgUtils.Log, config.Cfg.TVPlus, tvPlus
 	pkgUtils.Log = log.New(io.Discard, "", 0)
 	config.Cfg.TVPlus = true
-	tvPlus = &tvPlusState{extIDs: map[string]string{}}
+	tvPlus = newTVPlusState()
 	t.Cleanup(func() {
 		pkgUtils.Log, config.Cfg.TVPlus, tvPlus = previousLog, previousEnabled, previousState
 	})
@@ -121,7 +122,7 @@ func TestGetLiveResultTVPlusStates(t *testing.T) {
 	previousEnabled, previousState := config.Cfg.TVPlus, tvPlus
 	t.Cleanup(func() { config.Cfg.TVPlus, tvPlus = previousEnabled, previousState })
 
-	tvPlus = &tvPlusState{extIDs: map[string]string{}}
+	tvPlus = newTVPlusState()
 	if _, err := getLiveResult("tvp_302084"); !errors.Is(err, errTVPlusDisabled) {
 		t.Errorf("disabled: err = %v", err)
 	}
@@ -158,7 +159,7 @@ func TestWithTVPlusChannels(t *testing.T) {
 	jiotv := []television.Channel{{ID: "175", Name: "Aastha"}, {ID: "143", Name: "CNBC TV18 Prime"}}
 
 	previousEnabled, previousState := config.Cfg.TVPlus, tvPlus
-	tvPlus = &tvPlusState{extIDs: map[string]string{}}
+	tvPlus = newTVPlusState()
 	if got := withTVPlusChannels(jiotv); len(got) != 2 {
 		t.Errorf("TV+ disabled: got %d channels", len(got))
 	}
@@ -259,7 +260,7 @@ func TestTVPlusWebEPG(t *testing.T) {
 	}
 }
 
-func TestPlaylistServesTVPlusChannelsAsHLS(t *testing.T) {
+func TestPlaylistServesTVPlusChannelsAsDASH(t *testing.T) {
 	previousDRM := EnableDRM
 	EnableDRM = true
 	t.Cleanup(func() { EnableDRM = previousDRM })
@@ -267,25 +268,38 @@ func TestPlaylistServesTVPlusChannelsAsHLS(t *testing.T) {
 	m3u := GenerateM3UPlaylist([]television.Channel{
 		{ID: "tvp_302084", Name: "Star Plus", LogoURL: "https://img.media.jio.com/x.jpg", Category: 5, Language: 1},
 	}, "http://host", "", "", "", "", "")
-	if !strings.Contains(m3u, "http://host/live/tvp_302084.m3u8") {
+	if !strings.Contains(m3u, "http://host/live/mpd/tvp_302084") ||
+		!strings.Contains(m3u, "license_key=http://host/live/key/tvp_302084") {
 		t.Errorf("playlist:\n%s", m3u)
-	}
-	if strings.Contains(m3u, "KODIPROP") {
-		t.Errorf("TV+ channel emitted as DRM:\n%s", m3u)
 	}
 	if !strings.Contains(m3u, `tvg-logo="https://img.media.jio.com/x.jpg"`) {
 		t.Errorf("logo URL rewritten:\n%s", m3u)
 	}
+
+	EnableDRM = false
+	m3u = GenerateM3UPlaylist([]television.Channel{{ID: "tvp_302084", Name: "Star Plus"}}, "http://host", "", "", "", "", "")
+	if !strings.Contains(m3u, "http://host/live/tvp_302084.m3u8") || strings.Contains(m3u, "KODIPROP") {
+		t.Errorf("DRM off, playlist:\n%s", m3u)
+	}
 }
 
-func TestTVPlusDASHRoutesServeHLS(t *testing.T) {
-	app := fiber.New()
-	app.Get("/live/mpd/:channelID", LiveManifestMpdHandler)
-	resp, err := app.Test(httptest.NewRequest(http.MethodGet, "/live/mpd/tvp_302084?q=high", nil), -1)
-	if err != nil {
-		t.Fatal(err)
+func TestTVPlusRoute(t *testing.T) {
+	setupTVPlus(t, true)
+	previousTV := TV
+	TV = nil
+	t.Cleanup(func() { TV = previousTV })
+	tvPlus.catalogue, tvPlus.fetchedAt = []tvplus.LiveChannel{{ContentID: "300396", ExtID: "175"}}, time.Now()
+	tvPlus.mirrors = map[string]string{"175": "300396"}
+
+	for id, want := range map[string]string{"tvp_302084": "302084", "175": "300396", "143": ""} {
+		got, ok := tvPlusRoute(id)
+		if got != want || ok != (want != "") {
+			t.Errorf("tvPlusRoute(%q) = %q, %v", id, got, ok)
+		}
 	}
-	if resp.StatusCode != fiber.StatusFound || resp.Header.Get("Location") != "/live/high/tvp_302084.m3u8" {
-		t.Errorf("status %d, location %q", resp.StatusCode, resp.Header.Get("Location"))
+
+	TV = &television.Television{AccessToken: "jiotv"}
+	if _, ok := tvPlusRoute("175"); ok {
+		t.Error("JioTV channel routed to TV+ while JioTV is logged in")
 	}
 }

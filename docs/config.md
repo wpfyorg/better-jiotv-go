@@ -68,6 +68,10 @@ When enabled, the web interface shows a "Connect JioTV+" button. JioTV+ has its 
 
 JioTV+ channels get IDs starting with `tvp_` and appear in the channel list, `playlist.m3u` and the EPG. Channels that JioTV already carries are not duplicated. The login uses one JioTV+ device slot on the account.
 
+Without a JioTV login, JioTV channels that JioTV+ also carries (about 1000) play through JioTV+. With a JioTV login, they play through JioTV as before.
+
+JioTV+ streams are Widevine DASH, like JioTV's DRM channels: the web player falls back to HLS where Widevine is missing (for example Safari), and `playlist.m3u` lists them with `KODIPROP` license lines. Set `drm` to `false` to get HLS everywhere; a few JioTV+ channels have no working HLS stream.
+
 ### Title:
 
 | Purpose | Config Value | Environment Variable | Default |

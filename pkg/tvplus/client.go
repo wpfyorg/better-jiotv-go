@@ -35,6 +35,11 @@ const (
 	versionCode  = "6008"
 	userAgent    = "ktor-client"
 
+	// PlayerUserAgent is the TV+ app's media player User-Agent. The TV+ CDN
+	// refuses DASH manifests and segments unless the User-Agent starts with
+	// "JioTV.Plus/".
+	PlayerUserAgent = "JioTV.Plus/6.0.8 (Linux;Android 12) AndroidXMedia3/1.4.1"
+
 	// configTTL is how long a fetched remote config is reused.
 	configTTL = 24 * time.Hour
 )

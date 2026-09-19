@@ -16,6 +16,7 @@ import (
 	internalUtils "github.com/jiotv-go/jiotv_go/v3/internal/utils"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/secureurl"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/television"
+	"github.com/jiotv-go/jiotv_go/v3/pkg/tvplus"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/utils"
 	"github.com/valyala/fasthttp"
 )
@@ -465,15 +466,11 @@ func LiveMpdHandler(c *fiber.Ctx) error {
 		})
 	}
 
-	if isTVPlusChannel(channelID) {
-		// JioTV+ DASH manifests are refused by the CDN; play the HLS stream.
-		return c.Render("views/player_hls", fiber.Map{
-			"play_url": utils.BuildHLSPlayURL(quality, channelID),
-		})
-	}
-
 	// Ensure tokens are fresh before requesting MPD
-	EnsureFreshCredentials()
+	_, viaTVPlus := tvPlusRoute(channelID)
+	if !viaTVPlus {
+		EnsureFreshCredentials()
+	}
 
 	drmMpdOutput, err := getDrmMpd(channelID, quality)
 
@@ -482,7 +479,7 @@ func LiveMpdHandler(c *fiber.Ctx) error {
 		utils.Log.Printf("First attempt to get DRM MPD failed: %v. Attempting recovery with forced credentials refresh...", err)
 
 		// Force refresh credentials (bypasses 30-second interval for error recovery)
-		if ForceRefreshCredentials() {
+		if !viaTVPlus && ForceRefreshCredentials() {
 			// Retry getDrmMpd with fresh tokens
 			drmMpdOutput, err = getDrmMpd(channelID, quality)
 			if err == nil {
@@ -552,6 +549,31 @@ func DRMKeyHandler(c *fiber.Ctx) error {
 		return internalUtils.ForbiddenError(c, err)
 	}
 
+	decoded_url, err := internalUtils.DecryptURLParam("auth", auth)
+	if err != nil {
+		utils.Log.Panicln(err)
+		return internalUtils.ForbiddenError(c, err)
+	}
+
+	if tvPlusHeaders, ok := tvPlusLicenseHeaders(channel_id); ok {
+		// JioTV+ licenses are authorised by the token in the license URL;
+		// send the headers the JioTV+ app sends.
+		for key, value := range tvPlusHeaders {
+			c.Request().Header.Set(key, value)
+		}
+		c.Request().Header.Set("User-Agent", tvplus.PlayerUserAgent)
+		c.Request().Header.Set("Content-Type", "application/octet-stream")
+		c.Request().Header.Del("Accept")
+		c.Request().Header.Del("Origin")
+		c.Request().Header.Del("Referer")
+		c.Request().Header.Del("Cookie")
+		if err := proxy.Do(c, decoded_url, TV.Client); err != nil {
+			return err
+		}
+		c.Response().Header.Del(fiber.HeaderServer)
+		return nil
+	}
+
 	// Make a HEAD request to the decoded_channel to get the cookies
 	client := utils.GetRequestClient()
 	req := fasthttp.AcquireRequest()
@@ -572,29 +594,6 @@ func DRMKeyHandler(c *fiber.Ctx) error {
 	setCookieHeaders := resp.Header.PeekAll("Set-Cookie")
 	if cookieHeader := buildCookieHeaderFromSetCookieHeaders(setCookieHeaders); cookieHeader != "" {
 		c.Request().Header.Set("Cookie", cookieHeader)
-	}
-
-	decoded_url, err := internalUtils.DecryptURLParam("auth", auth)
-	if err != nil {
-		utils.Log.Panicln(err)
-		return internalUtils.ForbiddenError(c, err)
-	}
-
-	if tvPlusHeaders, ok := tvPlusLicenseHeaders(channel_id); ok {
-		// JioTV+ licenses are authorised by the token in the license URL;
-		// send the headers the JioTV+ app sends.
-		for key, value := range tvPlusHeaders {
-			c.Request().Header.Set(key, value)
-		}
-		c.Request().Header.Set("User-Agent", PLAYER_USER_AGENT)
-		c.Request().Header.Set("Content-Type", "application/octet-stream")
-		c.Request().Header.Del("Accept")
-		c.Request().Header.Del("Origin")
-		if err := proxy.Do(c, decoded_url, TV.Client); err != nil {
-			return err
-		}
-		c.Response().Header.Del(fiber.HeaderServer)
-		return nil
 	}
 
 	// Add headers to the request
@@ -633,7 +632,10 @@ func DRMKeyHandler(c *fiber.Ctx) error {
 // MpdHandler handles BPK proxy routes /bpk/:channelID
 func MpdHandler(c *fiber.Ctx) error {
 	// CRITICAL: Refresh credentials before proxying MPD
-	EnsureFreshCredentials()
+	_, viaTVPlus := tvPlusRoute(c.Query("channel_id"))
+	if !viaTVPlus {
+		EnsureFreshCredentials()
+	}
 
 	// Capture the local server URL before proxying: proxy.Do rewrites the
 	// request URI to the upstream CDN, after which c.Hostname()/c.Protocol()
@@ -704,12 +706,11 @@ func MpdHandler(c *fiber.Ctx) error {
 	// proxyQuery := parsedUrl.RawQuery
 
 	c.Request().Header.Set("Host", proxyHost)
-	c.Request().Header.Set("User-Agent", PLAYER_USER_AGENT)
 
 	// Request path with query params
 	requestUrl := decryptedUrl
 
-	c.Request().Header.Set("User-Agent", PLAYER_USER_AGENT)
+	c.Request().Header.Set("User-Agent", playerUserAgentFor(proxyHost))
 	// remove Accept-Encoding header
 	c.Request().Header.Del("Accept-Encoding")
 
@@ -760,7 +761,9 @@ func MpdHandler(c *fiber.Ctx) error {
 				utils.Log.Printf("[DEBUG] MpdHandler retry still %d - forcing credential refresh", retryStatus)
 			}
 			c.Response().Reset()
-			ForceRefreshCredentials()
+			if !viaTVPlus {
+				ForceRefreshCredentials()
+			}
 			if err := proxy.Do(c, strippedUrl, TV.Client); err != nil {
 				if os.Getenv("JIOTV_DEBUG") == "true" {
 					utils.Log.Printf("[DEBUG] MpdHandler forced-refresh retry failed: %v", err)
@@ -937,7 +940,7 @@ func DashHandler(c *fiber.Ctx) error {
 	proxyPath = strings.TrimSuffix(proxyPath, "/")
 	proxyUrl := fmt.Sprintf("https://%s%s%s", proxyHost, proxyPath, requestUri)
 
-	c.Request().Header.Set("User-Agent", PLAYER_USER_AGENT)
+	c.Request().Header.Set("User-Agent", playerUserAgentFor(proxyHost))
 
 	// Set HDNEA cookie if we have it
 	if hdneaToken != "" {
@@ -945,7 +948,9 @@ func DashHandler(c *fiber.Ctx) error {
 	}
 
 	// CRITICAL: Refresh credentials before proxying segments
-	EnsureFreshCredentials()
+	if !isTVPlusCDNHost(proxyHost) {
+		EnsureFreshCredentials()
+	}
 
 	// AGGRESSIVE REFRESH: Make initial proxy request
 	if err := proxy.Do(c, proxyUrl, TV.Client); err != nil {
@@ -985,7 +990,9 @@ func DashHandler(c *fiber.Ctx) error {
 				utils.Log.Printf("[DEBUG] DashHandler retry still %d - forcing credential refresh", retryStatus)
 			}
 			c.Response().Reset()
-			ForceRefreshCredentials()
+			if !isTVPlusCDNHost(proxyHost) {
+				ForceRefreshCredentials()
+			}
 			if err := proxy.Do(c, proxyUrl, TV.Client); err != nil {
 				if os.Getenv("JIOTV_DEBUG") == "true" {
 					utils.Log.Printf("[DEBUG] DashHandler forced-refresh retry failed: %v", err)
@@ -1016,12 +1023,9 @@ func LiveManifestMpdHandler(c *fiber.Ctx) error {
 		quality = "auto"
 	}
 
-	if isTVPlusChannel(channelID) {
-		// JioTV+ DASH manifests are refused by the CDN; serve the HLS stream.
-		return c.Redirect(utils.BuildHLSPlayURL(quality, channelID), fiber.StatusFound)
+	if _, viaTVPlus := tvPlusRoute(channelID); !viaTVPlus {
+		EnsureFreshCredentials()
 	}
-
-	EnsureFreshCredentials()
 
 	drmMpdOutput, err := getDrmMpd(channelID, quality)
 	if err != nil {

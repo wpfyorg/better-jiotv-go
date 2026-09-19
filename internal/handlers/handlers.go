@@ -616,6 +616,10 @@ func LiveHandler(c *fiber.Ctx) error {
 
 	liveURL := selectBestLiveHLSURL(liveResult, "auto")
 	if liveURL == "" {
+		if _, viaTVPlus := tvPlusRoute(id); viaTVPlus && hasDASH(liveResult) {
+			// A TV+ channel with only DASH.
+			return c.Redirect(access.Prefix(c)+"/live/mpd/"+id+"?q="+"auto", fiber.StatusFound)
+		}
 		error_message := "No stream found for channel id: " + id + "Status: " + liveResult.Message
 		utils.Log.Println(error_message)
 		utils.Log.Println(liveResult)
@@ -674,6 +678,10 @@ func LiveQualityHandler(c *fiber.Ctx) error {
 	// select quality level based on query parameter and API fallbacks.
 	liveURL := selectBestLiveHLSURL(liveResult, quality)
 	if liveURL == "" {
+		if _, viaTVPlus := tvPlusRoute(id); viaTVPlus && hasDASH(liveResult) {
+			// A TV+ channel with only DASH.
+			return c.Redirect(access.Prefix(c)+"/live/mpd/"+id+"?q="+quality, fiber.StatusFound)
+		}
 		error_message := "No stream found for channel id: " + id + "Status: " + liveResult.Message
 		utils.Log.Println(error_message)
 		utils.Log.Println(liveResult)
@@ -1382,6 +1390,10 @@ func GenerateM3UPlaylist(channels []television.Channel, hostURL, quality, splitC
 	logoURL := hostURL + "/jtvimage"
 
 	for _, channel := range channels {
+		if !channelPlayable(channel.ID) {
+			continue
+		}
+
 		if languages != "" && !utils.ContainsString(television.LanguageMap[channel.Language], strings.Split(languages, ",")) {
 			continue
 		}

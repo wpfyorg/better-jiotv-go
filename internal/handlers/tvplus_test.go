@@ -303,3 +303,50 @@ func TestTVPlusRoute(t *testing.T) {
 		t.Error("JioTV channel routed to TV+ while JioTV is logged in")
 	}
 }
+
+func TestTVPlusStreamType(t *testing.T) {
+	setupTVPlus(t, true)
+	previousTV, previousDRM, previousList := TV, EnableDRM, drmList
+	TV, EnableDRM, drmList = nil, true, []string{"175"}
+	t.Cleanup(func() { TV, EnableDRM, drmList = previousTV, previousDRM, previousList })
+	tvPlus.catalogue, tvPlus.fetchedAt = []tvplus.LiveChannel{{ContentID: "300396", ExtID: "175"}}, time.Now()
+	tvPlus.mirrors = map[string]string{"175": "300396", "182": "300182"}
+
+	// Not played yet: TV+ channels and JioTV DRM channels are DASH.
+	for id, want := range map[string]bool{"tvp_302084": true, "175": true, "182": false, "143": false} {
+		if got := isDRMChannel(id); got != want {
+			t.Errorf("isDRMChannel(%q) = %v before playback", id, got)
+		}
+	}
+
+	if _, err := getLiveResult("tvp_302084"); err != nil {
+		t.Fatal(err)
+	}
+	if dash, known := tvPlus.dash["302084"]; !known || !dash {
+		t.Errorf("stream type not recorded: %v %v", dash, known)
+	}
+	tvPlus.dash["300182"], tvPlus.dash["300396"] = true, false
+	if !isDRMChannel("182") || isDRMChannel("175") {
+		t.Error("recorded stream type ignored")
+	}
+}
+
+func TestPlaylistHidesChannelsOnlyJioTVPlays(t *testing.T) {
+	setupTVPlus(t, true)
+	previousTV := TV
+	TV = nil
+	t.Cleanup(func() { TV = previousTV })
+	tvPlus.catalogue, tvPlus.fetchedAt = []tvplus.LiveChannel{{ContentID: "300396", ExtID: "175"}}, time.Now()
+	tvPlus.mirrors = map[string]string{"175": "300396"}
+
+	channels := []television.Channel{{ID: "175", Name: "Mirrored"}, {ID: "154", Name: "JioTV only"}, {ID: "tvp_302084", Name: "TV+ only"}}
+	m3u := GenerateM3UPlaylist(channels, "http://host", "", "", "", "", "")
+	if !strings.Contains(m3u, "Mirrored") || !strings.Contains(m3u, "TV+ only") || strings.Contains(m3u, "JioTV only") {
+		t.Errorf("without JioTV login, playlist:\n%s", m3u)
+	}
+
+	TV = &television.Television{AccessToken: "jiotv"}
+	if m3u := GenerateM3UPlaylist(channels, "http://host", "", "", "", "", ""); !strings.Contains(m3u, "JioTV only") {
+		t.Errorf("with JioTV login, playlist:\n%s", m3u)
+	}
+}

@@ -623,6 +623,7 @@ mod tests {
         let secure = crate::secureurl::SecureUrl::new(false);
         let state = AppState {
             config: crate::config::Config::default(),
+            path_prefix: String::new(),
             access: std::sync::Arc::new(crate::access::Access::new(store.clone())),
             store,
             tv: std::sync::Arc::new(crate::television::Television::new(reqwest::Client::new())),

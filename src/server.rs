@@ -32,6 +32,8 @@ fn content_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/live/mpd/:channelId", get(crate::dash::live_mpd_handler))
         .route("/live/key/:channelId", axum::routing::any(crate::dash::live_key_handler))
         .route("/catchup/stream/:id", get(crate::catchup::catchup_stream_handler))
+        .route("/epg.xml.gz", get(crate::epg::epg_handler))
+        .route("/epg/:channelId/:offset", get(crate::epg::web_epg_handler))
         .with_state(state)
 }
 
@@ -72,7 +74,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .nest("/k/:key", content_routes(state.clone()))
         .merge(content_routes(state.clone()))
         .merge(api_routes(state.clone()))
-        .merge(open_stream_routes(state.clone()));
+        .merge(open_stream_routes(state.clone()))
+        .merge(open_routes(state.clone()));
 
     #[cfg(feature = "full")]
     {
@@ -167,6 +170,12 @@ async fn jtvimage(axum::extract::Path(p): axum::extract::Path<FileParam>, State(
     proxy_get(&state.http, &url).await
 }
 
+fn open_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/jtvposter/:date/:file", get(crate::epg::poster_handler))
+        .with_state(state)
+}
+
 async fn proxy_get(client: &reqwest::Client, url: &str) -> Response {
     match client.get(url).send().await {
         Ok(resp) => {
@@ -248,6 +257,7 @@ mod tests {
         std::mem::forget(dir);
         Arc::new(AppState {
             config: Config::default(),
+            path_prefix: String::new(),
             access: Arc::new(Access::new(store.clone())),
             store,
             tv: Arc::new(Television::new(reqwest::Client::new())),

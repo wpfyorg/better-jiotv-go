@@ -11,6 +11,8 @@ pub enum Command {
     AdminPassword,
     KeyShow,
     KeyRotate,
+    EpgGenerate,
+    EpgDelete,
     Help,
 }
 
@@ -101,6 +103,11 @@ pub fn parse() -> anyhow::Result<Args> {
                 Some("rotate") => Command::KeyRotate,
                 Some("show") | None => Command::KeyShow,
                 Some(other) => anyhow::bail!("unknown key subcommand: {other}"),
+            },
+            Some("epg") => match positionals.get(1).map(String::as_str) {
+                Some("generate") | Some("gen") | Some("g") => Command::EpgGenerate,
+                Some("delete") | Some("del") | Some("d") => Command::EpgDelete,
+                other => anyhow::bail!("usage: jiotv epg generate|delete (got {other:?})"),
             },
             Some(other) => anyhow::bail!("unknown command: {other}"),
         });

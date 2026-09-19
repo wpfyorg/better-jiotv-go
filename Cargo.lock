@@ -836,6 +836,7 @@ dependencies = [
  "axum",
  "base64",
  "ctr",
+ "flate2",
  "hex",
  "hmac",
  "http-body-util",

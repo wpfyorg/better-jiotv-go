@@ -509,7 +509,8 @@ func LiveMpdHandler(c *fiber.Ctx) error {
 		play_url := utils.BuildHLSPlayURL(quality, channelID)
 		internalUtils.SetCacheHeader(c, 3600)
 		return c.Render("views/player_hls", fiber.Map{
-			"play_url": play_url,
+			"play_url":   play_url,
+			"check_hevc": viaTVPlus,
 		})
 	}
 

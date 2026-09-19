@@ -235,7 +235,7 @@ async fn serve(
         println!("Auth is disabled: playlist at /playlist.m3u");
     }
 
-    let router = server::build_router(state);
+    let service = server::GatedService::new(state);
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port)).await?;
 
     let mut tunnel_handle = None;
@@ -256,12 +256,9 @@ async fn serve(
     }
 
     tracing::info!("listening");
-    let serve_result = axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await;
+    let serve_result = axum::serve(listener, server::WithConnectInfo::new(service))
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
 
     if let Some(t) = tunnel_handle {
         t.kill().await;

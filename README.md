@@ -106,9 +106,16 @@ directory keeps working.
   `/api/key/rotate`, `/api/account/password`, `/api/jiotv/logout`) and the
   Svelte UI (`web/ui`, unchanged from the Go tree) served from the full
   binary.
-- The `/k/:key` route nesting so IPTV players and an authenticated admin
-  session can both reach the same playlist/channel routes, matching the Go
-  gate's behaviour.
+- The `/k/<key>` gate strips the prefix by hand in a `tower::Service`
+  wrapped *around* the whole router (`server::GatedService`), before the
+  router ever does its own path matching — not `Router::layer()`
+  middleware (runs after matching; can't affect it) and not
+  `Router::nest("/k/:key", ...)` (routes correctly, but silently adds an
+  extra captured path parameter to every matched route, breaking any
+  handler using `Path<String>`/`Path<(String, String)>` under the prefix —
+  this shipped once and broke every IPTV stream route before a live check
+  caught it). IPTV players and an authenticated admin session reach the
+  same routes either way.
 - The `--tunnel` / `--tunnel-token` cloudflared wrapper.
 - `/jtvimage/:file` logo proxy.
 - **Live HLS proxying**: `/live/:id`, `/live/:quality/:id`, `/render.m3u8`

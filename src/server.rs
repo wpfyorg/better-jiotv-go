@@ -1,32 +1,46 @@
 //! HTTP server wiring: the access gate, the JSON API, playlist/channels,
 //! logo proxy and (full build) the Svelte UI's static assets. Mirrors
 //! `cmd/jiotv_go.go` / `cmd/ui.go` / `internal/access/access.go`.
+//!
+//! The gate strips a `/k/<key>` prefix by hand, as a plain `tower::Service`
+//! wrapped *outside* the axum `Router`, rather than as `Router::layer()`
+//! middleware or a `Router::nest("/k/:key", ...)`. Both of those were tried
+//! and both are wrong for this: `.layer()` middleware runs after axum's own
+//! route matching, so mutating the request's URI there never changes which
+//! handler gets picked (see the git history for the first, discarded fix).
+//! `.nest("/k/:key", ...)` *does* route to the right handler, but it does so
+//! by adding `key` as an extra captured path parameter on every matched
+//! route — which silently breaks any handler using a positional extractor
+//! (`Path<String>`, `Path<(String, String)>`), since axum requires an exact
+//! parameter count for those and now sees one more than the handler
+//! declared. That shipped, undetected by tests that only ever exercised
+//! `/playlist.m3u` (no path parameters), and broke every IPTV stream route
+//! in production. Stripping the prefix before the request ever reaches the
+//! `Router::call` that does matching avoids both problems: the router only
+//! ever sees a request shaped exactly like the unkeyed one.
 
 use crate::api::KeyPrefix;
 use crate::state::AppState;
 use axum::body::Body;
 use axum::extract::{Query, Request, State};
 use axum::http::{header, StatusCode};
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use std::collections::HashMap;
+use std::convert::Infallible;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use tower::Service;
 
-/// Routes an IPTV player reaches either as `/k/<key>/<path>` or, for an
-/// already-authenticated admin session, directly at `<path>` (mirrors the Go
-/// gate: `SessionCheck` accepts any non-open path, not just these). Kept
-/// separate from `api_routes` so it can be `.nest()`-ed under `/k/:key`:
-/// axum resolves `nest()` prefixes as part of its own route matching, which
-/// (unlike mutating the URI from inside a `middleware::from_fn` layer, which
-/// runs after matching and cannot influence it) reliably routes
-/// `/k/<key>/channels` to the same handler as `/channels`.
 fn content_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/playlist.m3u", get(playlist_redirect))
         .route("/channels", get(channels_or_playlist))
         .route("/jtvimage/:file", get(jtvimage))
+        .route("/jtvposter/:date/:file", get(crate::epg::poster_handler))
         .route("/live/:id", get(crate::stream::live_handler))
         .route("/live/:quality/:id", get(crate::stream::live_quality_handler))
         .route("/live/mpd/:channelId", get(crate::dash::live_mpd_handler))
@@ -72,13 +86,14 @@ fn open_stream_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .with_state(state)
 }
 
-pub fn build_router(state: Arc<AppState>) -> Router {
+/// Builds the plain (un-gated) router: every route at its bare path, no
+/// `/k/:key` involved at all. `GatedService` strips the prefix before a
+/// request ever reaches this router's own matching.
+fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
-        .nest("/k/:key", content_routes(state.clone()))
         .merge(content_routes(state.clone()))
         .merge(api_routes(state.clone()))
-        .merge(open_stream_routes(state.clone()))
-        .merge(open_routes(state.clone()));
+        .merge(open_stream_routes(state.clone()));
 
     #[cfg(feature = "full")]
     {
@@ -89,9 +104,162 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         router = router.fallback(|| async { (StatusCode::NOT_FOUND, "not found") });
     }
 
-    router
-        .layer(middleware::from_fn_with_state(state.clone(), gate))
-        .with_state(state)
+    router.with_state(state)
+}
+
+type BoxRespFuture = Pin<Box<dyn Future<Output = Result<Response, Infallible>> + Send>>;
+
+/// The whole app as one `tower::Service`: the access gate wrapping the
+/// plain router from the outside, so prefix-stripping happens before the
+/// router ever sees the request.
+#[derive(Clone)]
+pub struct GatedService {
+    router: Router,
+    state: Arc<AppState>,
+}
+
+impl GatedService {
+    pub fn new(state: Arc<AppState>) -> GatedService {
+        GatedService {
+            router: build_router(state.clone()),
+            state,
+        }
+    }
+}
+
+impl Service<Request> for GatedService {
+    type Response = Response;
+    type Error = Infallible;
+    type Future = BoxRespFuture;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: Request) -> Self::Future {
+        let mut router = self.router.clone();
+        let state = self.state.clone();
+        Box::pin(async move { Ok(route_request(state, &mut router, req).await) })
+    }
+}
+
+/// A `MakeService` that inserts a real `ConnectInfo<SocketAddr>` per
+/// connection, without going through `Router::into_make_service_with_
+/// connect_info` (not usable here since `GatedService` isn't a `Router`;
+/// its constructor is private to axum). Mirrors that helper's own logic,
+/// which is public in spirit — `axum::extract::connect_info::Connected` and
+/// `axum::serve::IncomingStream::remote_addr` are both public API.
+#[derive(Clone)]
+pub struct WithConnectInfo<S> {
+    inner: S,
+}
+
+impl<S> WithConnectInfo<S> {
+    pub fn new(inner: S) -> WithConnectInfo<S> {
+        WithConnectInfo { inner }
+    }
+}
+
+impl<'a, S> Service<axum::serve::IncomingStream<'a>> for WithConnectInfo<S>
+where
+    S: Clone + Send + 'static,
+{
+    type Response = ConnectInfoService<S>;
+    type Error = Infallible;
+    type Future = std::future::Ready<Result<Self::Response, Infallible>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, target: axum::serve::IncomingStream<'a>) -> Self::Future {
+        let addr = target.remote_addr();
+        std::future::ready(Ok(ConnectInfoService { inner: self.inner.clone(), addr }))
+    }
+}
+
+#[derive(Clone)]
+pub struct ConnectInfoService<S> {
+    inner: S,
+    addr: std::net::SocketAddr,
+}
+
+impl<S> Service<Request> for ConnectInfoService<S>
+where
+    S: Service<Request, Response = Response, Error = Infallible>,
+{
+    type Response = Response;
+    type Error = Infallible;
+    type Future = S::Future;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut req: Request) -> Self::Future {
+        req.extensions_mut().insert(axum::extract::ConnectInfo(self.addr));
+        self.inner.call(req)
+    }
+}
+
+/// The access gate: `/k/<key>/...` needs a matching key, some paths are
+/// always open, and everything else (the admin UI's own API surface) needs a
+/// valid session cookie once a password is set. See
+/// `internal/access/access.go` in the Go tree; `crate::access::OPEN_PATHS`
+/// mirrors its `openPaths` list.
+async fn route_request(state: Arc<AppState>, router: &mut Router, mut req: Request) -> Response {
+    let path = req.uri().path().to_string();
+
+    if let Some(rest) = path.strip_prefix(crate::access::KEY_PREFIX) {
+        let (given, tail) = rest.split_once('/').unwrap_or((rest, ""));
+        let want = match state.access.key() {
+            Ok(k) => k,
+            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "access key unavailable").into_response(),
+        };
+        use subtle::ConstantTimeEq;
+        if given.as_bytes().ct_eq(want.as_bytes()).unwrap_u8() != 1 {
+            return (StatusCode::UNAUTHORIZED, "invalid access key").into_response();
+        }
+
+        // Strip the /k/<key> prefix from the URI *before* handing the
+        // request to the router, so its own matching (and every handler's
+        // Path extractor) sees exactly the same shape it would for an
+        // unkeyed request.
+        let new_path = format!("/{tail}");
+        let mut parts = req.uri().clone().into_parts();
+        let path_and_query = match req.uri().query() {
+            Some(q) => format!("{new_path}?{q}"),
+            None => new_path,
+        };
+        parts.path_and_query = Some(path_and_query.parse().expect("valid path+query"));
+        *req.uri_mut() = axum::http::Uri::from_parts(parts).expect("valid uri");
+        req.extensions_mut()
+            .insert(KeyPrefix(format!("{}{given}", crate::access::KEY_PREFIX)));
+
+        return call_router(router, req).await;
+    }
+
+    if crate::access::is_open(&path) || state.config.disable_auth {
+        return call_router(router, req).await;
+    }
+
+    let cookie = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    if crate::api::has_session(&state, cookie.as_deref()) {
+        return call_router(router, req).await;
+    }
+
+    (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
+}
+
+async fn call_router(router: &mut Router, req: Request) -> Response {
+    match router.call(req).await {
+        Ok(resp) => resp,
+        Err(never) => match never {},
+    }
 }
 
 async fn playlist_redirect(Query(q): Query<HashMap<String, String>>) -> Redirect {
@@ -175,12 +343,6 @@ async fn jtvimage(axum::extract::Path(p): axum::extract::Path<FileParam>, State(
     proxy_get(&state.http, &url).await
 }
 
-fn open_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/jtvposter/:date/:file", get(crate::epg::poster_handler))
-        .with_state(state)
-}
-
 async fn proxy_get(client: &reqwest::Client, url: &str) -> Response {
     match client.get(url).send().await {
         Ok(resp) => {
@@ -203,71 +365,52 @@ async fn proxy_get(client: &reqwest::Client, url: &str) -> Response {
     }
 }
 
-/// The access gate: `/k/<key>/...` needs a matching key, some paths are
-/// always open, and everything else (the admin UI's own API surface) needs a
-/// valid session cookie once a password is set. See
-/// `internal/access/access.go` in the Go tree; `crate::access::OPEN_PATHS`
-/// mirrors its `openPaths` list.
-async fn gate(State(state): State<Arc<AppState>>, mut req: Request, next: Next) -> Response {
-    let path = req.uri().path().to_string();
-
-    if let Some(rest) = path.strip_prefix(crate::access::KEY_PREFIX) {
-        let (given, _tail) = rest.split_once('/').unwrap_or((rest, ""));
-        let want = match state.access.key() {
-            Ok(k) => k,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "access key unavailable").into_response(),
-        };
-        use subtle::ConstantTimeEq;
-        if given.as_bytes().ct_eq(want.as_bytes()).unwrap_u8() != 1 {
-            return (StatusCode::UNAUTHORIZED, "invalid access key").into_response();
-        }
-        // Actual routing to the un-prefixed handler is done by axum's own
-        // `nest("/k/:key", ...)` matching in `build_router`; this layer only
-        // needs to authorize the request and record the prefix for
-        // handlers that build URLs (playlist generation, auth state).
-        req.extensions_mut()
-            .insert(KeyPrefix(format!("{}{given}", crate::access::KEY_PREFIX)));
-        return next.run(req).await;
-    }
-
-    if crate::access::is_open(&path) {
-        return next.run(req).await;
-    }
-
-    if state.config.disable_auth {
-        return next.run(req).await;
-    }
-
-    let cookie = req
-        .headers()
-        .get(header::COOKIE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-    if crate::api::has_session(&state, cookie.as_deref()) {
-        return next.run(req).await;
-    }
-
-    (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{access::Access, config::Config, secureurl::SecureUrl, store::Store, television::Television};
     use tower::ServiceExt;
 
+    /// A client that can never reach the real internet: every one of Jio's
+    /// hostnames used anywhere in this crate resolves to a closed local
+    /// port, so any handler that gets far enough to attempt an upstream
+    /// call fails instantly with a connection error instead of making a
+    /// live request. Used to prove a handler's `Path`/`Query` extraction
+    /// succeeded (it ran at all) without the test ever touching the real
+    /// JioTV/JioTV+ APIs, per the project's rule against live calls in tests.
+    fn blackholed_client() -> reqwest::Client {
+        let sink: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let hosts = [
+            "jiotvapi.media.jio.com",
+            "jiotvapi.cdn.jio.com",
+            "jiotv.data.cdn.jio.com",
+            "jiotv.catchup.cdn.jio.com",
+            "auth.media.jio.com",
+            "tv.media.jio.com",
+            "content-jiotvplus.media.jio.com",
+            "api-jiotvplus.media.jio.com",
+            "jiotvapi.media.jio.com",
+        ];
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_millis(500));
+        for h in hosts {
+            builder = builder.resolve(h, sink);
+        }
+        builder.build().unwrap()
+    }
+
     fn test_state() -> Arc<AppState> {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
         std::mem::forget(dir);
+        let http = blackholed_client();
         Arc::new(AppState {
             config: Config::default(),
             path_prefix: String::new(),
             access: Arc::new(Access::new(store.clone())),
             store,
-            tv: Arc::new(Television::new(reqwest::Client::new())),
+            tv: Arc::new(Television::with_device_id(http.clone(), "test-device".to_string())),
             secure: Arc::new(SecureUrl::new(false)),
-            http: reqwest::Client::new(),
+            http,
             drm_channels: Default::default(),
             custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
@@ -276,26 +419,58 @@ mod tests {
         })
     }
 
-    /// Regression test for a real bug found while smoke-testing: axum's
-    /// `Router::layer()` middleware runs *after* route matching, so a
-    /// `/k/<key>/...` request rewritten by mutating `req.uri()` inside
-    /// `middleware::from_fn` never actually re-routes — the router had
-    /// already decided (and failed to find) a match beforehand. Routing the
-    /// prefix through `nest("/k/:key", content_routes(...))` instead (see
-    /// `build_router`) makes axum's own matcher do the work.  This checks
-    /// the key-gated path without touching the network: an invalid key must
-    /// still be rejected before the handler (which would call the real
-    /// JioTV API) ever runs.
+    async fn send(state: Arc<AppState>, uri: &str) -> Response {
+        let mut svc = GatedService::new(state);
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        svc.ready().await.unwrap();
+        svc.call(req).await.unwrap()
+    }
+
+    async fn body_text(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// Never again: a request rewritten to strip `/k/<key>` must reach the
+    /// exact same handler, with the exact same extracted path parameters,
+    /// as the equivalent unkeyed request — this is the bug the lead's live
+    /// check found (`nest("/k/:key", ...)` added an extra captured
+    /// parameter, breaking every `Path<String>`/`Path<(String,String)>`
+    /// handler under the prefix with a 500 "Wrong number of path arguments").
+    const PATH_EXTRACTION_FAILURE: &str = "Wrong number of path arguments";
+
+    async fn assert_reaches_handler(state: Arc<AppState>, key: &str, session_cookie: Option<&str>, path: &str) {
+        // Keyed form.
+        let resp = send(state.clone(), &format!("/k/{key}{path}")).await;
+        let status = resp.status();
+        let body = body_text(resp).await;
+        assert!(
+            !body.contains(PATH_EXTRACTION_FAILURE),
+            "keyed {path} hit the path-extraction bug: {body}"
+        );
+        assert_ne!(status, StatusCode::NOT_FOUND, "keyed {path} didn't match any route");
+
+        // Unkeyed form, with an admin session standing in for the browser UI.
+        let mut svc = GatedService::new(state.clone());
+        let mut req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        if let Some(c) = session_cookie {
+            req.headers_mut().insert(header::COOKIE, c.parse().unwrap());
+        }
+        svc.ready().await.unwrap();
+        let resp = svc.call(req).await.unwrap();
+        let status = resp.status();
+        let body = body_text(resp).await;
+        assert!(
+            !body.contains(PATH_EXTRACTION_FAILURE),
+            "unkeyed {path} hit the path-extraction bug: {body}"
+        );
+        assert_ne!(status, StatusCode::NOT_FOUND, "unkeyed {path} didn't match any route");
+    }
+
     #[tokio::test]
     async fn keyed_content_route_rejects_wrong_key_before_calling_out() {
         let state = test_state();
-        let router = build_router(state);
-        let req = Request::builder()
-            .uri("/k/0000000000000000000000000000000000/channels")
-            .method("GET")
-            .body(Body::empty())
-            .unwrap();
-        let resp = router.oneshot(req).await.unwrap();
+        let resp = send(state, "/k/0000000000000000000000000000000000/channels").await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -303,19 +478,93 @@ mod tests {
     async fn keyed_and_bare_playlist_routes_both_resolve_past_the_gate() {
         let state = test_state();
         let key = state.access.key().unwrap();
-        let router = build_router(state.clone());
 
-        // The right key reaches the handler (a redirect, not a 404/401).
-        let req = Request::builder()
-            .uri(format!("/k/{key}/playlist.m3u"))
-            .body(Body::empty())
-            .unwrap();
-        let resp = router.clone().oneshot(req).await.unwrap();
+        let resp = send(state.clone(), &format!("/k/{key}/playlist.m3u")).await;
         assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
 
         // The bare path with no key and no session is rejected by the gate.
-        let req = Request::builder().uri("/playlist.m3u").body(Body::empty()).unwrap();
-        let resp = router.oneshot(req).await.unwrap();
+        let resp = send(state, "/playlist.m3u").await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn every_parameterised_iptv_route_survives_the_key_prefix() {
+        let state = test_state();
+        let key = state.access.key().unwrap();
+        state.access.set_password("hunter22hunter").unwrap();
+        let session = state.access.new_session(std::time::SystemTime::now()).unwrap();
+        let cookie = format!("{}={session}", crate::access::SESSION_COOKIE);
+
+        // Custom channels short-circuit before any network call, so they
+        // exercise real extraction+handler logic with zero upstream I/O.
+        let custom_json = format!(
+            "{{\"channels\":[{{\"id\":\"custom1\",\"name\":\"Custom\",\"url\":\"https://example.com/x.m3u8\"}}]}}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let custom_path = dir.path().join("custom.json");
+        std::fs::write(&custom_path, custom_json).unwrap();
+        state.custom_channels.load(custom_path.to_str().unwrap()).unwrap();
+
+        let paths = [
+            "/live/custom1",
+            "/live/high/custom1",
+            "/live/mpd/custom1",
+            // Not custom-channel-shortcut routes: these run far enough to
+            // attempt a real upstream call, which the blackholed client
+            // turns into a fast connection error rather than a live request.
+            "/live/key/999999",
+            "/catchup/stream/999999?start=1700000000000&end=1700000100000",
+            "/epg/999999/0",
+            "/jtvimage/does-not-exist.png",
+            "/jtvposter/2024-01-01/does-not-exist.png",
+        ];
+        for path in paths {
+            assert_reaches_handler(state.clone(), &key, Some(&cookie), path).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn render_dash_survives_the_key_prefix_against_a_local_mock() {
+        use wiremock::matchers::path as wm_path;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock = MockServer::start().await;
+        Mock::given(wm_path("/seg/init.mp4"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"ok".to_vec()))
+            .mount(&mock)
+            .await;
+        let mock_addr = mock.uri().trim_start_matches("http://").to_string();
+
+        let state = test_state();
+        let key = state.access.key().unwrap();
+        let enc_host = state.secure.encrypt_deterministic(&mock_addr);
+        let enc_path = state.secure.encrypt_deterministic("/seg/");
+        let path = format!("/render.dash/host/{enc_host}/path/{enc_path}/init.mp4");
+
+        // /render.dash is an open path (no key needed), but it's still a
+        // parameterised route, so confirm it also works fine reached
+        // through the /k/<key> prefix, matching how a real client always
+        // reaches it via a URL this server itself generated (from /render.mpd).
+        // The handler always proxies over https, and wiremock only serves
+        // plain http, so this can't reach 200 end to end here; a 502 (a
+        // failed *upstream connection*, from inside the handler) still
+        // proves the host/path decryption and extraction both ran, which is
+        // what this test is actually checking.
+        let resp = send(state, &format!("/k/{key}{path}")).await;
+        let status = resp.status();
+        let body = body_text(resp).await;
+        assert!(!body.contains(PATH_EXTRACTION_FAILURE));
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "expected a failed https connection to the plain-http mock: {body}");
+    }
+
+    #[tokio::test]
+    async fn ott_route_is_not_yet_implemented_but_still_reachable() {
+        let state = test_state();
+        let key = state.access.key().unwrap();
+        // /api/ott/play/:id takes no Path extractor today, so it was never
+        // susceptible to this bug, but it's on the lead's list; confirm it
+        // resolves to its documented 501 rather than a routing 404.
+        let resp = send(state, &format!("/k/{key}/api/ott/play/999")).await;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 }

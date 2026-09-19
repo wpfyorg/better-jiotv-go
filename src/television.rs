@@ -273,6 +273,8 @@ pub struct Television {
     pub creds: RwLock<Option<Credentials>>,
     pub client: reqwest::Client,
     pub device_id: String,
+    /// Serialises token refreshes so concurrent requests share one.
+    pub refresh_lock: tokio::sync::Mutex<()>,
 }
 
 impl Television {
@@ -286,6 +288,7 @@ impl Television {
             creds: RwLock::new(None),
             client,
             device_id,
+            refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
 

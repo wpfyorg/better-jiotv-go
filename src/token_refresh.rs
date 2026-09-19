@@ -11,6 +11,10 @@ use base64::Engine;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const JWT_REFRESH_LEAD: Duration = Duration::from_secs(30);
+const ACCESS_FALLBACK_TTL: u64 = 2 * 60 * 60;
+const ACCESS_FALLBACK_LEAD: u64 = 10 * 60;
+const SSO_FALLBACK_TTL: u64 = 24 * 60 * 60;
+const SSO_FALLBACK_LEAD: u64 = 60 * 60;
 
 fn jwt_exp(token: &str) -> Option<u64> {
     let mut parts = token.split('.');
@@ -27,25 +31,55 @@ fn jwt_exp(token: &str) -> Option<u64> {
     json.get("exp")?.as_u64()
 }
 
-/// Refreshes the JioTV access token if it looks like a JWT that's within
-/// `JWT_REFRESH_LEAD` of expiry (or isn't a JWT / is missing, in which case
-/// the caller proceeds with what it has — matching the Go version's
-/// "continue with the request, tokens might still work" fallback).
+/// Mirrors `shouldRefreshToken`: a JWT is refreshed shortly before its
+/// `exp`; any other token once `fallback_ttl - fallback_lead` has passed
+/// since it was last refreshed (or when that time is unknown).
+fn should_refresh(token: &str, last_refresh: Option<u64>, fallback_ttl: u64, fallback_lead: u64, now: u64) -> bool {
+    if token.is_empty() {
+        return true;
+    }
+    if let Some(exp) = jwt_exp(token) {
+        return exp <= now + JWT_REFRESH_LEAD.as_secs();
+    }
+    match last_refresh {
+        Some(last) => last + fallback_ttl - fallback_lead <= now,
+        None => true,
+    }
+}
+
+/// Refreshes the JioTV access and SSO tokens when they are due, like
+/// `EnsureFreshTokens`. Failures are logged and the request carries on with
+/// the tokens it has.
 pub async fn ensure_fresh(state: &AppState) {
-    let creds = state.tv.creds.read().unwrap().clone();
-    let Some(creds) = creds else { return };
-    if creds.refresh_token.is_empty() {
-        return;
-    }
-    let Some(exp) = jwt_exp(&creds.access_token) else { return };
+    let _guard = state.tv.refresh_lock.lock().await;
+    let Some(mut creds) = state.tv.creds.read().unwrap().clone() else { return };
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    if exp > now + JWT_REFRESH_LEAD.as_secs() {
-        return;
-    }
     let client = crate::login::LoginClient::new(state.http.clone());
-    if let Ok(refreshed) = client.refresh(&creds).await {
-        state.tv.set_credentials(refreshed.clone());
-        let _ = crate::login::save(&state.store, &refreshed);
+    let device_id = state.tv.device_id.clone();
+
+    let access_due = !creds.refresh_token.is_empty()
+        && should_refresh(&creds.access_token, crate::login::last_refresh(&state.store, false), ACCESS_FALLBACK_TTL, ACCESS_FALLBACK_LEAD, now);
+    if access_due {
+        match client.refresh(&creds, &device_id).await {
+            Ok(refreshed) => {
+                creds = refreshed;
+                let _ = crate::login::save(&state.store, &creds, crate::login::Touch { access: true, sso: false });
+                state.tv.set_credentials(creds.clone());
+            }
+            Err(e) => tracing::warn!("JioTV access token refresh failed: {e}"),
+        }
+    }
+
+    let sso_due = !creds.sso_token.is_empty()
+        && should_refresh(&creds.sso_token, crate::login::last_refresh(&state.store, true), SSO_FALLBACK_TTL, SSO_FALLBACK_LEAD, now);
+    if sso_due {
+        match client.refresh_sso(&creds, &device_id).await {
+            Ok(refreshed) => {
+                let _ = crate::login::save(&state.store, &refreshed, crate::login::Touch { access: false, sso: true });
+                state.tv.set_credentials(refreshed);
+            }
+            Err(e) => tracing::warn!("JioTV SSO token refresh failed: {e}"),
+        }
     }
 }
 
@@ -60,6 +94,15 @@ mod tests {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"exp":1700000000}"#);
         let token = format!("eyJhbGciOiJIUzI1NiJ9.{payload}.sig");
         assert_eq!(jwt_exp(&token), Some(1700000000));
+    }
+
+    #[test]
+    fn refresh_policy_matches_go() {
+        let now = 1_000_000;
+        assert!(should_refresh("", None, 7200, 600, now));
+        assert!(should_refresh("opaque", None, 7200, 600, now));
+        assert!(!should_refresh("opaque", Some(now - 60), 7200, 600, now));
+        assert!(should_refresh("opaque", Some(now - 6700), 7200, 600, now));
     }
 
     #[test]

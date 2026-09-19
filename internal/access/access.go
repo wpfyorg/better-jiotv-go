@@ -80,16 +80,16 @@ func PlaylistPath() (string, error) {
 	return prefix + k + "/playlist.m3u", nil
 }
 
-// openPaths need no key.
+// openPaths need no key. Entries ending in "/" match as prefixes.
 var openPaths = []string{
-	"/render.m3u8", "/render.ts", "/render.key", "/render.mpd", "/render.dash",
+	"/render.m3u8", "/render.ts", "/render.key", "/render.mpd", "/render.dash/",
 	"/drm", "/dashtime", "/static/", "/favicon.ico", "/jtvimage/", "/jtvposter/",
-	"/api/auth/",
+	"/api/auth/", "/ui/", "/",
 }
 
 func isOpen(path string) bool {
 	for _, p := range openPaths {
-		if path == p || strings.HasPrefix(path, p) {
+		if path == p || (p != "/" && strings.HasSuffix(p, "/") && strings.HasPrefix(path, p)) {
 			return true
 		}
 	}

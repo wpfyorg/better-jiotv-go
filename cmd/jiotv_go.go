@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"log" // Added import for *log.Logger type
+	"strings"
 	"time"
 
 	"github.com/jiotv-go/jiotv_go/v3/internal/access"
@@ -108,6 +109,9 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 		}
 		app.Use(access.Middleware())
 		fmt.Printf("Playlist: http://%s:%s%s\n", displayHost(jiotvServerConfig.Host), jiotvServerConfig.Port, playlistPath)
+		if !Headless && !access.HasPassword() {
+			fmt.Printf("Web setup: http://%s:%s%s (or run: jiotv_go admin password)\n", displayHost(jiotvServerConfig.Host), jiotvServerConfig.Port, strings.TrimSuffix(playlistPath, "playlist.m3u"))
+		}
 	}
 
 	registerUI(app)

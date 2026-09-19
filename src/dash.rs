@@ -61,6 +61,36 @@ impl DashState {
     }
 }
 
+/// Splits a CDN manifest URL into its host and the directory its segments
+/// live in (the URL with its filename dropped, trailing slash kept).
+/// Mirrors Go's `buildDrmMpdOutput`/`MpdHandler`:
+/// `parsed := url.Parse(tvURL); dir := strings.Join(strings.Split(parsed.Path, "/")[:n-1], "/") + "/"`.
+///
+/// Operates only on `Url::path()`, never on the raw URL string, so a query
+/// string containing its own `/` characters (a real shape for JioTV/TV+'s
+/// `hdnea` token, e.g. `...~acl=/*~...`) can never leak into the split: the
+/// `url` crate has already separated path from query at the first
+/// unescaped `?` by the time `.path()` returns anything, regardless of what
+/// the query itself contains. The one thing worth guarding explicitly is a
+/// path that ends in `/` (or has `//` from an upstream quirk) producing a
+/// trailing empty split segment that would otherwise get treated as the
+/// "filename" to drop, silently keeping the real last directory component
+/// and reproducing exactly the one-extra-path-segment symptom this was
+/// written to fix.
+fn cdn_host_and_dir(url_str: &str) -> Option<(String, String)> {
+    let parsed = url::Url::parse(url_str).ok()?;
+    let host = parsed.host_str()?.to_string();
+    let mut path = parsed.path();
+    while path.len() > 1 && path.ends_with('/') {
+        path = &path[..path.len() - 1];
+    }
+    let dir = match path.rfind('/') {
+        Some(idx) => path[..=idx].to_string(),
+        None => "/".to_string(),
+    };
+    Some((host, dir))
+}
+
 async fn get_drm_mpd(state: &AppState, channel_id: &str, quality: &str) -> anyhow::Result<DrmMpdOutput> {
     let cache_key = format!("{channel_id}_{quality}");
     if let Some(cached) = state.dash_state.get_cached(&cache_key) {
@@ -101,12 +131,9 @@ fn build_drm_mpd_output(state: &AppState, live: &LiveUrlOutput, channel_id: &str
         return Ok(DrmMpdOutput { is_drm: live.is_drm, play_url: tv_url, license_url, ..Default::default() });
     }
 
-    let parsed = url::Url::parse(&tv_url)?;
-    let mut segments: Vec<&str> = parsed.path().split('/').collect();
-    segments.pop();
-    let dir_path = format!("{}/", segments.join("/"));
+    let (host, dir_path) = cdn_host_and_dir(&tv_url).ok_or_else(|| anyhow::anyhow!("invalid upstream URL"))?;
     let tv_url_path = state.secure.encrypt_deterministic(&dir_path);
-    let tv_url_host = state.secure.encrypt_deterministic(parsed.host_str().unwrap_or(""));
+    let tv_url_host = state.secure.encrypt_deterministic(&host);
 
     Ok(DrmMpdOutput {
         is_drm: live.is_drm,
@@ -332,14 +359,9 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
         }
     }
 
-    let parsed = match url::Url::parse(&decrypted) {
-        Ok(u) => u,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response(),
+    let Some((proxy_host, base_path)) = cdn_host_and_dir(&decrypted) else {
+        return (StatusCode::BAD_REQUEST, "invalid upstream URL").into_response();
     };
-    let proxy_host = parsed.host_str().unwrap_or("").to_string();
-    let mut segs: Vec<&str> = parsed.path().split('/').collect();
-    segs.pop();
-    let base_path = format!("{}/", segs.join("/"));
     let enc_host = state.secure.encrypt_deterministic(&proxy_host);
     let enc_path = state.secure.encrypt_deterministic(&base_path);
 
@@ -509,44 +531,63 @@ async fn proxy_mpd(state: &AppState, url: &str) -> (u16, Vec<u8>, Vec<String>) {
 /// real CDN. The whole remainder of the path is taken as a single wildcard
 /// and parsed by hand (mirrors `DashHandler`'s own manual parsing, which
 /// exists for the same reason: the segment path's own depth is unbounded).
-pub async fn render_dash_handler(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Response {
-    let path = uri.path();
-    let query = uri.query().unwrap_or("");
-    let Some(rest) = path.strip_prefix("/render.dash/host/") else {
-        return (StatusCode::BAD_REQUEST, "malformed dash path").into_response();
-    };
-    let Some((enc_host, remainder)) = rest.split_once("/path/") else {
-        return (StatusCode::BAD_REQUEST, "malformed dash path").into_response();
-    };
-
-    let (enc_path, hdnea_token, segment_path) = if let Some((before, after)) = remainder.split_once("/hdnea/") {
+/// Parses `/render.dash/host/<enc>/path/<enc>[/hdnea/<enc>]/<segment-path>`
+/// into `(enc_host, enc_path, enc_hdnea, segment_path)`, where
+/// `segment_path` starts with `/`. A pure function (no decryption, no I/O)
+/// so it's directly testable against the exact path shapes a real client
+/// resolves a relative `SegmentTemplate` reference into.
+fn split_dash_path(path: &str) -> Option<(&str, &str, Option<&str>, String)> {
+    let rest = path.strip_prefix("/render.dash/host/")?;
+    let (enc_host, remainder) = rest.split_once("/path/")?;
+    if let Some((before, after)) = remainder.split_once("/hdnea/") {
         let (enc_hdnea, seg) = after.split_once('/').unwrap_or((after, ""));
-        let hdnea = state
-            .secure
-            .decrypt(enc_hdnea)
-            .ok()
-            .and_then(|s| s.strip_prefix("__hdnea__=").map(str::to_string));
-        (before.to_string(), hdnea, format!("/{seg}"))
+        Some((enc_host, before, Some(enc_hdnea), format!("/{seg}")))
     } else {
         let (p, seg) = remainder.split_once('/').unwrap_or((remainder, ""));
-        (p.to_string(), None, format!("/{seg}"))
+        Some((enc_host, p, None, format!("/{seg}")))
+    }
+}
+
+/// Builds the final upstream CDN URL from a decrypted host/directory pair,
+/// the segment's own relative path, and the query the client's resolved
+/// segment request carried (its own `?m=...` cache-buster, say) — kept
+/// pure and separate from `cdn_host_and_dir` (which goes the other way,
+/// from an upstream manifest URL down to host+dir) so both directions of
+/// this round trip are independently testable.
+fn build_dash_proxy_url(host: &str, base_path: &str, segment_path: &str, query: &str) -> String {
+    let base_path = base_path.trim_end_matches('/');
+    let mut url = format!("https://{host}{base_path}{segment_path}");
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(query);
+    }
+    url
+}
+
+pub async fn render_dash_handler(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Response {
+    let (enc_host, enc_path, enc_hdnea, segment_path) = match split_dash_path(uri.path()) {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, "malformed dash path").into_response(),
     };
+
+    let hdnea_token = enc_hdnea.and_then(|enc| {
+        state
+            .secure
+            .decrypt(enc)
+            .ok()
+            .and_then(|s| s.strip_prefix("__hdnea__=").map(str::to_string))
+    });
 
     let host = match state.secure.decrypt(enc_host) {
         Ok(h) => h,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid host parameter").into_response(),
     };
-    let base_path = match state.secure.decrypt(&enc_path) {
+    let base_path = match state.secure.decrypt(enc_path) {
         Ok(p) => p,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid path parameter").into_response(),
     };
-    let base_path = base_path.trim_end_matches('/');
 
-    let mut proxy_url = format!("https://{host}{base_path}{segment_path}");
-    if !query.is_empty() {
-        proxy_url.push('?');
-        proxy_url.push_str(query);
-    }
+    let proxy_url = build_dash_proxy_url(&host, &base_path, &segment_path, uri.query().unwrap_or(""));
 
     let (status, body, ct) = proxy_dash_segment(&state, &proxy_url, hdnea_token.as_deref()).await;
     let mut status = status;
@@ -645,5 +686,92 @@ mod tests {
         let body = "<Period id=\"0\"><AdaptationSet/></Period>";
         let out = rewrite_base_url(body, "/render.dash/host/x/path/y/");
         assert!(out.contains("<Period id=\"0\">\n<BaseURL>/render.dash/host/x/path/y/</BaseURL>"));
+    }
+
+    /// Regression test for a live-verified bug: channel 151's TV+-mirrored
+    /// MPD carries an `hdnea` token whose value contains a literal `/`
+    /// (Akamai-style ACLs look like `exp=...~acl=/*~data=...~hmac=...`).
+    /// The directory must come out exactly as many segments deep as the
+    /// path alone implies, regardless of what's in the query.
+    #[test]
+    fn host_and_dir_ignore_slashes_inside_the_query() {
+        let url = "https://cdn.example.com/bpk-tv/MoviesNow_BTS/WDVLive/index.mpd\
+                   ?hdnea=exp=1830000000~acl=/*~data=hdntl~hmac=deadbeef";
+        let (host, dir) = cdn_host_and_dir(url).unwrap();
+        assert_eq!(host, "cdn.example.com");
+        assert_eq!(dir, "/bpk-tv/MoviesNow_BTS/WDVLive/");
+        assert_eq!(dir.matches('/').count(), 4, "expected exactly 4 slashes: leading + 3 directories");
+    }
+
+    #[test]
+    fn host_and_dir_are_not_thrown_off_by_a_trailing_slash() {
+        // A defensive case beyond what's been seen live: a manifest URL
+        // ending in `/` (naming a directory, not a file) must not leave the
+        // real last directory component in the "filename" slot.
+        let (_, dir) = cdn_host_and_dir("https://cdn.example.com/a/b/c/index.mpd/").unwrap();
+        assert_eq!(dir, "/a/b/c/");
+    }
+
+    #[test]
+    fn host_and_dir_plain_case_matches_go() {
+        let (host, dir) = cdn_host_and_dir("https://cdn.example.com/bpk-tv/Name_BTS/WDVLive/index.mpd").unwrap();
+        assert_eq!(host, "cdn.example.com");
+        assert_eq!(dir, "/bpk-tv/Name_BTS/WDVLive/");
+    }
+
+    /// End to end (as pure functions, no network): a relative
+    /// `SegmentTemplate` reference that carries its own `?m=` query, as
+    /// resolved by a real client against a BaseURL this server derived from
+    /// an upstream MPD URL whose own query contains `/` (Akamai-style ACLs:
+    /// `...~acl=/*~...`) — the exact scenario behind the channel 151
+    /// "Rust's BaseURL has one more path segment than Go's" bug. Checks the
+    /// full round trip: `cdn_host_and_dir` (manifest URL -> host + dir) then
+    /// `split_dash_path` + `build_dash_proxy_url` (rewritten request path ->
+    /// upstream URL) must land back on exactly the original directory, with
+    /// the segment's query preserved and nothing extra.
+    #[test]
+    fn dash_round_trip_survives_a_query_with_slashes_and_a_segment_with_its_own_query() {
+        let secure = crate::secureurl::SecureUrl::new(false);
+        let upstream = "https://cdn.example.com/bpk-tv/MoviesNow_BTS/WDVLive/index.mpd\
+                         ?hdnea=exp=1830000000~acl=/*~hmac=deadbeef";
+
+        let (host, dir_path) = cdn_host_and_dir(upstream).unwrap();
+        assert_eq!(host, "cdn.example.com");
+        assert_eq!(dir_path, "/bpk-tv/MoviesNow_BTS/WDVLive/");
+        let enc_host = secure.encrypt_deterministic(&host);
+        let enc_path = secure.encrypt_deterministic(&dir_path);
+
+        // Shaka resolves the relative SegmentTemplate reference
+        // "index_video_7_0_init.mp4?m=1773052885" against our rewritten
+        // BaseURL ("/render.dash/host/<enc>/path/<enc>/dash/") into this
+        // request.
+        let request_path = format!("/render.dash/host/{enc_host}/path/{enc_path}/dash/index_video_7_0_init.mp4");
+        let (got_enc_host, got_enc_path, got_hdnea, segment_path) = split_dash_path(&request_path).unwrap();
+        assert_eq!(got_enc_host, enc_host);
+        assert_eq!(got_enc_path, enc_path);
+        assert!(got_hdnea.is_none());
+        assert_eq!(segment_path, "/dash/index_video_7_0_init.mp4");
+
+        let decrypted_host = secure.decrypt(got_enc_host).unwrap();
+        let decrypted_dir = secure.decrypt(got_enc_path).unwrap();
+        assert_eq!(decrypted_host, "cdn.example.com");
+        assert_eq!(decrypted_dir, "/bpk-tv/MoviesNow_BTS/WDVLive/");
+
+        let proxy_url = build_dash_proxy_url(&decrypted_host, &decrypted_dir, &segment_path, "m=1773052885");
+        assert_eq!(
+            proxy_url,
+            "https://cdn.example.com/bpk-tv/MoviesNow_BTS/WDVLive/dash/index_video_7_0_init.mp4?m=1773052885"
+        );
+    }
+
+    #[test]
+    fn split_dash_path_extracts_the_hdnea_segment_when_present() {
+        let (host, path, hdnea, seg) = split_dash_path("/render.dash/host/H/path/P/hdnea/HD/seg.m4s").unwrap();
+        assert_eq!((host, path, hdnea, seg.as_str()), ("H", "P", Some("HD"), "/seg.m4s"));
+    }
+
+    #[test]
+    fn split_dash_path_rejects_a_malformed_prefix() {
+        assert!(split_dash_path("/not-render-dash/x").is_none());
     }
 }

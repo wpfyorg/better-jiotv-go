@@ -153,6 +153,41 @@ func main() {
 				},
 			},
 			{
+				Name:        "tvplus",
+				Usage:       "Manage the JioTV+ login",
+				Description: "The tvplus command logs in to JioTV+ (JioFiber/AirFiber) or out of it. The tvplus option must be on for the server to use the login.",
+				Subcommands: []*cli.Command{
+					{
+						Name:   "login",
+						Usage:  "Log in with the fibre account's mobile number and an OTP",
+						Action: func(c *cli.Context) error { return cmd.TVPlusLogin() },
+					},
+					{
+						Name:   "logout",
+						Usage:  "Delete the saved JioTV+ login",
+						Action: func(c *cli.Context) error { return cmd.TVPlusLogout() },
+					},
+				},
+			},
+			{
+				Name:        "key",
+				Usage:       "Show or replace the access key",
+				Description: "Every playlist, channel and EPG URL carries the access key as /k/<key>/. Replacing the key breaks old playlist URLs.",
+				Action:      func(c *cli.Context) error { return cmd.ShowKey() },
+				Subcommands: []*cli.Command{
+					{
+						Name:   "show",
+						Usage:  "Print the playlist path",
+						Action: func(c *cli.Context) error { return cmd.ShowKey() },
+					},
+					{
+						Name:   "rotate",
+						Usage:  "Create a new access key",
+						Action: func(c *cli.Context) error { return cmd.RotateKey() },
+					},
+				},
+			},
+			{
 				Name:        "autostart",
 				Usage:       "Manage auto start for bash shell",
 				Description: "The autostart command manages auto start for bash shell. It can be used to enable or disable auto start. We only support BASH Terminal and recommend on Android Termux.",

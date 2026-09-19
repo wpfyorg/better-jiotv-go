@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jiotv-go/jiotv_go/v3/internal/access"
 	"github.com/jiotv-go/jiotv_go/v3/internal/config"
 	"github.com/jiotv-go/jiotv_go/v3/internal/constants/headers"
 	"github.com/jiotv-go/jiotv_go/v3/internal/constants/urls"
@@ -1105,7 +1106,7 @@ func ChannelsHandler(c *fiber.Ctx) error {
 	}
 	apiResponse.Result = withTVPlusChannels(apiResponse.Result)
 	// hostUrl should be request URL like http://localhost:5001
-	hostURL := strings.ToLower(c.Protocol()) + "://" + c.Hostname()
+	hostURL := access.BaseURL(c)
 
 	// Check if the query parameter "type" is set to "m3u"
 	if c.Query("type") == "m3u" {
@@ -1344,7 +1345,7 @@ func PlaylistHandler(c *fiber.Ctx) error {
 	languages := c.Query("l")
 	skipGenres := c.Query("sg")
 	subFilter := c.Query("sub")
-	return c.Redirect("/channels?type=m3u&q="+quality+"&c="+splitCategory+"&l="+languages+"&sg="+skipGenres+"&sub="+subFilter, fiber.StatusMovedPermanently)
+	return c.Redirect(access.Prefix(c)+"/channels?type=m3u&q="+quality+"&c="+splitCategory+"&l="+languages+"&sg="+skipGenres+"&sub="+subFilter, fiber.StatusMovedPermanently)
 }
 
 // ImageHandler loads image from JioTV server

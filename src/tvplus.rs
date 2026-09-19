@@ -93,7 +93,7 @@ impl Credentials {
             return None;
         }
         let mut payload = parts[1].to_string();
-        while payload.len() % 4 != 0 {
+        while !payload.len().is_multiple_of(4) {
             payload.push('=');
         }
         use base64::Engine;
@@ -722,6 +722,9 @@ pub struct LiveChannel {
     pub genres: Vec<String>,
     #[serde(default)]
     pub quality: String,
+    // Present on the wire, kept for parity with the Go struct; playability
+    // is decided by `playback_type` + `is_test_channel`, not `provider`.
+    #[allow(dead_code)]
     #[serde(default)]
     pub provider: String,
     #[serde(rename = "playbackType", default)]
@@ -961,6 +964,10 @@ pub fn vod_provider_name(provider: &str) -> Option<&'static str> {
 
 pub const ALGO_JIO_VOD: i64 = 4;
 pub const ALGO_ZEE5: i64 = 6;
+/// MX Player's algo number, documented for parity with the Go constants;
+/// `vod_license_headers`'s `match` needs no special case for it (its
+/// `_ => {}` arm covers the "no extra headers" default MX Player uses).
+#[allow(dead_code)]
 pub const ALGO_MX: i64 = 14;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]

@@ -11,6 +11,9 @@ use std::sync::RwLock;
 pub const JIOTV_API_DOMAIN: &str = "jiotvapi.media.jio.com";
 pub const CHANNELS_API_URL: &str = "https://jiotvapi.cdn.jio.com/apis/v3.1/getMobileChannelList/get/?langId=6&os=android&devicetype=phone&usertype=JIO&version=315&langId=6";
 pub const REFRESH_TOKEN_URL: &str = "https://auth.media.jio.com/tokenservice/apis/v1/refreshtoken?langId=6";
+/// The SSO-token fallback-TTL refresh path is not ported (see README); only
+/// the JWT-`exp`-based access-token refresh in `token_refresh.rs` is.
+#[allow(dead_code)]
 pub const REFRESH_SSO_TOKEN_URL: &str = "https://tv.media.jio.com/apis/v2.0/loginotp/refresh?langId=6";
 pub const PLAYBACK_API_PATH: &str = "/playback/apis/v1.1/geturl?langId=6";
 pub const LOGIN_SEND_OTP_PATH: &str = "/userservice/apis/v1/loginotp/send";
@@ -114,8 +117,12 @@ where
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ChannelsResponse {
+    // Present on the wire (and kept for parity with the Go struct); callers
+    // only ever use `result`.
+    #[allow(dead_code)]
     #[serde(default)]
     pub code: i64,
+    #[allow(dead_code)]
     #[serde(default)]
     pub message: String,
     #[serde(default)]
@@ -194,12 +201,15 @@ pub struct LiveUrlOutput {
     pub result: String,
     #[serde(default)]
     pub message: String,
+    // Present on the wire, kept for parity with the Go struct; not read.
+    #[allow(dead_code)]
     #[serde(default)]
     pub code: i64,
     #[serde(default)]
     pub bitrates: Bitrates,
     #[serde(default)]
     pub mpd: Mpd,
+    #[allow(dead_code)]
     #[serde(default, rename = "m3u8")]
     pub m3u8: Bitrates,
     #[serde(default, rename = "isDRM")]
@@ -225,6 +235,10 @@ impl LiveUrlOutput {
         }
     }
 
+    /// Kept for parity with the Go method; `AppState::is_drm_channel` (the
+    /// static DRM-ID list plus TV+'s learned map) is what actually decides
+    /// this in the current routing.
+    #[allow(dead_code)]
     pub fn has_drm_stream(&self) -> bool {
         !self.mpd.resolved_bitrates().auto.is_empty() && !self.resolved_license_url().is_empty()
     }
@@ -262,6 +276,7 @@ pub struct Television {
 }
 
 impl Television {
+    #[cfg(test)]
     pub fn new(client: reqwest::Client) -> Television {
         Television::with_device_id(client, String::new())
     }

@@ -22,10 +22,16 @@ const DRM_MPD_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Default)]
 pub struct DrmMpdOutput {
+    // Computed for parity with the Go struct (`buildDrmMpdOutput`) and kept
+    // in case a future in-app DRM player page needs them directly; nothing
+    // reads them today since /live/mpd/:id redirects straight to play_url.
+    #[allow(dead_code)]
     pub is_drm: bool,
     pub play_url: String,
     pub license_url: String,
+    #[allow(dead_code)]
     pub tv_url_host: String,
+    #[allow(dead_code)]
     pub tv_url_path: String,
 }
 
@@ -173,11 +179,7 @@ pub async fn live_mpd_handler(
             // No DRM/DASH stream available; fall back to this server's own
             // HLS route rather than the Go version's HTML fallback player.
             let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
-            let hls_path = if quality == "auto" {
-                format!("{prefix_str}/live/{channel_id}.m3u8")
-            } else {
-                format!("{prefix_str}/live/{quality}/{channel_id}.m3u8")
-            };
+            let hls_path = format!("{prefix_str}{}", crate::tvplus_state::TvPlusState::live_hls_path(&channel_id, &quality));
             Redirect::to(&hls_path).into_response()
         }
     }
@@ -427,7 +429,7 @@ fn rewrite_base_url(body: &str, new_base: &str) -> String {
     if let Some(start) = body.find("<BaseURL>") {
         if let Some(end_rel) = body[start..].find("</BaseURL>") {
             let end = start + end_rel + "</BaseURL>".len();
-            return format!("{}{}{}", &body[..start], format!("<BaseURL>{new_base}</BaseURL>"), &body[end..]);
+            return format!("{}<BaseURL>{new_base}</BaseURL>{}", &body[..start], &body[end..]);
         }
     }
     if let Some(period_start) = body.find("<Period") {

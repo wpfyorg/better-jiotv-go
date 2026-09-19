@@ -67,6 +67,8 @@ jiotv tvplus login     # interactive OTP login to JioTV+ (needs tvplus = true)
 jiotv tvplus logout    # delete the saved JioTV+ login
 jiotv epg generate     # generate epg.xml.gz now
 jiotv epg delete       # delete epg.xml.gz
+jiotv background start [--args "..."]   # run `serve` detached, args passed through
+jiotv background stop                   # stop it (reads the PID file background start wrote)
 ```
 
 `--config <path>` and `--skip-update-check` are accepted at the top level, as
@@ -207,8 +209,17 @@ This is a partial rewrite. The pieces below exist in the Go version and do
 - **Premium providers** (SonyLIV/ZEE5-style content bundled into a JioTV
   account itself, distinct from JioTV+ on-demand — `PremiumProviders`,
   `/premium/*` in the Go tree) are not implemented.
-- `update`, `background`, `autostart` CLI subcommands are not ported (`epg`
-  is; see below).
+- **`update` is dropped, not ported.** The Go version downloaded a new
+  release binary from GitHub and replaced itself; this rewrite has no
+  release process to point that at yet, and "download and exec a binary
+  fetched over the network" is exactly the kind of thing to not add
+  speculatively. Update via your own package manager / redeploy instead.
+- **`autostart` (the Termux/bash-profile convenience) is dropped, not
+  ported.** It only ever added a line to `~/.bashrc`; low value relative to
+  its slice of the rewrite, and easy to do by hand (`echo 'jiotv background
+  start' >> ~/.bashrc`) if you want it.
+- `background start`/`background stop` (run `serve` detached, stop it via a
+  PID file) **are** ported — see the CLI list above.
 - Login credential refresh (`login::LoginClient::refresh`,
   `token_refresh::ensure_fresh`) only covers the JWT-`exp` case; the SSO
   token's own fallback-TTL refresh path (for non-JWT tokens) is not ported.

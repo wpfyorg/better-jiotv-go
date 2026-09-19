@@ -196,6 +196,7 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
     state.tvplus.refresh_catalogue_if_needed(&state.tv).await;
     let mut all = list.result;
     all.extend(state.tvplus.exclusive_channels(&all));
+    all.extend(state.custom_channels.all());
 
     let mut out: Vec<ApiChannel> = all
         .iter()

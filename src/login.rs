@@ -35,6 +35,9 @@ pub struct VerifyOtpResponse {
     pub crm: Option<String>,
     #[serde(rename = "uniqueId")]
     pub unique_id: Option<String>,
+    /// Present on the wire; not consulted (verify_otp's caller reports
+    /// success/failure via the `Result` itself instead).
+    #[allow(dead_code)]
     pub status: Option<String>,
 }
 

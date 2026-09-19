@@ -240,11 +240,6 @@ pub async fn rotate_key(State(state): State<SharedState>) -> Response {
     status(State(state)).await
 }
 
-/// Not implemented in this rewrite yet: on-demand (JioCinema/ZEE5/MX Player)
-/// playback via JioTV+. See the final report's parity gap list.
-pub async fn ott_not_implemented() -> Response {
-    err(StatusCode::NOT_IMPLEMENTED, "on-demand playback is not implemented yet")
-}
 
 #[derive(Deserialize)]
 pub struct TvPlusSendOtpBody {
@@ -330,6 +325,7 @@ mod tests {
             render_caches: Default::default(),
             dash_state: Default::default(),
             tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
+            vod_state: Default::default(),
         })
     }
 

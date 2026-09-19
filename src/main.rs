@@ -16,6 +16,8 @@ mod stream;
 mod television;
 mod token_refresh;
 mod tunnel;
+mod tvplus;
+mod tvplus_state;
 
 #[cfg(feature = "full")]
 mod ui_assets;
@@ -55,10 +57,8 @@ fn main() -> anyhow::Result<()> {
         cli::Command::Serve(serve_args) => runtime.block_on(serve(cfg, path_prefix, store, access, secure, serve_args)),
         cli::Command::LoginOtp => runtime.block_on(login_otp(store)),
         cli::Command::LoginReset => login_reset(&store),
-        cli::Command::TvplusLogin | cli::Command::TvplusLogout => {
-            eprintln!("JioTV+ login is not implemented in this Rust rewrite yet; see README's parity gaps.");
-            Ok(())
-        }
+        cli::Command::TvplusLogin => runtime.block_on(tvplus_login_cli(&store)),
+        cli::Command::TvplusLogout => tvplus_logout_cli(&store),
         cli::Command::AdminPassword => admin_password(&access),
         cli::Command::KeyShow => show_key(&access),
         cli::Command::KeyRotate => rotate_key(&access),
@@ -149,6 +149,12 @@ async fn serve(
         }
     }
 
+    let tvplus_state = Arc::new(tvplus_state::TvPlusState::new(cfg.tvplus));
+    tvplus_state.init(&http, &store);
+    if cfg.tvplus {
+        println!("JioTV+ enabled{}", if tvplus_state.connected() { " (logged in)" } else { " (run `jiotv tvplus login`)" });
+    }
+
     let state = Arc::new(state::AppState {
         config: cfg.clone(),
         path_prefix: path_prefix.clone(),
@@ -161,6 +167,7 @@ async fn serve(
         custom_channels,
         render_caches: Default::default(),
         dash_state: Default::default(),
+        tvplus: tvplus_state,
     });
 
     if cfg.epg {
@@ -178,9 +185,18 @@ async fn serve(
             Err(_) => true,
         };
         if needs_generation {
+            let state_for_epg = state.clone();
             tokio::spawn(async move {
                 println!("Generating EPG file in the background (JIOTV_EPG=true)...");
-                if let Err(e) = epg::generate_xml_gz(&http, &epg_path).await {
+                let (extra_channels, extra_programmes) = if state_for_epg.tvplus.enabled() {
+                    state_for_epg.tvplus.epg_source(&state_for_epg.tv).await.unwrap_or_else(|e| {
+                        tracing::warn!("JioTV+ EPG source skipped: {e}");
+                        (Vec::new(), Vec::new())
+                    })
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                if let Err(e) = epg::generate_xml_gz_with(&http, &epg_path, extra_channels, extra_programmes).await {
                     tracing::warn!("EPG generation failed: {e}");
                 } else {
                     println!("EPG file generated at {epg_path}");
@@ -274,6 +290,60 @@ async fn login_otp(store: Arc<store::Store>) -> anyhow::Result<()> {
     let creds = client.verify_otp(&number, otp).await?;
     login::save(&store, &creds)?;
     println!("Login successful");
+    Ok(())
+}
+
+async fn tvplus_login_cli(store: &store::Store) -> anyhow::Result<()> {
+    let device = tvplus::Device::load_or_create(store)?;
+    let client = tvplus::Client::new(reqwest::Client::new(), device);
+
+    print!("Mobile number registered to the fibre account: +91 ");
+    std::io::stdout().flush()?;
+    let mut number = String::new();
+    std::io::stdin().read_line(&mut number)?;
+    let number = number.trim().to_string();
+
+    let mut resp = client.send_otp(&number, "").await.map_err(|e| anyhow::anyhow!("could not send the OTP: {e}"))?;
+    let conns = resp.connections();
+    if !conns.is_empty() {
+        println!("Connections on this number:");
+        for (i, c) in conns.iter().enumerate() {
+            let tail = if c.identifier.len() > 4 { &c.identifier[c.identifier.len() - 4..] } else { &c.identifier };
+            println!("  {}. {}, {}, line ending {tail}", i + 1, c.name, c.product_name);
+        }
+        print!("Choose a connection: ");
+        std::io::stdout().flush()?;
+        let mut pick = String::new();
+        std::io::stdin().read_line(&mut pick)?;
+        let pick: usize = pick.trim().parse().map_err(|_| anyhow::anyhow!("no such connection"))?;
+        if pick < 1 || pick > conns.len() {
+            anyhow::bail!("no such connection");
+        }
+        resp = client.send_otp(&number, &conns[pick - 1].identifier).await.map_err(|e| anyhow::anyhow!("could not send the OTP: {e}"))?;
+    }
+    if resp.identifier.is_empty() {
+        anyhow::bail!("JioTV+ did not send an OTP");
+    }
+
+    print!("OTP: ");
+    std::io::stdout().flush()?;
+    let mut otp = String::new();
+    std::io::stdin().read_line(&mut otp)?;
+
+    let result = client.verify_otp(&number, &resp.identifier, otp.trim()).await;
+    if let Some(cr) = client.credentials() {
+        cr.save(store)?;
+    }
+    match result {
+        Ok(_) => println!("JioTV+ login saved. Restart the server to use it."),
+        Err(e) => anyhow::bail!("login failed: {e}"),
+    }
+    Ok(())
+}
+
+fn tvplus_logout_cli(store: &store::Store) -> anyhow::Result<()> {
+    tvplus::delete_credentials(store)?;
+    println!("JioTV+ login deleted.");
     Ok(())
 }
 

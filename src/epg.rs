@@ -54,14 +54,22 @@ struct EpgResponse {
     epg: Vec<EpgObject>,
 }
 
-struct Programme {
-    channel: String,
-    start: String,
-    stop: String,
-    title: String,
-    desc: String,
-    category: String,
-    icon: String,
+/// One `<programme>` entry, public so `tvplus::to_xmltv` can hand in extra
+/// entries from the TV+-only channels (mirrors `epg.Programme` in the Go
+/// tree, used the same way by `TVPlusEPGSource`).
+pub struct XmlProgramme {
+    pub channel: String,
+    pub start: String,
+    pub stop: String,
+    pub title: String,
+    pub desc: String,
+    pub category: String,
+    pub icon: String,
+}
+
+struct XmlChannel {
+    id: String,
+    display: String,
 }
 
 fn xml_escape(s: &str) -> String {
@@ -74,7 +82,7 @@ fn xml_escape(s: &str) -> String {
 
 /// Formats a Unix-millisecond epoch as XMLTV's `"20060102150405 -0700"`
 /// (always `+0000`/UTC here, since that's what this rewrite computes with).
-fn format_xmltv_time(epoch_ms: i64) -> String {
+pub fn format_xmltv_time(epoch_ms: i64) -> String {
     let secs = (epoch_ms / 1000).max(0) as u64;
     let (y, mo, d, hh, mm, ss) = crate::television::civil_from_unix(secs);
     format!("{y:04}{mo:02}{d:02}{hh:02}{mm:02}{ss:02} +0000")
@@ -97,10 +105,13 @@ async fn fetch_epg_for_channel(client: &reqwest::Client, channel_id: i64) -> Vec
     out
 }
 
-/// Fetches the full channel list and every channel's EPG, and renders the
-/// XMLTV document as a string (without the leading `<?xml ...?>` header,
-/// added by the caller — mirrors `genXML`/`GenXMLGz`).
-pub async fn generate_xml(client: &reqwest::Client) -> anyhow::Result<String> {
+/// Fetches the full channel list and every channel's EPG, appends any extra
+/// (channel, programme) pairs from `extra_sources` (TV+'s catalogue, when
+/// enabled — see `tvplus_state::epg_source`, mirroring `RegisterSource` /
+/// `TVPlusEPGSource` in the Go tree), and renders the XMLTV document as a
+/// string (without the leading `<?xml ...?>` header, added by the caller —
+/// mirrors `genXML`/`GenXMLGz`).
+pub async fn generate_xml(client: &reqwest::Client, extra_sources: Vec<(String, String)>, extra_programmes: Vec<XmlProgramme>) -> anyhow::Result<String> {
     let resp = client.get(CHANNEL_LIST_URL).send().await?.error_for_status()?;
     let channels: ChannelsResponse = resp.json().await?;
 
@@ -120,7 +131,7 @@ pub async fn generate_xml(client: &reqwest::Client) -> anyhow::Result<String> {
     for task in tasks {
         if let Ok((id, entries)) = task.await {
             for e in entries {
-                programmes.push(Programme {
+                programmes.push(XmlProgramme {
                     channel: id.to_string(),
                     start: format_xmltv_time(e.start_epoch),
                     stop: format_xmltv_time(e.end_epoch),
@@ -132,10 +143,13 @@ pub async fn generate_xml(client: &reqwest::Client) -> anyhow::Result<String> {
             }
         }
     }
+    programmes.extend(extra_programmes);
 
     if programmes.is_empty() {
         anyhow::bail!("no EPG programmes were fetched");
     }
+
+    let extra_channels: Vec<XmlChannel> = extra_sources.into_iter().map(|(id, display)| XmlChannel { id, display }).collect();
 
     let mut xml = String::new();
     xml.push_str(r#"<tv version="" encoding="">"#);
@@ -145,6 +159,9 @@ pub async fn generate_xml(client: &reqwest::Client) -> anyhow::Result<String> {
             ch.channel_id,
             xml_escape(&ch.channel_name)
         ));
+    }
+    for ch in &extra_channels {
+        xml.push_str(&format!("<channel id=\"{}\"><display-name>{}</display-name></channel>", xml_escape(&ch.id), xml_escape(&ch.display)));
     }
     for p in &programmes {
         xml.push_str(&format!(
@@ -159,7 +176,16 @@ pub async fn generate_xml(client: &reqwest::Client) -> anyhow::Result<String> {
 /// Generates the EPG and writes it, gzip-compressed, to `path` (normally
 /// `<path_prefix>/epg.xml.gz`).
 pub async fn generate_xml_gz(client: &reqwest::Client, path: &str) -> anyhow::Result<()> {
-    let xml = generate_xml(client).await?;
+    generate_xml_gz_with(client, path, Vec::new(), Vec::new()).await
+}
+
+pub async fn generate_xml_gz_with(
+    client: &reqwest::Client,
+    path: &str,
+    extra_sources: Vec<(String, String)>,
+    extra_programmes: Vec<XmlProgramme>,
+) -> anyhow::Result<()> {
+    let xml = generate_xml(client, extra_sources, extra_programmes).await?;
     let header = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\t<!DOCTYPE tv SYSTEM \"http://www.w3.org/2006/05/tv\">";
     let full = format!("{header}{xml}");
 

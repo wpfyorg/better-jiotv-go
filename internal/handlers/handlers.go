@@ -1323,9 +1323,11 @@ func PlayerHandler(c *fiber.Ctx) error {
 	id := c.Params("id")
 	quality := c.Query("q")
 	play_url := utils.BuildHLSPlayURL(quality, id)
+	_, viaTVPlus := tvPlusRoute(id)
 	internalUtils.SetCacheHeader(c, 3600)
 	return c.Render("views/player_hls", fiber.Map{
-		"play_url": play_url,
+		"play_url":   play_url,
+		"check_hevc": viaTVPlus,
 	})
 }
 

@@ -164,7 +164,7 @@ pub async fn status(State(state): State<SharedState>) -> Response {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "jiotv": {"loggedIn": state.tv.logged_in()},
-        "tvplus": {"enabled": false, "connected": false},
+        "tvplus": {"enabled": state.tvplus.enabled(), "connected": state.tvplus.connected()},
         "playlistPath": playlist,
         "epgPath": epg_path,
         "epg": state.config.epg,
@@ -192,9 +192,11 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
         Ok(l) => l,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    let logged_in = state.tv.logged_in();
-    let mut out: Vec<ApiChannel> = list
-        .result
+    state.tvplus.refresh_catalogue_if_needed(&state.tv).await;
+    let mut all = list.result;
+    all.extend(state.tvplus.exclusive_channels(&all));
+
+    let mut out: Vec<ApiChannel> = all
         .iter()
         .map(|ch| {
             let logo = if ch.logo_url.starts_with("http://") || ch.logo_url.starts_with("https://") {
@@ -209,9 +211,9 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
                 category: crate::television::category_name(ch.category).to_string(),
                 language: crate::television::language_name(ch.language).to_string(),
                 hd: ch.is_hd,
-                tvplus: false,
+                tvplus: ch.id.starts_with(crate::tvplus::ID_PREFIX),
                 catchup: ch.is_catchup_available,
-                playable: logged_in,
+                playable: state.is_playable(&ch.id),
             }
         })
         .collect();
@@ -244,6 +246,66 @@ pub async fn ott_not_implemented() -> Response {
     err(StatusCode::NOT_IMPLEMENTED, "on-demand playback is not implemented yet")
 }
 
+#[derive(Deserialize)]
+pub struct TvPlusSendOtpBody {
+    number: String,
+    connection: Option<usize>,
+}
+
+/// `POST /api/tvplus/login/sendOTP`. The first call (number only) returns
+/// the fibre connections on the number when there's a choice; a second call
+/// with `connection` sends the OTP for that connection. Mirrors
+/// `TVPlusSendOTPHandler`.
+pub async fn tvplus_send_otp(State(state): State<SharedState>, Json(body): Json<TvPlusSendOtpBody>) -> Response {
+    if !state.tvplus.enabled() {
+        return err(StatusCode::BAD_REQUEST, "JioTV+ is not enabled");
+    }
+    match state.tvplus.send_otp(&body.number, body.connection).await {
+        Ok(outcome) => {
+            let connections: Vec<_> = outcome
+                .connections
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let tail = if c.identifier.len() > 4 { &c.identifier[c.identifier.len() - 4..] } else { &c.identifier };
+                    json!({"index": i, "name": c.name, "product": c.product_name, "lineEndsWith": tail})
+                })
+                .collect();
+            Json(json!({"status": outcome.sent, "connections": connections})).into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not send the OTP: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct TvPlusVerifyOtpBody {
+    number: String,
+    otp: String,
+}
+
+/// `POST /api/tvplus/login/verifyOTP`. Mirrors `TVPlusVerifyOTPHandler`.
+pub async fn tvplus_verify_otp(State(state): State<SharedState>, Json(body): Json<TvPlusVerifyOtpBody>) -> Response {
+    if !state.tvplus.enabled() {
+        return err(StatusCode::BAD_REQUEST, "JioTV+ is not enabled");
+    }
+    match state.tvplus.verify_otp(&body.number, &body.otp, &state.store).await {
+        Ok(ok) => Json(json!({"status": ok})).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// `POST /api/tvplus/logout`. Mirrors `TVPlusLogoutHandler` (the device is
+/// kept so a later login reuses the same device slot).
+pub async fn tvplus_logout(State(state): State<SharedState>) -> Response {
+    if state.config.disable_logout {
+        return err(StatusCode::FORBIDDEN, "logout is disabled");
+    }
+    match state.tvplus.logout(&state.store) {
+        Ok(()) => Json(json!({"status": true})).into_response(),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +329,7 @@ mod tests {
             custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
+            tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
         })
     }
 

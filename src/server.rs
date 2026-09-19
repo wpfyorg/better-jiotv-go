@@ -48,6 +48,9 @@ fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/account/password", post(crate::api::account_password))
         .route("/api/key/rotate", post(crate::api::rotate_key))
         .route("/api/jiotv/logout", post(crate::api::jiotv_logout))
+        .route("/api/tvplus/login/sendOTP", post(crate::api::tvplus_send_otp))
+        .route("/api/tvplus/login/verifyOTP", post(crate::api::tvplus_verify_otp))
+        .route("/api/tvplus/logout", post(crate::api::tvplus_logout))
         .route("/api/ott/play/:id", get(crate::api::ott_not_implemented))
         .with_state(state)
 }
@@ -111,10 +114,12 @@ async fn channels_or_playlist(
     prefix: Option<axum::Extension<KeyPrefix>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let list = match state.tv.channels().await {
+    let mut list = match state.tv.channels().await {
         Ok(l) => l,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
+    state.tvplus.refresh_catalogue_if_needed(&state.tv).await;
+    list.result.extend(state.tvplus.exclusive_channels(&list.result));
 
     if q.get("type").map(String::as_str) != Some("m3u") {
         return axum::Json(list.result).into_response();
@@ -267,6 +272,7 @@ mod tests {
             custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
+            tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
         })
     }
 

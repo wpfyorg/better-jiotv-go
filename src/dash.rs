@@ -66,7 +66,7 @@ async fn get_drm_mpd(state: &AppState, channel_id: &str, quality: &str) -> anyho
     if let Some(cached) = state.dash_state.get_cached(&cache_key) {
         return Ok(cached);
     }
-    let live = state.tv.live(channel_id).await?;
+    let live = crate::stream::fetch_live(state, channel_id).await?;
     let out = build_drm_mpd_output(state, &live, channel_id, quality)?;
     state.dash_state.set_cached(&cache_key, out.clone());
     Ok(out)
@@ -137,8 +137,8 @@ pub async fn live_mpd_handler(
         return Redirect::to(&ch.url).into_response();
     }
 
-    crate::token_refresh::ensure_fresh(&state).await;
-
+    // get_drm_mpd -> fetch_live already refreshes the right credentials
+    // (JioTV's or TV+'s, depending on how the channel routes).
     let drm = get_drm_mpd(&state, &channel_id, &quality).await;
     match drm {
         Ok(out) if !out.play_url.is_empty() => Redirect::to(&out.play_url).into_response(),
@@ -208,6 +208,23 @@ async fn drm_license_impl(
         Err(_) => return (StatusCode::FORBIDDEN, "invalid auth parameter").into_response(),
     };
 
+    // A TV+ channel's license is authorised by the token already in the
+    // license URL; send the headers the JioTV+ app sends and skip the
+    // cookie-harvesting dance below entirely, mirroring `DRMKeyHandler`'s
+    // `tvPlusLicenseHeaders` branch.
+    let is_custom = state.custom_channels.contains(&channel_id);
+    if let Some(content_id) = state.tvplus.route(&channel_id, state.tv.logged_in(), is_custom) {
+        let mut req = state
+            .http
+            .request(method, &decoded_url)
+            .header(header::USER_AGENT, crate::tvplus::PLAYER_USER_AGENT)
+            .header(header::CONTENT_TYPE, "application/octet-stream");
+        for (k, v) in state.tvplus.license_headers(&content_id, "") {
+            req = req.header(k, v);
+        }
+        return send_license_request(req, body).await;
+    }
+
     // A HEAD request to the (still-encrypted-in-the-URL) channel manifest
     // harvests any auth cookie the CDN wants forwarded onto the license
     // request, mirroring DRMKeyHandler's cookie relay.
@@ -252,8 +269,7 @@ async fn drm_license_impl(
         .header("Accept-Encoding", "gzip, deflate")
         .header("osVersion", "13")
         .header("deviceId", &state.tv.device_id)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .body(body);
+        .header(header::CONTENT_TYPE, "application/octet-stream");
     if let Some(c) = cookie_header {
         req = req.header(header::COOKIE, c);
     }
@@ -261,7 +277,11 @@ async fn drm_license_impl(
     // Go handler explicitly deleting them before proxying).
     let _ = &headers;
 
-    match req.send().await {
+    send_license_request(req, body).await
+}
+
+async fn send_license_request(req: reqwest::RequestBuilder, body: Bytes) -> Response {
+    match req.body(body).send().await {
         Ok(resp) => {
             let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
@@ -447,8 +467,19 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
+/// The TV+ CDN refuses DASH manifests/segments unless the User-Agent starts
+/// with `JioTV.Plus/` (see `pkg/tvplus`'s `PlayerUserAgent` doc comment);
+/// `TvPlusState::player_user_agent_for` tracks which hosts need it.
+fn player_user_agent_for(state: &AppState, url: &str) -> &'static str {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| state.tvplus.player_user_agent_for(h)))
+        .unwrap_or(television::PLAYER_USER_AGENT)
+}
+
 async fn proxy_mpd(state: &AppState, url: &str) -> (u16, Vec<u8>, Vec<String>) {
-    match state.http.get(url).header(header::USER_AGENT, television::PLAYER_USER_AGENT).send().await {
+    let ua = player_user_agent_for(state, url);
+    match state.http.get(url).header(header::USER_AGENT, ua).send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
             let cookies: Vec<String> = resp
@@ -528,7 +559,8 @@ pub async fn render_dash_handler(State(state): State<Arc<AppState>>, uri: axum::
 }
 
 async fn proxy_dash_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16, Vec<u8>, Option<String>) {
-    let mut req = state.http.get(url).header(header::USER_AGENT, television::PLAYER_USER_AGENT);
+    let ua = player_user_agent_for(state, url);
+    let mut req = state.http.get(url).header(header::USER_AGENT, ua);
     if let Some(t) = hdnea {
         req = req.header(header::COOKIE, format!("__hdnea__={t}"));
     }

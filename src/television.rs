@@ -510,6 +510,13 @@ pub fn select_best_live_hls_url(live: &LiveUrlOutput, quality: &str) -> String {
     String::new()
 }
 
+/// Reports whether a playback response has a DASH stream. Mirrors `hasDASH`
+/// in the Go tree (used for TV+ channels that fall back between HLS/DASH).
+pub fn has_dash(r: &LiveUrlOutput) -> bool {
+    let b = r.mpd.resolved_bitrates();
+    !b.auto.is_empty() || !b.high.is_empty() || !b.medium.is_empty() || !b.low.is_empty() || !r.mpd.result.is_empty()
+}
+
 /// Mirrors `selectBestLiveMPDURL`.
 pub fn select_best_live_mpd_url(live: &LiveUrlOutput, quality: &str) -> String {
     let b = live.mpd.resolved_bitrates();

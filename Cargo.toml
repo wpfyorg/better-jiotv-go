@@ -21,7 +21,7 @@ tvplus = []
 
 [dependencies]
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }
-tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "io-util", "macros", "process", "signal", "fs"] }
+tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "io-util", "macros", "process", "signal", "fs", "sync"] }
 hyper = { version = "1", default-features = false }
 http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "gzip", "json"] }

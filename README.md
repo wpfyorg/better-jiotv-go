@@ -132,22 +132,38 @@ directory keeps working.
 - EPG generation (`jiotv epg generate`/`epg delete`, and a background
   regenerate-if-missing-or-stale check on `serve` startup when `epg = true`)
   and `/epg.xml.gz`, `/epg/:channelID/:offset`, `/jtvposter/:date/:file`.
+- **JioTV+ (`tvplus`, off by default)**, compiled into both builds but only
+  active when `tvplus = true`: device identity + saved-login store keys
+  (`tvplus_device`, `tvplus_credentials`, `tvplus_dash`) byte-compatible
+  with the Go tree; OTP login (`jiotv tvplus login` and
+  `/api/tvplus/login/sendOTP`+`/verifyOTP`), `tvplus logout` and
+  `/api/tvplus/logout`; token refresh (1h lead, de-duplicated); catalogue
+  (6h cache) with `Mirrors`/`Exclusive`/`normalizeName`/test-channel
+  filtering; routing (`tvp_` IDs always, a JioTV ID only when there's no
+  JioTV login and TV+ carries it); playback (60s cache, de-duplicated) with
+  learned per-channel DASH/HLS persisted to `tvplus_dash` and the
+  MPD→HLS/HLS→MPD fallback redirects; the TV+ player User-Agent on TV+ CDN
+  hosts for MPD/segment requests; TV+ license/key headers through `/drm` and
+  `/live/key`; `isDRMChannel`/playlist-hiding (`channelPlayable`) using TV+
+  state; TV+ channels folded into the EPG.
 
 ## What is NOT at parity yet (be aware before relying on this)
 
 This is a partial rewrite. The pieces below exist in the Go version and do
 **not** exist here yet, or exist at reduced fidelity:
 
-- **No singleflight / request de-duplication.** The Go version funnels
-  concurrent requests for the same channel's playback URL through a single
-  upstream call (`singleflight`); this rewrite does not, so a burst of
-  simultaneous requests for one channel makes that many upstream calls.
-- **JioTV+ (`tvplus`)** — login, catalogue, mirrors, learned stream-type
-  persistence, all of it — is not implemented. The CLI subcommand exists and
-  prints a "not implemented" message. `tvPlusRoute`/`tvPlusKeyHeaders`-style
-  branches in the Go stream/DRM handlers (TV+ CDN user-agent switching, the
-  MPD→HLS/HLS→MPD fallback redirects for TV+-only channels) have no
-  equivalent here.
+- **No singleflight crate on the JioTV path.** Concurrent JioTV live-URL
+  fetches each make their own upstream call. TV+'s catalogue/token-refresh/
+  playback paths *do* de-duplicate concurrent callers (a per-key
+  `tokio::sync::Mutex` map with a cache re-check inside the lock — same
+  effect as `singleflight.Group.Do`, no extra crate).
+- **TV+ is compiled into both builds**, not feature-gated out of `slim`
+  (it's small — a JSON HTTP client — and disabled by default via
+  `tvplus = false`, but it does add a little to the slim binary that a
+  router deployment with TV+ permanently off will never use).
+- The Sony DAI (`sl*`) channels and JioTV's own "premium providers"
+  (SonyLIV/ZEE5 content bundled into a *JioTV* account, unrelated to TV+) are
+  not part of the TV+ routing — see their own bullets below.
 - **On-demand (JioCinema/ZEE5/MX Player)** — the `/api/ott/*`, `/vod.m3u`,
   `/vod/:id`, `/vod/license/:id` surface is not implemented (`/api/ott/play/:id`
   returns 501).
@@ -176,10 +192,7 @@ This is a partial rewrite. The pieces below exist in the Go version and do
 - Login credential refresh (`login::LoginClient::refresh`,
   `token_refresh::ensure_fresh`) only covers the JWT-`exp` case; the SSO
   token's own fallback-TTL refresh path (for non-JWT tokens) is not ported.
-- `/render.mpd`'s CDN Set-Cookie is not forwarded to the client (segment
-  auth is instead carried in the encrypted `/render.dash/.../hdnea/...` path
-  segment); a client that needed the cookie directly against the CDN
-  wouldn't get it.
+- `/render.mpd`'s CDN Set-Cookie is not forwarded to the client (see above).
 
 None of the above were exercised against the real JioTV/JioTV+/ZEE5 APIs —
 per the project's rules, this was built and tested with unit tests, a mock

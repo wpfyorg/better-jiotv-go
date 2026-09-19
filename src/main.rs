@@ -66,6 +66,8 @@ fn main() -> anyhow::Result<()> {
         cli::Command::KeyRotate => rotate_key(&access),
         cli::Command::EpgGenerate => runtime.block_on(epg_generate(&path_prefix)),
         cli::Command::EpgDelete => epg_delete(&path_prefix),
+        cli::Command::BackgroundStart { args } => background_start(&args, &path_prefix),
+        cli::Command::BackgroundStop => background_stop(&path_prefix),
         cli::Command::Help => unreachable!(),
     }
 }
@@ -122,6 +124,76 @@ async fn epg_generate(path_prefix: &str) -> anyhow::Result<()> {
     epg::generate_xml_gz(&client, &path).await?;
     println!("EPG file generated successfully at {path}");
     Ok(())
+}
+
+const PID_FILE_NAME: &str = ".jiotv.pid";
+
+/// Starts `serve` as a detached child process (re-invoking this same
+/// binary) and records its PID, so `background stop` can find it later.
+/// Mirrors `RunInBackground`.
+fn background_start(args: &str, path_prefix: &str) -> anyhow::Result<()> {
+    println!("Starting jiotv server in background...");
+    let pid_path = format!("{path_prefix}{PID_FILE_NAME}");
+    let exe = std::env::current_exe()?;
+
+    let mut cmd_args: Vec<String> = vec!["--skip-update-check".to_string(), "serve".to_string()];
+    cmd_args.extend(args.split_whitespace().map(str::to_string));
+
+    let mut child = std::process::Command::new(&exe)
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to start command: {e}"))?;
+
+    std::fs::write(&pid_path, child.id().to_string())?;
+
+    // Surface an immediate crash (bad flags, port in use) instead of
+    // reporting success for a process that's already gone.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    if let Some(status) = child.try_wait()? {
+        let _ = std::fs::remove_file(&pid_path);
+        anyhow::bail!("server exited immediately after start: {status}");
+    }
+
+    println!("jiotv server started successfully in background.");
+    Ok(())
+}
+
+/// Reads the PID file `background_start` wrote and kills that process.
+/// Mirrors `StopBackground`.
+fn background_stop(path_prefix: &str) -> anyhow::Result<()> {
+    println!("Stopping jiotv server running in background...");
+    let pid_path = format!("{path_prefix}{PID_FILE_NAME}");
+    let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| anyhow::anyhow!("failed to read PID file: {e}"))?;
+    let pid: u32 = pid_str.trim().parse().map_err(|_| anyhow::anyhow!("failed to parse PID file"))?;
+
+    #[cfg(unix)]
+    {
+        // SAFETY: libc::kill with a valid PID and SIGTERM is the standard,
+        // side-effect-contained way to ask another process to exit; no
+        // pointers or shared memory are involved.
+        let ret = unsafe { libc_kill(pid as i32, 15) };
+        if ret != 0 {
+            anyhow::bail!("failed to kill jiotv process {pid}");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to kill jiotv process {pid}: {e}"))?;
+    }
+
+    std::fs::remove_file(&pid_path)?;
+    println!("jiotv server stopped successfully.");
+    Ok(())
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "kill"]
+    fn libc_kill(pid: i32, sig: i32) -> i32;
 }
 
 fn epg_delete(path_prefix: &str) -> anyhow::Result<()> {
@@ -406,6 +478,7 @@ fn print_help() {
          tvplus login | tvplus logout   (JioTV+, off by default; needs tvplus = true / JIOTV_TVPLUS=true)\n  \
          epg generate | epg delete\n  \
          admin password\n  \
-         key show | key rotate\n"
+         key show | key rotate\n  \
+         background start [--args \"...\"] | background stop\n"
     );
 }

@@ -306,6 +306,7 @@ async fn channels_or_playlist(
     };
     state.tvplus.refresh_catalogue_if_needed(&state.tv).await;
     list.result.extend(state.tvplus.exclusive_channels(&list.result));
+    list.result.extend(state.custom_channels.all());
 
     if q.get("type").map(String::as_str) != Some("m3u") {
         return axum::Json(list.result).into_response();
@@ -516,9 +517,7 @@ mod tests {
 
         // Custom channels short-circuit before any network call, so they
         // exercise real extraction+handler logic with zero upstream I/O.
-        let custom_json = format!(
-            "{{\"channels\":[{{\"id\":\"custom1\",\"name\":\"Custom\",\"url\":\"https://example.com/x.m3u8\"}}]}}"
-        );
+        let custom_json = r#"{"channels":[{"id":"custom1","name":"Custom","url":"https://example.com/x.m3u8"}]}"#;
         let dir = tempfile::tempdir().unwrap();
         let custom_path = dir.path().join("custom.json");
         std::fs::write(&custom_path, custom_json).unwrap();

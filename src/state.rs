@@ -6,6 +6,7 @@ use crate::secureurl::SecureUrl;
 use crate::store::Store;
 use crate::stream::RenderCaches;
 use crate::television::Television;
+use crate::tvplus_state::TvPlusState;
 use std::sync::Arc;
 
 pub struct AppState {
@@ -27,17 +28,38 @@ pub struct AppState {
     pub custom_channels: Arc<CustomChannels>,
     pub render_caches: RenderCaches,
     pub dash_state: DashState,
+    pub tvplus: Arc<TvPlusState>,
 }
 
 impl AppState {
+    /// Mirrors `isDRMChannel`: DRM state comes from the TV+ learned map when
+    /// the channel routes through TV+, else the static JioTV DRM list.
+    /// Callers on a hot path that needs a fresh mirrors lookup should await
+    /// `tvplus.refresh_catalogue_if_needed` first (playlist/channels
+    /// handlers already do).
     pub fn is_drm_channel(&self, id: &str) -> bool {
-        crate::drm_channels::is_drm_channel(id) || self.drm_channels.read().unwrap().contains(id)
+        if !self.config.drm {
+            return false;
+        }
+        match self.tvplus.route(id, self.tv.logged_in(), self.custom_channels.contains(id)) {
+            Some(content_id) => {
+                let is_tvp_id = TvPlusState::is_tvplus_channel(id);
+                self.tvplus
+                    .is_drm(&content_id, is_tvp_id)
+                    .unwrap_or_else(|| crate::drm_channels::is_drm_channel(id) || self.drm_channels.read().unwrap().contains(id))
+            }
+            None => crate::drm_channels::is_drm_channel(id) || self.drm_channels.read().unwrap().contains(id),
+        }
     }
 
+    /// Mirrors `channelPlayable`: false only for a JioTV channel that needs
+    /// a JioTV login when there is none and TV+ (standing in for it) does
+    /// not carry it.
     pub fn is_playable(&self, id: &str) -> bool {
-        // Without TV+ wired in, a channel is playable when a JioTV login is
-        // present, or when it's a locally-defined custom channel (TV+
-        // mirrors are a documented gap; see the final report).
-        self.tv.logged_in() || self.custom_channels.contains(id)
+        let is_custom = self.custom_channels.contains(id);
+        if self.tv.logged_in() || !self.tvplus.connected() || is_custom {
+            return true;
+        }
+        self.tvplus.route(id, self.tv.logged_in(), is_custom).is_some()
     }
 }

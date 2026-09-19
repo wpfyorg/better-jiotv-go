@@ -141,9 +141,18 @@ fn absolute_base_from_live(live: &LiveUrlOutput) -> Option<String> {
     None
 }
 
-/// Fetches a fresh playback URL for `channel_id`. No singleflight dedup (see
-/// module docs): concurrent callers each make their own upstream request.
-async fn fetch_live(state: &AppState, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
+/// Fetches a fresh playback URL for `channel_id`, from TV+ when it routes
+/// there and from JioTV otherwise — mirrors `getLiveResult`. JioTV's own
+/// token refresh is skipped on a TV+ route (TV+ manages its own tokens).
+/// JioTV calls have no singleflight dedup (see module docs); the TV+ path
+/// does, via `TvPlusState::live`.
+pub(crate) async fn fetch_live(state: &AppState, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
+    let is_custom = state.custom_channels.contains(channel_id);
+    state.tvplus.refresh_catalogue_if_needed(&state.tv).await;
+    if let Some(content_id) = state.tvplus.route(channel_id, state.tv.logged_in(), is_custom) {
+        return state.tvplus.live(&content_id, &state.store).await;
+    }
+    crate::token_refresh::ensure_fresh(state).await;
     state.tv.live(channel_id).await
 }
 
@@ -182,6 +191,13 @@ async fn live_impl(state: &Arc<AppState>, id: &str, quality: &str, prefix: &Opti
 
     let mut live_url = television::select_best_live_hls_url(&live, quality);
     if live_url.is_empty() {
+        // A TV+ channel with only DASH: send the player to the MPD route.
+        let is_custom = state.custom_channels.contains(id);
+        let via_tvplus = state.tvplus.route(id, state.tv.logged_in(), is_custom).is_some();
+        if via_tvplus && television::has_dash(&live) {
+            let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
+            return Redirect::to(&format!("{prefix_str}/live/mpd/{id}?q={quality}")).into_response();
+        }
         let message = format!("No stream found for channel id: {id}Status: {}", live.message);
         return (StatusCode::NOT_FOUND, message).into_response();
     }
@@ -515,7 +531,11 @@ pub async fn render_ts_handler(State(state): State<Arc<AppState>>, Query(q): Que
 }
 
 async fn proxy_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16, Vec<u8>, Option<String>) {
-    let mut req = state.http.get(url).header(header::USER_AGENT, television::PLAYER_USER_AGENT);
+    let ua = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| state.tvplus.player_user_agent_for(h)))
+        .unwrap_or(television::PLAYER_USER_AGENT);
+    let mut req = state.http.get(url).header(header::USER_AGENT, ua);
     if let Some(t) = hdnea {
         req = req.header(header::COOKIE, format!("__hdnea__={t}"));
     }
@@ -530,6 +550,9 @@ async fn proxy_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16
     }
 }
 
+/// `/render.key` — an AES-128 HLS key request. Mirrors `RenderKeyHandler`:
+/// a TV+-routed channel gets the JioTV+ app's key headers
+/// (`tvPlusKeyHeaders`); otherwise it gets the usual JioTV ones.
 pub async fn render_key_handler(State(state): State<Arc<AppState>>, Query(q): Query<SegmentQuery>) -> Response {
     let Some(auth) = q.auth else {
         return (StatusCode::BAD_REQUEST, "auth is required").into_response();
@@ -539,12 +562,41 @@ pub async fn render_key_handler(State(state): State<Arc<AppState>>, Query(q): Qu
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
     let hdnea = q.hdnea.clone().or_else(|| extract_hdnea_from_url(&decoded));
-    let (status, body, ct) = proxy_segment(&state, &decoded, hdnea.as_deref()).await;
-    let mut builder = Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY));
-    if let Some(ct) = ct {
-        builder = builder.header(header::CONTENT_TYPE, ct);
+    let channel_id = q.channel_key_id.clone().unwrap_or_default();
+    let is_custom = state.custom_channels.contains(&channel_id);
+
+    let mut req = state.http.get(&decoded).header(header::USER_AGENT, television::PLAYER_USER_AGENT);
+    if let Some(t) = &hdnea {
+        req = req.header(header::COOKIE, format!("__hdnea__={t}"));
     }
-    builder.body(Body::from(body)).unwrap()
+    if let Some(content_id) = state.tvplus.route(&channel_id, state.tv.logged_in(), is_custom) {
+        for (k, v) in state.tvplus.key_headers(&content_id) {
+            req = req.header(k, v);
+        }
+    } else {
+        let creds = state.tv.creds.read().unwrap().clone().unwrap_or_default();
+        req = req
+            .header("srno", "230203144000")
+            .header("ssotoken", &creds.sso_token)
+            .header("channelId", &channel_id)
+            .header("accesstoken", &creds.access_token)
+            .header("crmid", &creds.crm)
+            .header("uniqueId", &creds.unique_id);
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
+            let bytes = resp.bytes().await.unwrap_or_default();
+            let mut builder = Response::builder().status(status);
+            if let Some(ct) = ct {
+                builder = builder.header(header::CONTENT_TYPE, ct);
+            }
+            builder.body(Body::from(bytes)).unwrap()
+        }
+        Err(_) => (StatusCode::BAD_GATEWAY, "key upstream request failed").into_response(),
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +685,7 @@ mod tests {
             custom_channels: std::sync::Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
+            tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
         };
         let body = "#EXTM3U\nseg1.ts\n";
         let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");

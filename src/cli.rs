@@ -1,6 +1,5 @@
 //! Command-line parsing with `lexopt`, mirroring the subcommands in
-//! `main.go`. Only a subset is implemented; see the top-level README for the
-//! current gaps (`epg`, `background`, `autostart`, `update` are not ported).
+//! `main.go`.
 
 pub enum Command {
     Serve(ServeArgs),
@@ -15,6 +14,9 @@ pub enum Command {
     EpgDelete,
     BackgroundStart { args: String },
     BackgroundStop,
+    Update { version: Option<String> },
+    Autostart { args: String },
+    AutostartRemove,
     Help,
 }
 
@@ -57,6 +59,7 @@ pub fn parse() -> anyhow::Result<Args> {
     let mut command = None;
     let mut serve = ServeArgs::default();
     let mut background_args = String::new();
+    let mut version = None;
 
     let mut parser = lexopt::Parser::from_env();
     let mut positionals: Vec<String> = Vec::new();
@@ -73,6 +76,7 @@ pub fn parse() -> anyhow::Result<Args> {
             Long("tunnel") => serve.tunnel = true,
             Long("tunnel-token") => serve.tunnel_token = Some(parser.value()?.parse()?),
             Long("args") | Short('a') => background_args = parser.value()?.parse()?,
+            Long("version") => version = Some(parser.value()?.parse()?),
             Long("help") | Short('h') => {
                 command = Some(Command::Help);
             }
@@ -117,6 +121,12 @@ pub fn parse() -> anyhow::Result<Args> {
                 Some("start") | Some("run") | Some("r") => Command::BackgroundStart { args: background_args },
                 Some("stop") | Some("k") | Some("kill") => Command::BackgroundStop,
                 other => anyhow::bail!("usage: jiotv background start|stop (got {other:?})"),
+            },
+            Some("update") | Some("upgrade") | Some("u") => Command::Update { version },
+            Some("autostart") | Some("as") => match positionals.get(1).map(String::as_str) {
+                None | Some("install") | Some("enable") => Command::Autostart { args: background_args },
+                Some("remove") | Some("disable") | Some("uninstall") => Command::AutostartRemove,
+                Some(other) => anyhow::bail!("usage: jiotv autostart [--args \"...\"] | autostart remove (got {other})"),
             },
             Some(other) => anyhow::bail!("unknown command: {other}"),
         });

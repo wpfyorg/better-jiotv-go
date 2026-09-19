@@ -69,7 +69,34 @@ jiotv epg generate     # generate epg.xml.gz now
 jiotv epg delete       # delete epg.xml.gz
 jiotv background start [--args "..."]   # run `serve` detached, args passed through
 jiotv background stop                   # stop it (reads the PID file background start wrote)
+jiotv update [--version vX.Y.Z]         # install a release (latest by default)
+jiotv autostart [--args "..."]          # run at boot as a systemd service
+jiotv autostart remove                  # remove that service
 ```
+
+### Update
+
+`jiotv update` downloads the build you are running (full or slim, for this
+OS and CPU) from the GitHub releases of `wpfyorg/jiotv_go-tvplus`, checks it
+against the release's `SHA256SUMS`, and replaces the binary. Restart the
+server afterwards. The repository is private, so set `JIOTV_UPDATE_TOKEN`
+(or `GITHUB_TOKEN`) to a token that can read it; `JIOTV_UPDATE_REPO` points
+it at another repository. `serve` prints a line when a newer release exists,
+unless `--skip-update-check` is given.
+
+Releases are built by `.github/workflows/release.yml` when a tag matching
+the `Cargo.toml` version (for example `v0.2.0`) is pushed.
+
+### Autostart
+
+On Linux with systemd, `jiotv autostart --args "--host 0.0.0.0 --port 5001"`
+installs and starts a `jiotv` service: `/etc/systemd/system/jiotv.service`
+when run as root, otherwise a user service in `~/.config/systemd/user/` (run
+`sudo loginctl enable-linger $USER` once so it starts at boot). The `JIOTV_*`
+variables of the shell you run it from, and the data directory, are saved to
+an env file readable only by its owner. `jiotv autostart remove` undoes it.
+On Termux it adds a `background start` line to the shell rc file instead. On
+OpenWrt the openwrt-jiotv-go package's init script starts the server.
 
 `--config <path>` and `--skip-update-check` are accepted at the top level, as
 in the Go version.
@@ -209,20 +236,8 @@ This is a partial rewrite. The pieces below exist in the Go version and do
 - **Premium providers** (SonyLIV/ZEE5-style content bundled into a JioTV
   account itself, distinct from JioTV+ on-demand — `PremiumProviders`,
   `/premium/*` in the Go tree) are not implemented.
-- **`update` is dropped, not ported.** The Go version downloaded a new
-  release binary from GitHub and replaced itself; this rewrite has no
-  release process to point that at yet, and "download and exec a binary
-  fetched over the network" is exactly the kind of thing to not add
-  speculatively. Update via your own package manager / redeploy instead.
-- **`autostart` (the Termux/bash-profile convenience) is dropped, not
-  ported.** It only ever added a line to `~/.bashrc`; low value relative to
-  its slice of the rewrite, and easy to do by hand (`echo 'jiotv background
-  start' >> ~/.bashrc`) if you want it.
 - `background start`/`background stop` (run `serve` detached, stop it via a
   PID file) **are** ported — see the CLI list above.
-- Login credential refresh (`login::LoginClient::refresh`,
-  `token_refresh::ensure_fresh`) only covers the JWT-`exp` case; the SSO
-  token's own fallback-TTL refresh path (for non-JWT tokens) is not ported.
 - The daily EPG regeneration loop approximates the Go version's "random
   off-peak hour the next day" scheduling with a simpler "~24h +/- 1h
   jitter" sleep, rather than reproducing its exact hour arithmetic.

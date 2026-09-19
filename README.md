@@ -63,7 +63,10 @@ jiotv login reset      # delete the saved login
 jiotv admin password   # set/replace the full build's admin password
 jiotv key show         # print the current keyed playlist URL
 jiotv key rotate       # replace the access key (old playlist URLs stop working)
-jiotv tvplus login|logout   # not implemented yet, see below
+jiotv tvplus login     # interactive OTP login to JioTV+ (needs tvplus = true)
+jiotv tvplus logout    # delete the saved JioTV+ login
+jiotv epg generate     # generate epg.xml.gz now
+jiotv epg delete       # delete epg.xml.gz
 ```
 
 `--config <path>` and `--skip-update-check` are accepted at the top level, as

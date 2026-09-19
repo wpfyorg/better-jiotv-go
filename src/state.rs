@@ -29,6 +29,7 @@ pub struct AppState {
     pub render_caches: RenderCaches,
     pub dash_state: DashState,
     pub tvplus: Arc<TvPlusState>,
+    pub vod_state: crate::vod::VodState,
 }
 
 impl AppState {

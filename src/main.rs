@@ -19,6 +19,7 @@ mod token_refresh;
 mod tunnel;
 mod tvplus;
 mod tvplus_state;
+mod vod;
 
 #[cfg(feature = "full")]
 mod ui_assets;
@@ -212,6 +213,7 @@ async fn serve(
         render_caches: Default::default(),
         dash_state: Default::default(),
         tvplus: tvplus_state,
+        vod_state: Default::default(),
     });
 
     if cfg.epg {

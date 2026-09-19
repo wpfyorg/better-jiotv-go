@@ -1,53 +1,18 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-build/
-jiotv_go
+# Rust
+/target/
+Cargo.lock.bak
 
-# Main binary
-jiotv_go
-
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool, specifically when used with LiteIDE
-*.out
-
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Environment variables file
-.env
-
-# Go workspace file
-go.work
-
-# Credential file
-credentials.json
+# Local store / credentials (never commit real ones)
+store_v4.toml
 jiotv_credentials.json
-jiotv_credentials_v2.json
-.jiotv_go
+.jiotv_go/
 
 # Playlist .m3u file
 *.m3u
 
-# Node
-node_modules/
+# Node (web/ui)
+web/ui/node_modules/
 web/node_modules/
-web/coverage/
-
-# Logs
-jiotv_go.log
-jiotv_go*.log
-
-# EPG
-epg.xml.gz
 
 # config
 config.json
@@ -57,9 +22,8 @@ jiotv.yml
 jiotv.toml
 jiotv.json
 
-# MdBook Docs
-docs/book/
-book/
+# EPG
+epg.xml.gz
 
-# pnpm files
-pnpm*
+# Logs
+jiotv*.log

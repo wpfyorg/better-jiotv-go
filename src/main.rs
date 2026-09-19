@@ -1,13 +1,19 @@
 mod access;
 mod api;
+mod catchup;
 mod cli;
 mod config;
+mod custom_channels;
+mod dash;
+mod drm_channels;
 mod login;
 mod secureurl;
 mod server;
 mod state;
 mod store;
+mod stream;
 mod television;
+mod token_refresh;
 mod tunnel;
 
 #[cfg(feature = "full")]
@@ -59,6 +65,22 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
+/// A stable per-install device ID, matching the Go version's
+/// `GetDeviceID`/`GenerateRandomString` (16 hex characters, persisted in the
+/// store under `deviceId`).
+fn device_id(store: &store::Store) -> anyhow::Result<String> {
+    if let Some(id) = store.get_opt("deviceId") {
+        if !id.is_empty() {
+            return Ok(id);
+        }
+    }
+    let mut bytes = [0u8; 8];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    let id = hex::encode(bytes);
+    store.set("deviceId", &id)?;
+    Ok(id)
+}
+
 fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     let prefix = if !cfg.path_prefix.is_empty() {
         cfg.path_prefix.clone()
@@ -87,9 +109,18 @@ async fn serve(
     args: cli::ServeArgs,
 ) -> anyhow::Result<()> {
     let http = reqwest::Client::builder().build()?;
-    let tv = Arc::new(television::Television::new(http.clone()));
+    let device_id = device_id(&store)?;
+    let tv = Arc::new(television::Television::with_device_id(http.clone(), device_id));
     if let Some(creds) = login::load(&store) {
         tv.set_credentials(creds);
+    }
+
+    let custom_channels = Arc::new(custom_channels::CustomChannels::new());
+    if !cfg.custom_channels_file.is_empty() {
+        match custom_channels.load(&cfg.custom_channels_file) {
+            Ok(n) => println!("Loaded {n} custom channels from {}", cfg.custom_channels_file),
+            Err(e) => eprintln!("Warning: could not load custom channels from {}: {e}", cfg.custom_channels_file),
+        }
     }
 
     let state = Arc::new(state::AppState {
@@ -100,6 +131,9 @@ async fn serve(
         secure,
         http,
         drm_channels: Default::default(),
+        custom_channels,
+        render_caches: Default::default(),
+        dash_state: Default::default(),
     });
 
     if !cfg.disable_auth {

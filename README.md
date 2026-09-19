@@ -111,39 +111,69 @@ directory keeps working.
   gate's behaviour.
 - The `--tunnel` / `--tunnel-token` cloudflared wrapper.
 - `/jtvimage/:file` logo proxy.
+- **Live HLS proxying**: `/live/:id`, `/live/:quality/:id`, `/render.m3u8`
+  (manifest rewriting so every segment/key URI routes back through this
+  server, HDNEA cookie caching and refresh-on-401/403/404 with a
+  quality-fallback retry chain, a short "recently dead" cooldown per
+  channel), `/render.ts`, `/render.key`.
+- **DASH/Widevine proxying**: `/live/mpd/:id`, `/live/key/:id`,
+  `/render.mpd` (BaseURL rewriting, injected UTCTiming, CDN publish-time
+  clock tracking), `/render.dash/*` segment proxying, `/dashtime`, and the
+  `/drm` Widevine license proxy (with the cookie-harvesting HEAD request and
+  JioTV auth headers `DRMKeyHandler` sends).
+- The static `drm_channels.go` DRM channel-ID list (`src/drm_channels.rs`,
+  copied verbatim, 970 IDs), used by the playlist and `/live/mpd` routing.
+- Custom channels (`custom_channels_file`, JSON only — see the config gap
+  below).
+- Catchup stream resolution (`/catchup/stream/:id`), redirecting into the
+  same `/render.m3u8` pipeline as live channels.
+- A reduced `EnsureFreshCredentials`: refreshes the JioTV access token when
+  its own JWT `exp` claim is close, using the saved refresh token.
 
 ## What is NOT at parity yet (be aware before relying on this)
 
 This is a partial rewrite. The pieces below exist in the Go version and do
-**not** exist here yet:
+**not** exist here yet, or exist at reduced fidelity:
 
-- **Live stream proxying** (`/live/:id`, `/live/:quality/:id`,
-  `/render.m3u8`, `/render.ts`, `/render.key`, `/live/mpd/:id`,
-  `/live/key/:id`, `/render.mpd`, `/render.dash/*`, `/dashtime`) and the DRM
-  license proxy (`/drm`) are not implemented. The playlist links to these
-  routes, but they 404. This is the biggest gap: without it, channels don't
-  actually play yet.
+- **No singleflight / request de-duplication.** The Go version funnels
+  concurrent requests for the same channel's playback URL through a single
+  upstream call (`singleflight`); this rewrite does not, so a burst of
+  simultaneous requests for one channel makes that many upstream calls.
 - **JioTV+ (`tvplus`)** — login, catalogue, mirrors, learned stream-type
   persistence, all of it — is not implemented. The CLI subcommand exists and
-  prints a "not implemented" message.
+  prints a "not implemented" message. `tvPlusRoute`/`tvPlusKeyHeaders`-style
+  branches in the Go stream/DRM handlers (TV+ CDN user-agent switching, the
+  MPD→HLS/HLS→MPD fallback redirects for TV+-only channels) have no
+  equivalent here.
 - **On-demand (JioCinema/ZEE5/MX Player)** — the `/api/ott/*`, `/vod.m3u`,
   `/vod/:id`, `/vod/license/:id` surface is not implemented (`/api/ott/play/:id`
   returns 501).
 - **EPG generation** (`epg.xml.gz`) is not implemented; `epg generate`/`epg
-  delete` CLI commands don't exist yet.
-- **Catchup** is not implemented.
-- **Custom channels** (`custom_channels_file`) and the hardcoded Sony DAI
-  channel list are not implemented.
-- **DRM channel detection** (`drm_channels.go`'s list) is not implemented;
-  `AppState::is_drm_channel` always returns false, so the playlist never
-  emits `/live/mpd/...` entries yet.
+  delete` CLI commands don't exist yet. The playlist still advertises
+  `x-tvg-url="<host>/epg.xml.gz"`, which will 404.
+- **Catchup EPG browsing** (`/catchup/:id` listing page, catchup player
+  pages) is not implemented — only the stream-resolution endpoint is. There
+  is no template engine in this rewrite and the Svelte UI has no catchup
+  browser yet.
+- **Custom channels file format**: JSON only (`{"channels": [...]}`); the Go
+  version also auto-detected YAML.
+- **Sony DAI channels** (`sl*`-prefixed IDs backed by Google DAI HLS URLs,
+  `SONY_CHANNELS`/`SONY_JIO_MAP` in the Go tree) are not implemented.
+- **Premium providers** (SonyLIV/ZEE5-style content bundled into a JioTV
+  account itself, distinct from JioTV+ on-demand — `PremiumProviders`,
+  `/premium/*` in the Go tree) are not implemented.
 - `update`, `epg`, `background`, `autostart` CLI subcommands are not ported.
-- The Watch page in the Svelte UI still expects a working `/mpd/:id` /
-  `/live/...` backend; it has not been re-pointed at a Shaka/hls.js in-app
-  player, since the server side it would call isn't implemented yet either.
-- Login credential refresh (`login::LoginClient::refresh`) is implemented
-  but not wired into a background refresh loop.
+- The Watch page in the Svelte UI still expects the old Go-template player
+  pages; it has not been re-pointed at an in-app Shaka/hls.js player.
+- Login credential refresh (`login::LoginClient::refresh`,
+  `token_refresh::ensure_fresh`) only covers the JWT-`exp` case; the SSO
+  token's own fallback-TTL refresh path (for non-JWT tokens) is not ported.
+- `/render.mpd`'s CDN Set-Cookie is not forwarded to the client (segment
+  auth is instead carried in the encrypted `/render.dash/.../hdnea/...` path
+  segment); a client that needed the cookie directly against the CDN
+  wouldn't get it.
 
 None of the above were exercised against the real JioTV/JioTV+/ZEE5 APIs —
-per the project's rules, this was built and tested with unit tests and mock
-servers only.
+per the project's rules, this was built and tested with unit tests, a mock
+HTTP server (`wiremock`), and manifest/URL-rewriting unit tests using
+hand-written fixtures.

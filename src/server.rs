@@ -69,6 +69,7 @@ fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/ott/screen/:id", get(crate::vod::api_ott_screen))
         .route("/api/ott/show/:id", get(crate::vod::api_ott_episodes))
         .route("/api/ott/play/:id", get(crate::vod::api_ott_play))
+        .route("/api/live/play/:id", get(crate::api::live_play))
         .route("/api/ott/license/:id", post(crate::vod::ott_license))
         .with_state(state)
 }
@@ -539,6 +540,7 @@ mod tests {
             // require_client()'s check, never touching the network either.
             "/vod/999999",
             "/api/ott/screen/1",
+            "/api/live/play/custom1",
             "/api/ott/show/999999",
         ];
         for path in paths {

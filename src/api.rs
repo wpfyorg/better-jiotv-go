@@ -4,12 +4,13 @@
 //! build, which does not compile this module in at all.
 
 use crate::state::AppState;
-use axum::extract::{ConnectInfo, State};
+use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -299,6 +300,45 @@ pub async fn tvplus_logout(State(state): State<SharedState>) -> Response {
         Ok(()) => Json(json!({"status": true})).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+/// `GET /api/live/play/:id?q=` — resolves a live channel to what the
+/// in-app player needs, the same shape `/api/ott/play/:id` gives
+/// `VodPlayer.svelte` (`{dash, url, license}`), so `Watch.svelte` can use
+/// the same Shaka/hls.js logic instead of the old Go-template `/mpd/:id`
+/// iframe. Tries DASH first via the same `get_drm_mpd` the IPTV
+/// `/live/mpd/:id` route uses, falling back to HLS exactly like
+/// `LiveHandler` does when there's no DASH stream.
+pub async fn live_play(Path(id): Path<String>, Query(q): Query<HashMap<String, String>>, State(state): State<SharedState>) -> Response {
+    let quality = q.get("q").cloned().unwrap_or_else(|| "auto".to_string());
+
+    if let Some(ch) = state.custom_channels.get(&id) {
+        return Json(json!({"dash": false, "url": ch.url, "license": null})).into_response();
+    }
+
+    if let Ok(out) = crate::dash::get_drm_mpd(&state, &id, &quality).await {
+        if !out.play_url.is_empty() {
+            let license = if out.license_url.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(out.license_url)
+            };
+            return Json(json!({"dash": true, "url": out.play_url, "license": license})).into_response();
+        }
+    }
+
+    let live = match crate::stream::fetch_live(&state, &id).await {
+        Ok(l) => l,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let live_url = crate::television::select_best_live_hls_url(&live, &quality);
+    if live_url.is_empty() {
+        return err(StatusCode::NOT_FOUND, format!("No stream found for channel id: {id}"));
+    }
+    let abs = crate::stream::to_absolute_stream_url(&live_url, crate::stream::absolute_base_from_live(&live).as_deref());
+    let encrypted = state.secure.encrypt(&abs);
+    let url = format!("/render.m3u8?auth={encrypted}&channel_key_id={id}");
+    Json(json!({"dash": false, "url": url, "license": null})).into_response()
 }
 
 #[cfg(test)]

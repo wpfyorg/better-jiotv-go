@@ -7,6 +7,7 @@ mod custom_channels;
 mod dash;
 mod drm_channels;
 mod epg;
+mod keyed_locks;
 mod login;
 mod secureurl;
 mod server;
@@ -65,6 +66,49 @@ fn main() -> anyhow::Result<()> {
         cli::Command::EpgGenerate => runtime.block_on(epg_generate(&path_prefix)),
         cli::Command::EpgDelete => epg_delete(&path_prefix),
         cli::Command::Help => unreachable!(),
+    }
+}
+
+/// Regenerates `epg.xml.gz` once if it's missing or more than a day old,
+/// then keeps regenerating roughly once every 24h (jittered by up to an
+/// hour either way, off-peak-ish like the Go version's random schedule)
+/// for as long as the server runs. Mirrors `epg.Init`'s startup check plus
+/// its "schedule the next run" loop, without reproducing its exact
+/// day+1-at-a-random-hour arithmetic.
+async fn epg_task_loop(state: Arc<state::AppState>, http: reqwest::Client, epg_path: String) {
+    loop {
+        let needs_generation = match std::fs::metadata(&epg_path) {
+            Ok(meta) => meta
+                .modified()
+                .ok()
+                .and_then(|m| m.elapsed().ok())
+                .map(|age| age > std::time::Duration::from_secs(24 * 60 * 60))
+                .unwrap_or(true),
+            Err(_) => true,
+        };
+        if needs_generation {
+            println!("Generating EPG file in the background (JIOTV_EPG=true)...");
+            let (extra_channels, extra_programmes) = if state.tvplus.enabled() {
+                state.tvplus.epg_source(&state.tv).await.unwrap_or_else(|e| {
+                    tracing::warn!("JioTV+ EPG source skipped: {e}");
+                    (Vec::new(), Vec::new())
+                })
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            match epg::generate_xml_gz_with(&http, &epg_path, extra_channels, extra_programmes).await {
+                Ok(()) => println!("EPG file generated at {epg_path}"),
+                Err(e) => tracing::warn!("EPG generation failed: {e}"),
+            }
+        }
+
+        let jitter_secs: i64 = {
+            let mut b = [0u8; 8];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut b);
+            (i64::from_le_bytes(b) % (2 * 60 * 60)) - 60 * 60 // +/- 1h
+        };
+        let sleep_secs = (24 * 60 * 60 + jitter_secs).max(60 * 60) as u64;
+        tokio::time::sleep(std::time::Duration::from_secs(sleep_secs)).await;
     }
 }
 
@@ -172,37 +216,7 @@ async fn serve(
 
     if cfg.epg {
         let epg_path = format!("{path_prefix}epg.xml.gz");
-        let needs_generation = match std::fs::metadata(&epg_path) {
-            Ok(meta) => {
-                let stale = meta
-                    .modified()
-                    .ok()
-                    .and_then(|m| m.elapsed().ok())
-                    .map(|age| age > std::time::Duration::from_secs(24 * 60 * 60))
-                    .unwrap_or(true);
-                stale
-            }
-            Err(_) => true,
-        };
-        if needs_generation {
-            let state_for_epg = state.clone();
-            tokio::spawn(async move {
-                println!("Generating EPG file in the background (JIOTV_EPG=true)...");
-                let (extra_channels, extra_programmes) = if state_for_epg.tvplus.enabled() {
-                    state_for_epg.tvplus.epg_source(&state_for_epg.tv).await.unwrap_or_else(|e| {
-                        tracing::warn!("JioTV+ EPG source skipped: {e}");
-                        (Vec::new(), Vec::new())
-                    })
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-                if let Err(e) = epg::generate_xml_gz_with(&http, &epg_path, extra_channels, extra_programmes).await {
-                    tracing::warn!("EPG generation failed: {e}");
-                } else {
-                    println!("EPG file generated at {epg_path}");
-                }
-            });
-        }
+        tokio::spawn(epg_task_loop(state.clone(), http, epg_path));
     }
 
     if !cfg.disable_auth {

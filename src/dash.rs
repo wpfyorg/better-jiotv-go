@@ -409,7 +409,7 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
         }
     }
 
-    body_str = rewrite_base_url(&body_str, &format!("{dash_base}/dash/"));
+    body_str = rewrite_base_url(&body_str, &dash_base);
 
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut builder = Response::builder().status(status_code).header(header::CONTENT_TYPE, "application/dash+xml");
@@ -425,20 +425,37 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
     builder.body(Body::from(body_str)).unwrap()
 }
 
-fn rewrite_base_url(body: &str, new_base: &str) -> String {
-    if let Some(start) = body.find("<BaseURL>") {
-        if let Some(end_rel) = body[start..].find("</BaseURL>") {
-            let end = start + end_rel + "</BaseURL>".len();
-            return format!("{}<BaseURL>{new_base}</BaseURL>{}", &body[..start], &body[end..]);
+/// Points segment requests at `/render.dash`, like Go's MpdHandler: every
+/// existing `<BaseURL>` becomes `<dash_base>/dash/`; without one, a
+/// `<BaseURL><dash_base>/</BaseURL>` goes after every `<Period ...>` tag.
+fn rewrite_base_url(body: &str, dash_base: &str) -> String {
+    if body.contains("<BaseURL>") {
+        let mut out = String::with_capacity(body.len());
+        let mut rest = body;
+        while let Some(start) = rest.find("<BaseURL>") {
+            let Some(end_rel) = rest[start..].find("</BaseURL>") else { break };
+            out.push_str(&rest[..start]);
+            out.push_str(&format!("<BaseURL>{dash_base}/dash/</BaseURL>"));
+            rest = &rest[start + end_rel + "</BaseURL>".len()..];
         }
+        out.push_str(rest);
+        return out;
     }
-    if let Some(period_start) = body.find("<Period") {
-        if let Some(tag_end_rel) = body[period_start..].find('>') {
-            let insert_at = period_start + tag_end_rel + 1;
-            return format!("{}\n<BaseURL>{}</BaseURL>{}", &body[..insert_at], new_base, &body[insert_at..]);
+    let mut out = String::with_capacity(body.len() + 128);
+    let mut rest = body;
+    while let Some(start) = rest.find("<Period") {
+        // Skip tags that only start with "<Period", such as <PeriodX>.
+        let after = rest[start + "<Period".len()..].chars().next();
+        let Some(tag_end_rel) = rest[start..].find('>') else { break };
+        let insert_at = start + tag_end_rel + 1;
+        out.push_str(&rest[..insert_at]);
+        if matches!(after, Some(c) if c.is_whitespace() || c == '>' || c == '/') {
+            out.push_str(&format!("\n<BaseURL>{dash_base}/</BaseURL>"));
         }
+        rest = &rest[insert_at..];
     }
-    body.to_string()
+    out.push_str(rest);
+    out
 }
 
 fn extract_publish_time(body: &str) -> Option<SystemTime> {
@@ -679,15 +696,24 @@ mod tests {
     #[test]
     fn rewrites_existing_base_url() {
         let body = "<Period><BaseURL>https://old/</BaseURL></Period>";
-        let out = rewrite_base_url(body, "/render.dash/host/x/path/y/dash/");
+        let out = rewrite_base_url(body, "/render.dash/host/x/path/y");
         assert_eq!(out, "<Period><BaseURL>/render.dash/host/x/path/y/dash/</BaseURL></Period>");
     }
 
     #[test]
     fn inserts_base_url_when_missing() {
         let body = "<Period id=\"0\"><AdaptationSet/></Period>";
-        let out = rewrite_base_url(body, "/render.dash/host/x/path/y/");
+        let out = rewrite_base_url(body, "/render.dash/host/x/path/y");
         assert!(out.contains("<Period id=\"0\">\n<BaseURL>/render.dash/host/x/path/y/</BaseURL>"));
+        assert!(!out.contains("/dash/"));
+    }
+
+    #[test]
+    fn rewrites_every_period_and_base_url() {
+        let two = "<Period id=\"a\"><AdaptationSet/></Period><Period id=\"b\"/>";
+        assert_eq!(rewrite_base_url(two, "/r").matches("<BaseURL>/r/</BaseURL>").count(), 2);
+        let bases = "<BaseURL>a/</BaseURL><Period><BaseURL>b/</BaseURL></Period>";
+        assert_eq!(rewrite_base_url(bases, "/r").matches("<BaseURL>/r/dash/</BaseURL>").count(), 2);
     }
 
     /// Regression test for a live-verified bug: channel 151's TV+-mirrored

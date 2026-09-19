@@ -1,5 +1,6 @@
 mod access;
 mod api;
+mod autostart;
 mod catchup;
 mod cli;
 mod config;
@@ -19,6 +20,7 @@ mod token_refresh;
 mod tunnel;
 mod tvplus;
 mod tvplus_state;
+mod update;
 mod vod;
 
 #[cfg(feature = "full")]
@@ -38,10 +40,6 @@ fn main() -> anyhow::Result<()> {
     let cfg = config::Config::load(args.config.as_deref())?;
     init_logging(&cfg);
 
-    if args.skip_update_check {
-        tracing::info!("Skipping update check");
-    }
-    // No update command is implemented in this rewrite yet (see README).
 
     let path_prefix = resolve_path_prefix(&cfg)?;
     let store = Arc::new(store::Store::open(&path_prefix)?);
@@ -56,7 +54,12 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     match args.command {
-        cli::Command::Serve(serve_args) => runtime.block_on(serve(cfg, path_prefix, store, access, secure, serve_args)),
+        cli::Command::Serve(serve_args) => {
+            if !args.skip_update_check {
+                runtime.spawn(update::check_quietly());
+            }
+            runtime.block_on(serve(cfg, path_prefix, store, access, secure, serve_args))
+        }
         cli::Command::LoginOtp => runtime.block_on(login_otp(store)),
         cli::Command::LoginReset => login_reset(&store),
         cli::Command::TvplusLogin => runtime.block_on(tvplus_login_cli(&store)),
@@ -68,6 +71,9 @@ fn main() -> anyhow::Result<()> {
         cli::Command::EpgDelete => epg_delete(&path_prefix),
         cli::Command::BackgroundStart { args } => background_start(&args, &path_prefix),
         cli::Command::BackgroundStop => background_stop(&path_prefix),
+        cli::Command::Update { version } => runtime.block_on(update::run(version.as_deref())),
+        cli::Command::Autostart { args: serve_args } => autostart::install(&serve_args, args.config.as_deref(), &path_prefix),
+        cli::Command::AutostartRemove => autostart::remove(),
         cli::Command::Help => unreachable!(),
     }
 }
@@ -482,6 +488,8 @@ fn print_help() {
          epg generate | epg delete\n  \
          admin password\n  \
          key show | key rotate\n  \
-         background start [--args \"...\"] | background stop\n"
+         background start [--args \"...\"] | background stop\n  \
+         update [--version vX.Y.Z]      (needs JIOTV_UPDATE_TOKEN for a private repo)\n  \
+         autostart [--args \"...\"] | autostart remove   (systemd service; Termux: shell rc)\n"
     );
 }

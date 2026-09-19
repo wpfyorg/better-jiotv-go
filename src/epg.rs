@@ -261,6 +261,9 @@ async fn fetch_web_epg(state: &AppState, channel_id: &str, offset: i64) -> Optio
 /// present moment, falling back to the original response if that retry
 /// fails. Mirrors `WebEPGHandler`/`webEPGWithCorrectedDay`.
 pub async fn web_epg_handler(Path((channel_id, offset)): Path<(String, String)>, State(state): State<Arc<AppState>>) -> Response {
+    if let Some(content_id) = crate::tvplus::content_id::content_id(&channel_id) {
+        return tvplus_web_epg(&state, content_id, &offset).await;
+    }
     let channel_id_trimmed = channel_id.strip_prefix("sl").unwrap_or(&channel_id);
     if channel_id_trimmed.parse::<i64>().is_err() {
         return (StatusCode::BAD_REQUEST, "Invalid channel ID").into_response();
@@ -288,6 +291,41 @@ pub async fn web_epg_handler(Path((channel_id, offset)): Path<(String, String)>,
     };
 
     Response::builder().status(status).header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).unwrap()
+}
+
+/// The web guide for a JioTV+ channel, in the same shape as JioTV's.
+/// Mirrors `tvPlusWebEPG`.
+async fn tvplus_web_epg(state: &AppState, content_id: &str, offset: &str) -> Response {
+    let Some(client) = state.tvplus.client_for_vod() else {
+        return (StatusCode::NOT_FOUND, "JioTV+ is not connected").into_response();
+    };
+    let offset = match offset.parse::<i64>() {
+        Ok(o) if o >= 0 => o,
+        _ => return (StatusCode::BAD_REQUEST, "Invalid offset").into_response(),
+    };
+    let guide = match client.epg(&[content_id.to_string()], &[offset]).await {
+        Ok(g) => g,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let entries: Vec<serde_json::Value> = guide
+        .get(content_id)
+        .map(|progs| {
+            progs
+                .iter()
+                .map(|p| {
+                    let poster = if p.thumbnail.ends_with('/') { "" } else { p.thumbnail.as_str() };
+                    serde_json::json!({
+                        "showname": p.title,
+                        "description": p.description,
+                        "startEpoch": p.start_epoch,
+                        "endEpoch": p.end_epoch,
+                        "episodePoster": poster,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    axum::Json(serde_json::json!({ "epg": entries })).into_response()
 }
 
 /// `GET /jtvposter/:date/:file`

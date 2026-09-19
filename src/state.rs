@@ -10,6 +10,9 @@ use std::sync::Arc;
 
 pub struct AppState {
     pub config: Config,
+    /// The resolved data directory (`config.path_prefix`, or `~/.jiotv_go`),
+    /// always ending in `/`. Used for `epg.xml.gz` and similar data files.
+    pub path_prefix: String,
     pub access: Arc<Access>,
     pub store: Arc<Store>,
     pub tv: Arc<Television>,

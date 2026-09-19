@@ -6,6 +6,7 @@ mod config;
 mod custom_channels;
 mod dash;
 mod drm_channels;
+mod epg;
 mod login;
 mod secureurl;
 mod server;
@@ -51,7 +52,7 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     match args.command {
-        cli::Command::Serve(serve_args) => runtime.block_on(serve(cfg, store, access, secure, serve_args)),
+        cli::Command::Serve(serve_args) => runtime.block_on(serve(cfg, path_prefix, store, access, secure, serve_args)),
         cli::Command::LoginOtp => runtime.block_on(login_otp(store)),
         cli::Command::LoginReset => login_reset(&store),
         cli::Command::TvplusLogin | cli::Command::TvplusLogout => {
@@ -61,8 +62,32 @@ fn main() -> anyhow::Result<()> {
         cli::Command::AdminPassword => admin_password(&access),
         cli::Command::KeyShow => show_key(&access),
         cli::Command::KeyRotate => rotate_key(&access),
+        cli::Command::EpgGenerate => runtime.block_on(epg_generate(&path_prefix)),
+        cli::Command::EpgDelete => epg_delete(&path_prefix),
         cli::Command::Help => unreachable!(),
     }
+}
+
+async fn epg_generate(path_prefix: &str) -> anyhow::Result<()> {
+    let path = format!("{path_prefix}epg.xml.gz");
+    println!("Deleting existing EPG file if exists");
+    let _ = std::fs::remove_file(&path);
+    println!("Generating new EPG file... this can take a few minutes.");
+    let client = reqwest::Client::new();
+    epg::generate_xml_gz(&client, &path).await?;
+    println!("EPG file generated successfully at {path}");
+    Ok(())
+}
+
+fn epg_delete(path_prefix: &str) -> anyhow::Result<()> {
+    let path = format!("{path_prefix}epg.xml.gz");
+    println!("Deleting existing EPG file if exists");
+    match std::fs::remove_file(&path) {
+        Ok(()) => println!("EPG file deleted"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("EPG file does not exist"),
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
 }
 
 /// A stable per-install device ID, matching the Go version's
@@ -89,7 +114,7 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
         format!("{home}/.jiotv_go")
     };
     std::fs::create_dir_all(&prefix)?;
-    Ok(prefix)
+    Ok(if prefix.ends_with('/') { prefix } else { format!("{prefix}/") })
 }
 
 fn init_logging(cfg: &config::Config) {
@@ -103,6 +128,7 @@ fn init_logging(cfg: &config::Config) {
 
 async fn serve(
     cfg: config::Config,
+    path_prefix: String,
     store: Arc<store::Store>,
     access: Arc<access::Access>,
     secure: Arc<secureurl::SecureUrl>,
@@ -125,16 +151,43 @@ async fn serve(
 
     let state = Arc::new(state::AppState {
         config: cfg.clone(),
+        path_prefix: path_prefix.clone(),
         access: access.clone(),
         store,
         tv,
         secure,
-        http,
+        http: http.clone(),
         drm_channels: Default::default(),
         custom_channels,
         render_caches: Default::default(),
         dash_state: Default::default(),
     });
+
+    if cfg.epg {
+        let epg_path = format!("{path_prefix}epg.xml.gz");
+        let needs_generation = match std::fs::metadata(&epg_path) {
+            Ok(meta) => {
+                let stale = meta
+                    .modified()
+                    .ok()
+                    .and_then(|m| m.elapsed().ok())
+                    .map(|age| age > std::time::Duration::from_secs(24 * 60 * 60))
+                    .unwrap_or(true);
+                stale
+            }
+            Err(_) => true,
+        };
+        if needs_generation {
+            tokio::spawn(async move {
+                println!("Generating EPG file in the background (JIOTV_EPG=true)...");
+                if let Err(e) = epg::generate_xml_gz(&http, &epg_path).await {
+                    tracing::warn!("EPG generation failed: {e}");
+                } else {
+                    println!("EPG file generated at {epg_path}");
+                }
+            });
+        }
+    }
 
     if !cfg.disable_auth {
         let playlist = access.playlist_path()?;

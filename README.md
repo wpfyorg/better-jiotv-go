@@ -129,6 +129,9 @@ directory keeps working.
   same `/render.m3u8` pipeline as live channels.
 - A reduced `EnsureFreshCredentials`: refreshes the JioTV access token when
   its own JWT `exp` claim is close, using the saved refresh token.
+- EPG generation (`jiotv epg generate`/`epg delete`, and a background
+  regenerate-if-missing-or-stale check on `serve` startup when `epg = true`)
+  and `/epg.xml.gz`, `/epg/:channelID/:offset`, `/jtvposter/:date/:file`.
 
 ## What is NOT at parity yet (be aware before relying on this)
 
@@ -148,9 +151,14 @@ This is a partial rewrite. The pieces below exist in the Go version and do
 - **On-demand (JioCinema/ZEE5/MX Player)** — the `/api/ott/*`, `/vod.m3u`,
   `/vod/:id`, `/vod/license/:id` surface is not implemented (`/api/ott/play/:id`
   returns 501).
-- **EPG generation** (`epg.xml.gz`) is not implemented; `epg generate`/`epg
-  delete` CLI commands don't exist yet. The playlist still advertises
-  `x-tvg-url="<host>/epg.xml.gz"`, which will 404.
+- **No daily EPG regeneration scheduler.** The Go version reschedules
+  itself ~24h out at a random off-peak time after every generation; this
+  rewrite only checks once at `serve` startup (missing or >24h old triggers
+  one background regeneration) and via the `epg generate` CLI command — a
+  server left running for days without a restart will not refresh its EPG.
+- The web EPG proxy (`/epg/:channelID/:offset`) does not do the Go version's
+  "correct the day if the upstream API's clock lags" adjustment
+  (`webEPGDayOffset`); it passes the upstream response straight through.
 - **Catchup EPG browsing** (`/catchup/:id` listing page, catchup player
   pages) is not implemented — only the stream-resolution endpoint is. There
   is no template engine in this rewrite and the Svelte UI has no catchup

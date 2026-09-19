@@ -174,5 +174,7 @@ func (c *Client) LicenseHeaders(d PlaybackData) map[string]string {
 		"devicetype":    "tv",
 		"uniqueid":      cr.UserID,
 		"ssotoken":      cr.SSOToken,
+		"subscriberid":  cr.SubscriberID,
+		"crmid":         cr.SubscriberID,
 	}
 }

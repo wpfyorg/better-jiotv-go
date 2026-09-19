@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,10 @@ const (
 	tvPlusChannelsTTL = 6 * time.Hour
 	// tvPlusTokenLead refreshes the 12-hour access token this long before expiry.
 	tvPlusTokenLead = time.Hour
+	// tvPlusLiveTTL is how long a playback response is reused. Its stream
+	// tokens last two minutes, and DASH players reload the manifest every
+	// few seconds.
+	tvPlusLiveTTL = 60 * time.Second
 )
 
 var (
@@ -38,6 +43,9 @@ type tvPlusState struct {
 	catalogue []tvplus.LiveChannel
 	fetchedAt time.Time
 	extIDs    map[string]string // content ID -> JioTV channel ID, for AES key requests
+	mirrors   map[string]string // JioTV channel ID -> content ID of the same channel on TV+
+	cdnHosts  map[string]struct{}
+	live      map[string]tvPlusLiveEntry
 
 	// pending holds an unfinished OTP login.
 	pending struct {
@@ -49,7 +57,21 @@ type tvPlusState struct {
 	refresh singleflight.Group
 }
 
-var tvPlus = &tvPlusState{extIDs: map[string]string{}}
+type tvPlusLiveEntry struct {
+	result    *television.LiveURLOutput
+	fetchedAt time.Time
+}
+
+func newTVPlusState() *tvPlusState {
+	return &tvPlusState{
+		extIDs:   map[string]string{},
+		mirrors:  map[string]string{},
+		cdnHosts: map[string]struct{}{},
+		live:     map[string]tvPlusLiveEntry{},
+	}
+}
+
+var tvPlus = newTVPlusState()
 
 // InitTVPlus sets up the JioTV+ client from the store when the tvplus option
 // is on. It is safe to call again after login or logout.
@@ -73,6 +95,7 @@ func InitTVPlus() {
 		utils.Log.Printf("JioTV+: cannot load login: %v", err)
 	}
 	tvPlus.client.SetCredentials(creds)
+	tvPlus.live = map[string]tvPlusLiveEntry{}
 	if creds != nil {
 		utils.Log.Println("JioTV+ login loaded")
 	}
@@ -94,36 +117,94 @@ func tvPlusConnected() bool {
 	return cr != nil && cr.AuthToken != ""
 }
 
-// getLiveResult returns stream URLs for any channel: JioTV+ IDs go to the TV+
-// client, everything else to the JioTV client.
+// jiotvLoggedIn reports whether a JioTV login is loaded.
+func jiotvLoggedIn() bool {
+	return TV != nil && (TV.AccessToken != "" || TV.SsoToken != "")
+}
+
+// tvPlusRoute returns the TV+ content ID that plays channelID. JioTV+ IDs
+// always play through TV+. A JioTV channel plays through TV+ when TV+ is
+// connected, there is no JioTV login, and TV+ carries the channel.
+func tvPlusRoute(channelID string) (contentID string, ok bool) {
+	if contentID, ok := tvplus.ContentID(channelID); ok {
+		return contentID, true
+	}
+	if isCustomChannel(channelID) || jiotvLoggedIn() || !tvPlusConnected() {
+		return "", false
+	}
+	tvPlusCatalogue()
+	tvPlus.mu.RLock()
+	defer tvPlus.mu.RUnlock()
+	contentID, ok = tvPlus.mirrors[channelID]
+	return contentID, ok
+}
+
+// getLiveResult returns stream URLs for any channel, from TV+ when
+// tvPlusRoute says so and from JioTV otherwise.
 func getLiveResult(channelID string) (*television.LiveURLOutput, error) {
-	if isTVPlusChannel(channelID) {
-		return tvPlusLive(channelID)
+	if contentID, ok := tvPlusRoute(channelID); ok {
+		return tvPlusLive(contentID)
 	}
 	return TV.Live(channelID)
 }
 
-func tvPlusLive(channelID string) (*television.LiveURLOutput, error) {
+// isTVPlusCDNHost reports whether host served a TV+ stream. The TV+ CDN needs
+// the TV+ player User-Agent.
+func isTVPlusCDNHost(host string) bool {
+	tvPlus.mu.RLock()
+	defer tvPlus.mu.RUnlock()
+	_, ok := tvPlus.cdnHosts[host]
+	return ok
+}
+
+// playerUserAgentFor returns the User-Agent for proxying stream requests to host.
+func playerUserAgentFor(host string) string {
+	if isTVPlusCDNHost(host) {
+		return tvplus.PlayerUserAgent
+	}
+	return PLAYER_USER_AGENT
+}
+
+func tvPlusLive(contentID string) (*television.LiveURLOutput, error) {
 	client, err := tvPlusClient()
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureTVPlusToken(false); err != nil {
-		utils.Log.Printf("JioTV+: token refresh failed: %v", err)
+	tvPlus.mu.RLock()
+	cached, ok := tvPlus.live[contentID]
+	tvPlus.mu.RUnlock()
+	if ok && time.Since(cached.fetchedAt) < tvPlusLiveTTL {
+		return cached.result, nil
 	}
-	resp, err := client.Playback(channelID)
-	if errors.Is(err, tvplus.ErrNotSubscribed) {
-		return nil, fmt.Errorf("channel %s is not in your JioTV+ plan", channelID)
-	}
+	v, err, _ := tvPlus.refresh.Do("live_"+contentID, func() (any, error) {
+		if err := ensureTVPlusToken(false); err != nil {
+			utils.Log.Printf("JioTV+: token refresh failed: %v", err)
+		}
+		resp, err := client.Playback(contentID)
+		if errors.Is(err, tvplus.ErrNotSubscribed) {
+			return nil, fmt.Errorf("channel %s is not in your JioTV+ plan", contentID)
+		}
+		if err != nil {
+			return nil, err
+		}
+		result := resp.LiveURLOutput()
+		tvPlus.mu.Lock()
+		if resp.Data.ExtID != "" {
+			tvPlus.extIDs[contentID] = resp.Data.ExtID
+		}
+		for _, stream := range []string{result.Mpd.Auto, result.Result} {
+			if u, err := url.Parse(stream); err == nil && u.Host != "" {
+				tvPlus.cdnHosts[u.Host] = struct{}{}
+			}
+		}
+		tvPlus.live[contentID] = tvPlusLiveEntry{result: result, fetchedAt: time.Now()}
+		tvPlus.mu.Unlock()
+		return result, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if contentID, ok := tvplus.ContentID(channelID); ok && resp.Data.ExtID != "" {
-		tvPlus.mu.Lock()
-		tvPlus.extIDs[contentID] = resp.Data.ExtID
-		tvPlus.mu.Unlock()
-	}
-	return resp.LiveURLOutput(), nil
+	return v.(*television.LiveURLOutput), nil
 }
 
 // tvPlusClient returns the client if TV+ is enabled and logged in.
@@ -167,9 +248,10 @@ func RefreshTVPlusTokenTask() error {
 	return err
 }
 
-// tvPlusChannels returns the TV+ channels JioTV does not carry, or nil when
-// TV+ is off or not logged in. The catalogue is cached for tvPlusChannelsTTL.
-func tvPlusChannels(jiotv []television.Channel) []television.Channel {
+// tvPlusCatalogue returns the TV+ channel catalogue, or nil when TV+ is off
+// or not logged in. It is cached for tvPlusChannelsTTL, together with the map
+// of JioTV channels that TV+ also carries.
+func tvPlusCatalogue() []tvplus.LiveChannel {
 	client, err := tvPlusClient()
 	if err != nil {
 		return nil
@@ -177,23 +259,44 @@ func tvPlusChannels(jiotv []television.Channel) []television.Channel {
 	tvPlus.mu.RLock()
 	catalogue, fresh := tvPlus.catalogue, time.Since(tvPlus.fetchedAt) < tvPlusChannelsTTL
 	tvPlus.mu.RUnlock()
-	if !fresh {
+	if fresh {
+		return catalogue
+	}
+	v, err, _ := tvPlus.refresh.Do("catalogue", func() (any, error) {
 		fetched, err := client.Channels()
 		if err != nil {
-			utils.Log.Printf("JioTV+: cannot fetch channels: %v", err)
-		} else {
-			catalogue = fetched
-			tvPlus.mu.Lock()
-			tvPlus.catalogue, tvPlus.fetchedAt = fetched, time.Now()
-			for _, ch := range fetched {
-				if ch.ExtID != "" {
-					tvPlus.extIDs[ch.ContentID] = ch.ExtID
-				}
-			}
-			tvPlus.mu.Unlock()
+			return nil, err
 		}
+		var mirrors map[string]string
+		if jiotv, err := television.Channels(); err == nil {
+			mirrors = tvplus.Mirrors(fetched, jiotv.Result)
+		} else {
+			utils.Log.Printf("JioTV+: cannot fetch JioTV channels: %v", err)
+		}
+		tvPlus.mu.Lock()
+		tvPlus.catalogue, tvPlus.fetchedAt = fetched, time.Now()
+		for _, ch := range fetched {
+			if ch.ExtID != "" {
+				tvPlus.extIDs[ch.ContentID] = ch.ExtID
+			}
+		}
+		if mirrors != nil {
+			tvPlus.mirrors = mirrors
+		}
+		tvPlus.mu.Unlock()
+		return fetched, nil
+	})
+	if err != nil {
+		utils.Log.Printf("JioTV+: cannot fetch channels: %v", err)
+		return catalogue
 	}
-	return tvplus.Exclusive(catalogue, jiotv)
+	return v.([]tvplus.LiveChannel)
+}
+
+// tvPlusChannels returns the TV+ channels JioTV does not carry, or nil when
+// TV+ is off or not logged in.
+func tvPlusChannels(jiotv []television.Channel) []television.Channel {
+	return tvplus.Exclusive(tvPlusCatalogue(), jiotv)
 }
 
 // withTVPlusChannels returns the JioTV channels followed by the TV+ ones. The
@@ -211,7 +314,7 @@ func withTVPlusChannels(jiotv []television.Channel) []television.Channel {
 // tvPlusKeyHeaders returns the headers for an AES-128 key request of a TV+
 // channel. ok is false for JioTV channels.
 func tvPlusKeyHeaders(channelID string) (map[string]string, bool) {
-	contentID, isTVPlus := tvplus.ContentID(channelID)
+	contentID, isTVPlus := tvPlusRoute(channelID)
 	if !isTVPlus {
 		return nil, false
 	}
@@ -228,7 +331,7 @@ func tvPlusKeyHeaders(channelID string) (map[string]string, bool) {
 // tvPlusLicenseHeaders returns the headers for a Widevine license request of a
 // TV+ channel. ok is false for JioTV channels.
 func tvPlusLicenseHeaders(channelID string) (map[string]string, bool) {
-	contentID, isTVPlus := tvplus.ContentID(channelID)
+	contentID, isTVPlus := tvPlusRoute(channelID)
 	if !isTVPlus {
 		return nil, false
 	}
@@ -456,4 +559,17 @@ func tvPlusWebEPG(c *fiber.Ctx, channelID string) error {
 		epgEntries = append(epgEntries, entry{ShowName: p.Title, Description: p.Description, StartEpoch: p.StartEpoch, EndEpoch: p.EndEpoch, EpisodePoster: poster})
 	}
 	return c.JSON(fiber.Map{"epg": epgEntries})
+}
+
+// isDRMChannel reports whether a channel is served as Widevine DASH. TV+
+// channels are, because some of their HLS streams are missing.
+func isDRMChannel(channelID string) bool {
+	if !EnableDRM {
+		return false
+	}
+	if utils.ContainsString(channelID, drmList) {
+		return true
+	}
+	_, viaTVPlus := tvPlusRoute(channelID)
+	return viaTVPlus
 }

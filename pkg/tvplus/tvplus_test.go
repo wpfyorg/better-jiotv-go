@@ -514,3 +514,14 @@ func TestStorePersistence(t *testing.T) {
 		t.Errorf("JioTV key touched: %q", v)
 	}
 }
+
+func TestMirrors(t *testing.T) {
+	got := Mirrors([]LiveChannel{
+		{ContentID: "1", ExtID: "175", Name: "Aastha"},
+		{ContentID: "2", Name: "CNBC TV-18 Prime"},
+		{ContentID: "3", Name: "Deep", PlaybackType: "deeplink"},
+	}, []television.Channel{{ID: "175"}, {ID: "143", Name: "CNBC TV18 Prime"}, {ID: "9", Name: "Deep"}})
+	if len(got) != 2 || got["175"] != "1" || got["143"] != "2" {
+		t.Errorf("Mirrors = %v", got)
+	}
+}

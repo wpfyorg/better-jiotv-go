@@ -126,6 +126,35 @@ func Exclusive(tvplus []LiveChannel, jiotv []television.Channel) []television.Ch
 	return out
 }
 
+// Mirrors maps each JioTV channel ID that TV+ also carries to the TV+ content
+// ID, matching on extId first and then on the normalized name.
+func Mirrors(tvplus []LiveChannel, jiotv []television.Channel) map[string]string {
+	byExtID := make(map[string]string, len(tvplus))
+	byName := make(map[string]string, len(tvplus))
+	for _, ch := range tvplus {
+		if ch.isTestChannel() || ch.PlaybackType == "deeplink" {
+			continue
+		}
+		if ch.ExtID != "" {
+			byExtID[ch.ExtID] = ch.ContentID
+		}
+		if name := normalizeName(ch.Name); name != "" {
+			if _, taken := byName[name]; !taken {
+				byName[name] = ch.ContentID
+			}
+		}
+	}
+	out := make(map[string]string, len(jiotv))
+	for _, ch := range jiotv {
+		if id, ok := byExtID[ch.ID]; ok {
+			out[ch.ID] = id
+		} else if id, ok := byName[normalizeName(ch.Name)]; ok {
+			out[ch.ID] = id
+		}
+	}
+	return out
+}
+
 // normalizeName lowercases a channel name and keeps only letters and digits,
 // with "&" read as "and".
 func normalizeName(s string) string {

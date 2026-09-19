@@ -569,12 +569,13 @@ func selectBestLiveMPDURL(liveResult *television.LiveURLOutput, quality string) 
 		return ""
 	}
 
-	selected := internalUtils.SelectQuality(quality, liveResult.Mpd.Bitrates.Auto, liveResult.Mpd.Bitrates.High, liveResult.Mpd.Bitrates.Medium, liveResult.Mpd.Bitrates.Low)
+	bitrates := liveResult.Mpd.ResolvedBitrates()
+	selected := internalUtils.SelectQuality(quality, bitrates.Auto, bitrates.High, bitrates.Medium, bitrates.Low)
 	if selected != "" {
 		return selected
 	}
 
-	for _, candidate := range []string{liveResult.Mpd.Bitrates.High, liveResult.Mpd.Bitrates.Auto, liveResult.Mpd.Bitrates.Medium, liveResult.Mpd.Bitrates.Low} {
+	for _, candidate := range []string{bitrates.High, bitrates.Auto, bitrates.Medium, bitrates.Low} {
 		if candidate != "" {
 			return candidate
 		}
@@ -1078,7 +1079,7 @@ func RenderTSHandler(c *fiber.Ctx) error {
 
 func setChannelPlaybackURLs(channels []television.Channel, hostURL string) {
 	for i := range channels {
-		if EnableDRM && utils.ContainsString(channels[i].ID, drmList) {
+		if isDRMChannel(channels[i].ID) {
 			channels[i].URL = fmt.Sprintf("%s/live/mpd/%s", hostURL, channels[i].ID)
 			channels[i].KeyURL = fmt.Sprintf("%s/live/key/%s", hostURL, channels[i].ID)
 			continue
@@ -1292,11 +1293,7 @@ func PlayHandler(c *fiber.Ctx) error {
 	}
 
 	var player_url string
-	if isTVPlusChannel(id) {
-		// JioTV+ DASH manifests are refused by the CDN; the HLS stream
-		// (AES-128) plays everywhere.
-		player_url = "/player/" + id + "?q=" + quality
-	} else if EnableDRM {
+	if EnableDRM {
 		// Sony channels should always use DRM player for consistency
 		// This avoids routing issues and 403 errors from mixed player usage
 		// While SONY_LIST was deprecated and its contents merged with drmList,
@@ -1404,7 +1401,7 @@ func GenerateM3UPlaylist(channels []television.Channel, hostURL, quality, splitC
 		var channelURL string
 		var kodiProps string
 
-		if EnableDRM && utils.ContainsString(channel.ID, drmList) {
+		if isDRMChannel(channel.ID) {
 			if quality != "" {
 				channelURL = fmt.Sprintf("%s/live/mpd/%s?q=%s", hostURL, channel.ID, quality)
 			} else {

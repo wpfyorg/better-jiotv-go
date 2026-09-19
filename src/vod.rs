@@ -65,11 +65,11 @@ fn err(status: StatusCode, message: impl Into<String>) -> Response {
     (status, axum::Json(json!({"message": message.into()}))).into_response()
 }
 
-fn require_client(state: &AppState) -> Result<Arc<crate::tvplus::Client>, Response> {
+fn require_client(state: &AppState) -> Result<Arc<crate::tvplus::Client>, Box<Response>> {
     state
         .tvplus
         .client_for_vod()
-        .ok_or_else(|| err(StatusCode::SERVICE_UNAVAILABLE, "connect JioTV+ in Settings to watch on-demand titles"))
+        .ok_or_else(|| Box::new(err(StatusCode::SERVICE_UNAVAILABLE, "connect JioTV+ in Settings to watch on-demand titles")))
 }
 
 #[derive(serde::Deserialize)]
@@ -81,7 +81,7 @@ pub struct SearchQuery {
 pub async fn api_ott_search(State(state): State<Arc<AppState>>, Query(q): Query<SearchQuery>) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let query = q.q.unwrap_or_default().trim().to_string();
     if query.is_empty() {
@@ -105,7 +105,7 @@ pub struct PageQuery {
 pub async fn api_ott_screen(Path(id): Path<String>, Query(q): Query<PageQuery>, State(state): State<Arc<AppState>>) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     let page = q.page.unwrap_or(0).max(0);
     match client.screen(&id, page).await {
@@ -126,7 +126,7 @@ pub struct SeasonQuery {
 pub async fn api_ott_episodes(Path(id): Path<String>, Query(q): Query<SeasonQuery>, State(state): State<Arc<AppState>>) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if !valid_content_id(&id) {
         return err(StatusCode::BAD_REQUEST, "invalid id");
@@ -180,7 +180,7 @@ pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppSta
 pub async fn ott_license(Path(id): Path<String>, State(state): State<Arc<AppState>>, method: Method, body: Bytes) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
     if !valid_content_id(&id) {
         return err(StatusCode::BAD_REQUEST, "invalid id");
@@ -299,7 +299,7 @@ async fn build_vod_playlist(client: &crate::tvplus::Client) -> Vec<(VodItem, Str
 pub async fn vod_playlist_handler(State(state): State<Arc<AppState>>, headers: axum::http::HeaderMap) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
 
     let cached = { state.vod_state.playlist.lock().unwrap().clone() };
@@ -330,7 +330,7 @@ fn render_vod_playlist(entries: &[(VodItem, String)], base: &str) -> String {
         if it.content_type == "Episode" && !it.show_name.is_empty() {
             name = format!("{} S{:02}E{:02} {}", it.show_name, it.season.max(1), it.episode_no, it.name);
         }
-        let name = name.replace('\n', " ").replace(',', " ");
+        let name = name.replace(['\n', ','], " ");
         let group = group.replace('"', "'");
         let duration = if it.total_duration > 0 { it.total_duration } else { -1 };
         out.push_str(&format!(

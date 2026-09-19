@@ -29,12 +29,12 @@ default_languages = [1, 6]
 
 | Key (TOML)               | Env var                          | Default        | Meaning |
 |---------------------------|-----------------------------------|----------------|---------|
-| `epg`                     | `JIOTV_EPG`                       | `false`        | Enable EPG generation. **Not implemented in this Rust version yet.** |
+| `epg`                     | `JIOTV_EPG`                       | `false`        | Generate `epg.xml.gz` at startup (if missing/stale) and roughly every 24h after. |
 | `debug`                   | `JIOTV_DEBUG`                     | `false`        | Verbose logging. |
-| `disable_ts_handler`      | `JIOTV_DISABLE_TS_HANDLER`        | `false`        | Reserved; the `.ts` segment proxy it refers to isn't implemented yet either. |
-| `disable_logout`          | `JIOTV_DISABLE_LOGOUT`            | `false`        | Disable the logout button/API. |
-| `drm`                     | `JIOTV_DRM`                       | `true`         | Enable DRM (Widevine) channels. **The DRM stream/license proxy isn't implemented yet**, so this currently has no effect. |
-| `tvplus`                  | `JIOTV_TVPLUS`                    | `false`        | Enable JioTV+ channels. **Not implemented in this Rust version yet**; the flag is accepted but does nothing. |
+| `disable_ts_handler`      | `JIOTV_DISABLE_TS_HANDLER`        | `false`        | Serve `.ts`/`.aac` segment URLs straight from JioTV instead of proxying them through `/render.ts`. |
+| `disable_logout`          | `JIOTV_DISABLE_LOGOUT`            | `false`        | Disable the logout button/API (JioTV and JioTV+). |
+| `drm`                     | `JIOTV_DRM`                       | `true`         | Enable DRM (Widevine DASH) channels; when off, every channel is offered as HLS only. |
+| `tvplus`                  | `JIOTV_TVPLUS`                    | `false`        | Enable JioTV+ (login, catalogue, playback, on-demand). Needs `jiotv tvplus login` afterwards. |
 | `disable_auth`            | `JIOTV_DISABLE_AUTH`              | `false`        | Serve without the `/k/<key>/` access key or the admin password. Only do this behind your own auth (reverse proxy, VPN, etc). |
 | `title`                   | `JIOTV_TITLE`                     | `"JioTV Go"`   | Page title. |
 | `disable_url_encryption`  | `JIOTV_DISABLE_URL_ENCRYPTION`    | `false`        | Turn off AES encryption of stream-proxy URL parameters (they're percent-encoded instead). Never combine with `disable_auth`. |
@@ -42,7 +42,7 @@ default_languages = [1, 6]
 | `path_prefix`             | `JIOTV_PATH_PREFIX`               | `~/.jiotv_go`  | Where `store_v4.toml` and other data live. |
 | `log_path`                | `JIOTV_LOG_PATH`                  | `""`           | Reserved; not wired to a file sink yet (only stdout logging is implemented). |
 | `log_to_stdout`           | `JIOTV_LOG_TO_STDOUT`             | `true`         | Log to stdout/stderr. |
-| `custom_channels_file`    | `JIOTV_CUSTOM_CHANNELS_FILE`      | `""`           | Reserved; custom channels aren't implemented yet. |
+| `custom_channels_file`    | `JIOTV_CUSTOM_CHANNELS_FILE`      | `""`           | Path to a JSON file of extra channels (`{"channels": [{"id","name","url","logo_url","category","language","is_hd"}]}`). YAML isn't supported (the Go version's other accepted format). |
 | `default_categories`      | `JIOTV_DEFAULT_CATEGORIES`        | `[]`           | Category IDs to default the UI to (comma-separated in the env var). |
 | `default_languages`       | `JIOTV_DEFAULT_LANGUAGES`         | `[]`           | Language IDs to default the UI to (comma-separated in the env var). |
 
@@ -53,14 +53,18 @@ default_languages = [1, 6]
 
 `path_prefix` (default `~/.jiotv_go`) holds:
 
-- `store_v4.toml` — the key/value store (access key, admin password hash,
-  session secret, saved JioTV login). Same file name and `{ data = {...} }`
-  shape as the Go version, so a store carried over from Go keeps working for
-  the settings this Rust version has ported (access key, admin password,
-  session secret). It does **not** reuse the Go version's separate JioTV
-  login credentials file — run `jiotv login otp` again after switching.
+- `store_v4.toml` — the key/value store: access key, admin password hash,
+  session secret, and (JioTV+ only) the device identity, saved login and
+  learned DASH/HLS map under the same key names as the Go version
+  (`tvplus_device`, `tvplus_credentials`, `tvplus_dash`), so a store carried
+  over from Go keeps working for those. It does **not** reuse the Go
+  version's separate plain-JioTV login credentials file — run `jiotv login
+  otp` again after switching.
+- `epg.xml.gz` — generated when `epg = true`.
+- `.jiotv.pid` — written by `jiotv background start`, removed by `background
+  stop`.
 - `cloudflared` (or `cloudflared.exe`) — downloaded only when you pass
   `--tunnel` and it isn't already on `PATH`.
 
 Never commit or share this directory: it holds your access key, your admin
-password hash, and (once implemented further) your JioTV login token.
+password hash, and (once you've logged in) your JioTV/JioTV+ tokens.

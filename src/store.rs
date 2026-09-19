@@ -20,6 +20,9 @@ pub struct Store {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    /// Returned by `get` (the non-`Option` companion to `get_opt`, which
+    /// every current caller uses instead); kept as public API.
+    #[allow(dead_code)]
     #[error("key not found: {0}")]
     NotFound(String),
     #[error(transparent)]
@@ -59,6 +62,7 @@ impl Store {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn get(&self, key: &str) -> Result<String, StoreError> {
         let guard = self.inner.lock().unwrap();
         guard

@@ -29,6 +29,12 @@ type PlaybackData struct {
 	KeyURL        string `json:"keyURL"` // Widevine license URL
 	AlgoName      string `json:"algoName"`
 	PlaybackToken string `json:"playbackToken"`
+	Algo          int    `json:"algo"`
+	NL            string `json:"nl"`          // ZEE5 license parameter
+	PlaybackURL   string `json:"playbackUrl"` // MX Player stream
+	TotalDuration int    `json:"totalDuration"`
+	ContentType   string `json:"contentType"`
+	Provider      string `json:"provider"`
 }
 
 // PlaybackResponse is the /playback/v2 response.

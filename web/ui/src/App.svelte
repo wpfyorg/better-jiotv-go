@@ -6,6 +6,9 @@
   import Channels from "./views/Channels.svelte";
   import Watch from "./views/Watch.svelte";
   import Settings from "./views/Settings.svelte";
+  import OnDemand from "./views/OnDemand.svelte";
+  import Show from "./views/Show.svelte";
+  import VodPlayer from "./views/VodPlayer.svelte";
 
   let auth = $state({ loading: true, passwordSet: false, authenticated: false });
 
@@ -40,6 +43,7 @@
     <a class="brand" href="#/">JioTV Go</a>
     <nav>
       <a href="#/" aria-current={route.name === "channels" ? "page" : undefined}>Channels</a>
+      <a href="#/ott" aria-current={["ott", "show", "play"].includes(route.name) ? "page" : undefined}>On demand</a>
       <a href="#/settings" aria-current={route.name === "settings" ? "page" : undefined}>Settings</a>
       <button class="link" onclick={signOut}>Sign out</button>
     </nav>
@@ -47,6 +51,12 @@
   <main>
     {#if route.name === "watch"}
       <Watch id={route.param} />
+    {:else if route.name === "ott"}
+      <OnDemand />
+    {:else if route.name === "show"}
+      <Show id={route.param} />
+    {:else if route.name === "play"}
+      <VodPlayer id={route.param} />
     {:else if route.name === "settings"}
       <Settings />
     {:else}

@@ -323,7 +323,7 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
 
     if let Some(channel_id) = &q.channel_id {
         if !channel_id.is_empty() {
-            if let Ok(live) = state.tv.live(channel_id).await {
+            if let Ok(live) = crate::stream::fetch_live(&state, channel_id).await {
                 let fresh = television::select_best_live_mpd_url(&live, &quality);
                 if !fresh.is_empty() {
                     decrypted = fresh;
@@ -355,11 +355,13 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
     let (status, body, set_cookies) = proxy_mpd(&state, &decrypted).await;
     let mut status = status;
     let mut body = body;
+    let mut set_cookies = set_cookies;
     if matches!(status, 401 | 403) {
         let stripped = crate::stream::strip_hdnea_from_url(&decrypted);
-        let (s, b, _) = proxy_mpd(&state, &stripped).await;
+        let (s, b, c) = proxy_mpd(&state, &stripped).await;
         status = s;
         body = b;
+        set_cookies = c;
     }
 
     let upstream_hdnea = set_cookies
@@ -386,11 +388,17 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
     body_str = rewrite_base_url(&body_str, &format!("{dash_base}/dash/"));
 
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    Response::builder()
-        .status(status_code)
-        .header(header::CONTENT_TYPE, "application/dash+xml")
-        .body(Body::from(body_str))
-        .unwrap()
+    let mut builder = Response::builder().status(status_code).header(header::CONTENT_TYPE, "application/dash+xml");
+    // Forward the CDN's own cookies to the client (Shaka and other
+    // same-origin players use them for the segment requests that follow),
+    // with Domain stripped and Path rewritten to this server's own
+    // /render.dash prefix — mirrors MpdHandler's Set-Cookie rewriting.
+    for raw in &set_cookies {
+        let domain_needle = format!("Domain={proxy_host};");
+        let rewritten = raw.replace(&domain_needle, "").replacen("path=/", "path=/render.dash", 1);
+        builder = builder.header(header::SET_COOKIE, rewritten);
+    }
+    builder.body(Body::from(body_str)).unwrap()
 }
 
 fn rewrite_base_url(body: &str, new_base: &str) -> String {
@@ -419,7 +427,7 @@ fn extract_publish_time(body: &str) -> Option<SystemTime> {
 /// A minimal RFC3339 parser (`2024-01-02T03:04:05.678Z` or with a numeric
 /// offset), just enough for MPD `publishTime` values, avoiding a datetime
 /// dependency.
-fn parse_rfc3339(s: &str) -> Option<SystemTime> {
+pub(crate) fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     let (date, rest) = s.split_once('T')?;
     let mut parts = date.split('-');
     let y: i64 = parts.next()?.parse().ok()?;

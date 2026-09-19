@@ -16,25 +16,7 @@ const CATALOGUE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 const TOKEN_LEAD: Duration = Duration::from_secs(60 * 60);
 const LIVE_TTL: Duration = Duration::from_secs(60);
 
-/// A tiny per-key async mutex map: locking the same key serializes
-/// concurrent callers so only one does the actual work, and the others see
-/// its (now fresh) result via the caller's own cache re-check — the same
-/// effect as `singleflight.Group.Do` in the Go tree, without a dedicated
-/// crate.
-#[derive(Default)]
-struct KeyedLocks {
-    map: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-}
-
-impl KeyedLocks {
-    async fn lock(&self, key: &str) -> tokio::sync::OwnedMutexGuard<()> {
-        let m = {
-            let mut map = self.map.lock().unwrap();
-            map.entry(key.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
-        };
-        m.lock_owned().await
-    }
-}
+use crate::keyed_locks::KeyedLocks;
 
 #[derive(Default)]
 struct PendingLogin {

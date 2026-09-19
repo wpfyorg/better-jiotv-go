@@ -24,6 +24,10 @@ const DEAD_CACHE_TTL: Duration = Duration::from_secs(60);
 pub struct RenderCaches {
     hdnea: std::sync::RwLock<HashMap<String, (String, Instant)>>,
     dead: std::sync::RwLock<HashMap<String, Instant>>,
+    /// De-duplicates concurrent JioTV live-URL recovery fetches for the same
+    /// channel (mirrors `refreshChannelToken`'s `singleflight.Group`); the
+    /// TV+ path has its own dedup in `tvplus_state`.
+    refresh_locks: crate::keyed_locks::KeyedLocks,
 }
 
 impl RenderCaches {
@@ -154,6 +158,19 @@ pub(crate) async fn fetch_live(state: &AppState, channel_id: &str) -> anyhow::Re
     }
     crate::token_refresh::ensure_fresh(state).await;
     state.tv.live(channel_id).await
+}
+
+/// The recovery-path refetch used by `render_m3u8_handler`/
+/// `render_ts_handler` on a 401/403/404: de-duplicates concurrent recovery
+/// attempts for the same channel behind a per-channel lock, with a "is it
+/// still dead" re-check inside the lock — mirrors `refreshChannelToken`'s
+/// `singleflight.Group.Do("channelID", ...)`.
+async fn refresh_channel_token(state: &AppState, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
+    if channel_id.is_empty() {
+        anyhow::bail!("empty channel ID");
+    }
+    let _guard = state.render_caches.refresh_locks.lock(channel_id).await;
+    fetch_live(state, channel_id).await
 }
 
 fn channel_and_quality(id_with_ext: &str) -> String {
@@ -389,7 +406,7 @@ pub async fn render_m3u8_handler(State(state): State<Arc<AppState>>, Query(q): Q
         }
         let recently_dead = status == 404 && state.render_caches.is_dead(&channel_id);
         if !recently_dead && !channel_id.is_empty() {
-            if let Ok(refreshed) = fetch_live(&state, &channel_id).await {
+            if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
                 if !refreshed.hdnea.is_empty() {
                     state.render_caches.set_hdnea(&hdnea_key, &refreshed.hdnea);
                     token = refreshed.hdnea.clone();
@@ -510,7 +527,7 @@ pub async fn render_ts_handler(State(state): State<Arc<AppState>>, Query(q): Que
         let stripped = strip_hdnea_from_url(&decoded);
         let mut fresh_token = None;
         if !channel_id.is_empty() {
-            if let Ok(refreshed) = fetch_live(&state, &channel_id).await {
+            if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
                 if !refreshed.hdnea.is_empty() {
                     state.render_caches.set_hdnea(&hdnea_key, &refreshed.hdnea);
                     fresh_token = Some(refreshed.hdnea);

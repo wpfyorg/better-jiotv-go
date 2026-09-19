@@ -129,9 +129,16 @@ directory keeps working.
   same `/render.m3u8` pipeline as live channels.
 - A reduced `EnsureFreshCredentials`: refreshes the JioTV access token when
   its own JWT `exp` claim is close, using the saved refresh token.
-- EPG generation (`jiotv epg generate`/`epg delete`, and a background
-  regenerate-if-missing-or-stale check on `serve` startup when `epg = true`)
-  and `/epg.xml.gz`, `/epg/:channelID/:offset`, `/jtvposter/:date/:file`.
+- EPG generation (`jiotv epg generate`/`epg delete`, a background
+  regenerate-if-missing-or-stale check on `serve` startup when `epg = true`,
+  and a recurring ~24h background regeneration loop for as long as the
+  server runs) and `/epg.xml.gz`, `/epg/:channelID/:offset` (with the
+  upstream day-lag correction), `/jtvposter/:date/:file`.
+- Concurrent-request de-duplication (a per-key async mutex map, same effect
+  as Go's `singleflight`, no extra crate) on: JioTV's live-URL recovery
+  refetch, and TV+'s catalogue/token-refresh/playback caches.
+- `/render.mpd` forwards the CDN's `Set-Cookie` to the client (Domain
+  stripped, Path rewritten to `/render.dash`).
 - **JioTV+ (`tvplus`, off by default)**, compiled into both builds but only
   active when `tvplus = true`: device identity + saved-login store keys
   (`tvplus_device`, `tvplus_credentials`, `tvplus_dash`) byte-compatible
@@ -152,11 +159,6 @@ directory keeps working.
 This is a partial rewrite. The pieces below exist in the Go version and do
 **not** exist here yet, or exist at reduced fidelity:
 
-- **No singleflight crate on the JioTV path.** Concurrent JioTV live-URL
-  fetches each make their own upstream call. TV+'s catalogue/token-refresh/
-  playback paths *do* de-duplicate concurrent callers (a per-key
-  `tokio::sync::Mutex` map with a cache re-check inside the lock — same
-  effect as `singleflight.Group.Do`, no extra crate).
 - **TV+ is compiled into both builds**, not feature-gated out of `slim`
   (it's small — a JSON HTTP client — and disabled by default via
   `tvplus = false`, but it does add a little to the slim binary that a
@@ -167,14 +169,6 @@ This is a partial rewrite. The pieces below exist in the Go version and do
 - **On-demand (JioCinema/ZEE5/MX Player)** — the `/api/ott/*`, `/vod.m3u`,
   `/vod/:id`, `/vod/license/:id` surface is not implemented (`/api/ott/play/:id`
   returns 501).
-- **No daily EPG regeneration scheduler.** The Go version reschedules
-  itself ~24h out at a random off-peak time after every generation; this
-  rewrite only checks once at `serve` startup (missing or >24h old triggers
-  one background regeneration) and via the `epg generate` CLI command — a
-  server left running for days without a restart will not refresh its EPG.
-- The web EPG proxy (`/epg/:channelID/:offset`) does not do the Go version's
-  "correct the day if the upstream API's clock lags" adjustment
-  (`webEPGDayOffset`); it passes the upstream response straight through.
 - **Catchup EPG browsing** (`/catchup/:id` listing page, catchup player
   pages) is not implemented — only the stream-resolution endpoint is. There
   is no template engine in this rewrite and the Svelte UI has no catchup
@@ -192,7 +186,9 @@ This is a partial rewrite. The pieces below exist in the Go version and do
 - Login credential refresh (`login::LoginClient::refresh`,
   `token_refresh::ensure_fresh`) only covers the JWT-`exp` case; the SSO
   token's own fallback-TTL refresh path (for non-JWT tokens) is not ported.
-- `/render.mpd`'s CDN Set-Cookie is not forwarded to the client (see above).
+- The daily EPG regeneration loop approximates the Go version's "random
+  off-peak hour the next day" scheduling with a simpler "~24h +/- 1h
+  jitter" sleep, rather than reproducing its exact hour arithmetic.
 
 None of the above were exercised against the real JioTV/JioTV+/ZEE5 APIs —
 per the project's rules, this was built and tested with unit tests, a mock

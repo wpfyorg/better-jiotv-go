@@ -396,6 +396,14 @@ fn rotate_key(access: &access::Access) -> anyhow::Result<()> {
 
 fn print_help() {
     println!(
-        "jiotv - Stream JioTV on any device\n\nUSAGE:\n  jiotv [--config PATH] [--skip-update-check] <command>\n\nCOMMANDS:\n  serve [--host H] [--port P] [--public] [--tls] [--tls-cert] [--tls-key] [--tunnel] [--tunnel-token T]\n  login otp | login reset\n  tvplus login | tvplus logout   (not implemented yet)\n  admin password\n  key show | key rotate\n"
+        "jiotv - Stream JioTV on any device\n\n\
+         USAGE:\n  jiotv [--config PATH] [--skip-update-check] <command>\n\n\
+         COMMANDS:\n  \
+         serve [--host H] [--port P] [--public] [--tls] [--tls-cert] [--tls-key] [--tunnel] [--tunnel-token T]\n  \
+         login otp | login reset\n  \
+         tvplus login | tvplus logout   (JioTV+, off by default; needs tvplus = true / JIOTV_TVPLUS=true)\n  \
+         epg generate | epg delete\n  \
+         admin password\n  \
+         key show | key rotate\n"
     );
 }

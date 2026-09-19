@@ -58,6 +58,11 @@ func registerUI(app *fiber.App) {
 	app.Post("/api/jiotv/logout", handlers.APIJioTVLogout)
 	app.Post("/api/tvplus/logout", handlers.APITVPlusLogout)
 	app.Post("/api/key/rotate", handlers.APIRotateKey)
+	app.Get("/api/ott/search", handlers.APIOTTSearch)
+	app.Get("/api/ott/screen/:id", handlers.APIOTTScreen)
+	app.Get("/api/ott/show/:id", handlers.APIOTTEpisodes)
+	app.Get("/api/ott/play/:id", handlers.APIOTTPlay)
+	app.Post("/api/ott/license/:id", handlers.APIOTTLicense)
 
 	app.Use("/static", filesystem.New(filesystem.Config{
 		Root:       http.FS(web.GetStaticFiles()),

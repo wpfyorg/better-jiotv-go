@@ -136,6 +136,9 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 	app.Get("/dashtime", handlers.DASHTimeHandler)
 	app.Get("/render.mpd", handlers.MpdHandler)
 	app.Use("/render.dash", handlers.DashHandler)
+	app.Get("/vod.m3u", handlers.VODPlaylistHandler)
+	app.Get("/vod/:id", handlers.VODStreamHandler)
+	app.Post("/vod/license/:id", handlers.APIOTTLicense)
 
 	if jiotvServerConfig.TLS {
 		if jiotvServerConfig.TLSCertPath == "" || jiotvServerConfig.TLSKeyPath == "" {

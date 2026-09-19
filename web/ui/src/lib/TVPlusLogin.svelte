@@ -25,7 +25,7 @@
   const sendOTP = (e) => {
     e.preventDefault();
     run(async () => {
-      const d = await api("/api/extras/login/sendOTP", { method: "POST", body: { number } });
+      const d = await api("/tvplus/login/sendOTP", { method: "POST", body: { number } });
       if (d?.connections?.length) {
         connections = d.connections;
         picked = d.connections[0].index;
@@ -41,7 +41,7 @@
   const choose = (e) => {
     e.preventDefault();
     run(async () => {
-      const d = await api("/api/extras/login/sendOTP", { method: "POST", body: { number, connection: picked } });
+      const d = await api("/tvplus/login/sendOTP", { method: "POST", body: { number, connection: picked } });
       if (d?.status) step = "otp";
       else message = "Couldn't send the OTP.";
     });
@@ -50,9 +50,9 @@
   const verify = (e) => {
     e.preventDefault();
     run(async () => {
-      const d = await api("/api/extras/login/verifyOTP", { method: "POST", body: { number, otp } });
+      const d = await api("/tvplus/login/verifyOTP", { method: "POST", body: { number, otp } });
       if (d?.status) ondone();
-      else message = "The OTP is wrong, or this connection has no extra-source plan.";
+      else message = "The OTP is wrong, or this connection has no JioTV+ plan.";
     });
   };
 </script>

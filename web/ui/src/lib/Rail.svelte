@@ -6,6 +6,8 @@
   function href(item) {
     return item.contentType === "Show" ? "#/show/" + item.contentId : "#/play/" + item.contentId;
   }
+
+  const names = { JioCinema: "JioCinema", MXPlayer: "MX Player", Zee5: "ZEE5" };
 </script>
 
 {#if shown.length}
@@ -18,7 +20,7 @@
             <span class="art"><img src={item.thumbnail} alt="" loading="lazy" decoding="async" /></span>
             <span class="name">{item.name}</span>
             <span class="meta muted">
-              {item.provider}{item.contentType === "Show" ? " · Show" : ""}{item.language ? " · " + item.language : ""}
+              {names[item.provider] ?? item.provider}{item.contentType === "Show" ? " · Show" : ""}{item.language ? " · " + item.language : ""}
             </span>
           </a>
         </li>

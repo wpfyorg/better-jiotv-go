@@ -1,0 +1,39 @@
+name: Web changes - Tailwind CSS rebuild
+
+on:
+  pull_request:
+    paths:
+      - "web/**" # Trigger on changes to anything under web/
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: write
+
+jobs:
+  tailwind-rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: "npm"
+          cache-dependency-path: "web/package-lock.json"
+
+      - name: Update TailwindCSS output
+        run: |
+          cd web
+          npm ci && npm run build
+          git add static/internal/tailwind.css
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "[dependabot skip] Update tailwindcss with build changes" || exit 0
+          git push

@@ -10,6 +10,13 @@
     { id: "100025", name: "Kids" },
     { id: "100097", name: "TV shows" },
   ];
+  const providers = [
+    { id: "", name: "All" },
+    { id: "JioCinema", name: "JioCinema" },
+    { id: "MXPlayer", name: "MX Player" },
+    { id: "Zee5", name: "ZEE5" },
+  ];
+
   let screen = $state(sessionStorage.getItem("ottScreen") || "1");
   let provider = $state(sessionStorage.getItem("ottProvider") || "");
   let query = $state("");
@@ -85,11 +92,6 @@
   const visibleCount = $derived(
     rails.reduce((n, r) => n + (provider ? r.items.filter((i) => i.provider === provider).length : r.items.length), 0),
   );
-
-  // Provider names come straight from whatever the API returns in the
-  // currently loaded rails, rather than a hardcoded list, so the panel
-  // never has to name a provider itself.
-  const providers = $derived([...new Set(rails.flatMap((r) => r.items.map((i) => i.provider)).filter(Boolean))].sort());
 </script>
 
 <div class="top">
@@ -103,14 +105,11 @@
   </form>
 </div>
 
-{#if providers.length}
-  <div class="chips" role="group" aria-label="Provider">
-    <button class="chip" aria-pressed={provider === ""} onclick={() => (provider = "")}>All</button>
-    {#each providers as p}
-      <button class="chip" aria-pressed={provider === p} onclick={() => (provider = p)}>{p}</button>
-    {/each}
-  </div>
-{/if}
+<div class="chips" role="group" aria-label="Provider">
+  {#each providers as p}
+    <button class="chip" aria-pressed={provider === p.id} onclick={() => (provider = p.id)}>{p.name}</button>
+  {/each}
+</div>
 
 {#if searched}<p class="muted">Results for “{searched}”</p>{/if}
 {#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -120,7 +119,7 @@
 {/each}
 
 {#if !loading && !error && visibleCount === 0}
-  <p class="muted">Nothing from {provider || "any source"} here{more ? " yet" : ""}.</p>
+  <p class="muted">Nothing from {provider ? providers.find((p) => p.id === provider).name : "JioCinema, MX Player or ZEE5"} here{more ? " yet" : ""}.</p>
 {/if}
 {#if loading}
   <p class="muted">Loading…</p>

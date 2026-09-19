@@ -1,73 +1,99 @@
-name: Release
+name: "Build and Release"
 
-# Push a tag like v0.2.0 (matching the version in Cargo.toml) to publish
-# binaries that `jiotv update` can install.
 on:
   push:
-    tags: ["v*"]
+    branches:
+      - main
+    paths-ignore:
+      - ".github/**"
+      - "README.md"
+      - "LICENSE"
+      - "docs/**"
+      - "scripts/**"
+      - "**.sh"
+      - "**.md"
+
+concurrency:
+  group: ${{ github.ref }}-release
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        variant: [full, slim]
-        target:
-          - { triple: x86_64-unknown-linux-musl, os: ubuntu-latest, zig: true }
-          - { triple: aarch64-unknown-linux-musl, os: ubuntu-latest, zig: true }
-          - { triple: armv7-unknown-linux-musleabihf, os: ubuntu-latest, zig: true }
-          - { triple: aarch64-apple-darwin, os: macos-latest, zig: false }
-    runs-on: ${{ matrix.target.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target.triple }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target.triple }}-${{ matrix.variant }}
-      - name: Install zig and cargo-zigbuild
-        if: matrix.target.zig
-        run: |
-          pip3 install ziglang
-          cargo install --locked cargo-zigbuild
-      - name: Build
-        shell: bash
-        run: |
-          flags=""
-          [ "${{ matrix.variant }}" = slim ] && flags="--no-default-features --features slim"
-          if [ "${{ matrix.target.zig }}" = true ]; then
-            cargo zigbuild --release --locked --target ${{ matrix.target.triple }} $flags
-          else
-            cargo build --release --locked --target ${{ matrix.target.triple }} $flags
-          fi
-          mkdir -p out
-          cp target/${{ matrix.target.triple }}/release/jiotv out/jiotv-${{ matrix.variant }}-${{ matrix.target.triple }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: jiotv-${{ matrix.variant }}-${{ matrix.target.triple }}
-          path: out/*
-
   release:
-    needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Check the tag matches Cargo.toml
-        run: |
-          want="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
-          [ "$want" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version $want"; exit 1; }
-      - uses: actions/download-artifact@v4
+      - name: Checkout 🛎️
+        uses: actions/checkout@v4
         with:
-          path: dist
-          merge-multiple: true
-      - name: Checksums
-        working-directory: dist
-        run: sha256sum jiotv-* > SHA256SUMS
-      - name: Publish
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --generate-notes
+          fetch-depth: 0
+
+      - name: Setup Go 📦
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: "go.mod"
+
+      - name: Setup GIT 📂
+        run: |
+          # setup git
+          git config user.name "GitHub Action"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Increment version 📈
+        id: gen_tag
+        shell: bash
+        run: |
+          # Fetch the latest develop branch
+          git fetch origin develop
+
+          # Checkout develop branch
+          git checkout develop
+
+          # Run increment version script to update VERSION file
+          chmod +x ./scripts/increment-version.sh
+          ./scripts/increment-version.sh
+
+          new_version=$(cat VERSION)
+
+          # Commit and push the VERSION file update to develop
+          git add VERSION && git commit -m "Bump version to $new_version" && git push origin develop
+
+          # Switch back to main and merge the VERSION update from develop
+          git checkout main
+          git merge develop --no-ff -m "Merge version bump from develop"
+          git push origin main
+
+          IFS='.' read -r major minor patch <<< "$new_version"
+
+          # Mirrors tags
+          git tag -fa $major -m "Mirror tag $new_version"
+          git tag -fa $major.$minor -m "Mirror tag $new_version"
+          git push --tags --force
+          # Set the new tag.
+          echo "tag=$new_version" >> $GITHUB_OUTPUT
+
+      - name: Setup android NDK
+        shell: bash
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r26b-linux.zip
+          unzip -qq android-ndk-r26b-linux.zip
+          echo "$PWD/android-ndk-r26b/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
+
+      - name: Build Executables 🗄️ 🔃
+        shell: bash
+        run: |
+          chmod +x ./scripts/build-binaries.sh
+          ./scripts/build-binaries.sh
+
+      - name: Release 📦
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: false
+          tag_name: ${{ steps.gen_tag.outputs.tag }}
+          files: |
+            ./bin/*
+          generate_release_notes: true
+          discussion_category_name: releases
+          token: ${{ secrets.PAT }}

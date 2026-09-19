@@ -27,6 +27,11 @@ fn content_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/playlist.m3u", get(playlist_redirect))
         .route("/channels", get(channels_or_playlist))
         .route("/jtvimage/:file", get(jtvimage))
+        .route("/live/:id", get(crate::stream::live_handler))
+        .route("/live/:quality/:id", get(crate::stream::live_quality_handler))
+        .route("/live/mpd/:channelId", get(crate::dash::live_mpd_handler))
+        .route("/live/key/:channelId", axum::routing::any(crate::dash::live_key_handler))
+        .route("/catchup/stream/:id", get(crate::catchup::catchup_stream_handler))
         .with_state(state)
 }
 
@@ -45,11 +50,29 @@ fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .with_state(state)
 }
 
+/// Stream-proxy routes that never need the access key: their parameters are
+/// AES-encrypted with a key generated fresh on every start (see
+/// `secureurl`), so they cannot be forged and are only ever handed out
+/// through a gated route. Mirrors the Go gate's `openPaths` for
+/// `/render.*`, `/drm` and `/dashtime`.
+fn open_stream_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/render.m3u8", get(crate::stream::render_m3u8_handler))
+        .route("/render.ts", get(crate::stream::render_ts_handler))
+        .route("/render.key", get(crate::stream::render_key_handler))
+        .route("/render.mpd", get(crate::dash::render_mpd_handler))
+        .route("/render.dash/*rest", get(crate::dash::render_dash_handler))
+        .route("/drm", axum::routing::any(crate::dash::drm_license_handler))
+        .route("/dashtime", get(crate::dash::dashtime_handler))
+        .with_state(state)
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .nest("/k/:key", content_routes(state.clone()))
         .merge(content_routes(state.clone()))
-        .merge(api_routes(state.clone()));
+        .merge(api_routes(state.clone()))
+        .merge(open_stream_routes(state.clone()));
 
     #[cfg(feature = "full")]
     {
@@ -231,6 +254,9 @@ mod tests {
             secure: Arc::new(SecureUrl::new(false)),
             http: reqwest::Client::new(),
             drm_channels: Default::default(),
+            custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
+            render_caches: Default::default(),
+            dash_state: Default::default(),
         })
     }
 

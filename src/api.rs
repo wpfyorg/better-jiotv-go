@@ -263,6 +263,9 @@ mod tests {
             secure: Arc::new(SecureUrl::new(false)),
             http: reqwest::Client::new(),
             drm_channels: Default::default(),
+            custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
+            render_caches: Default::default(),
+            dash_state: Default::default(),
         })
     }
 

@@ -133,16 +133,144 @@ pub struct Credentials {
     pub refresh_token: String,
 }
 
+/// Bitrates for one stream family (HLS `bitrates`, or DASH `mpd.bitrates`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Bitrates {
+    #[serde(default)]
+    pub auto: String,
+    #[serde(default)]
+    pub high: String,
+    #[serde(default)]
+    pub low: String,
+    #[serde(default)]
+    pub medium: String,
+}
+
+/// The DASH half of a playback response. Live channels nest URLs under
+/// `bitrates`; premium/SVOD content returns a single `auto` URL at this
+/// level instead (see `resolved_bitrates`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Mpd {
+    #[serde(default)]
+    pub result: String,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub bitrates: Bitrates,
+    #[serde(default)]
+    pub auto: String,
+    #[serde(default)]
+    pub high: String,
+    #[serde(default)]
+    pub low: String,
+    #[serde(default)]
+    pub medium: String,
+}
+
+impl Mpd {
+    pub fn resolved_bitrates(&self) -> Bitrates {
+        let mut b = self.bitrates.clone();
+        if b.auto.is_empty() {
+            b.auto = self.auto.clone();
+        }
+        if b.high.is_empty() {
+            b.high = self.high.clone();
+        }
+        if b.medium.is_empty() {
+            b.medium = self.medium.clone();
+        }
+        if b.low.is_empty() {
+            b.low = self.low.clone();
+        }
+        b
+    }
+}
+
+/// The JioTV playback API response (`/playback/apis/v1.1/geturl`), mirroring
+/// `LiveURLOutput` in the Go tree.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LiveUrlOutput {
+    #[serde(default)]
+    pub result: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub code: i64,
+    #[serde(default)]
+    pub bitrates: Bitrates,
+    #[serde(default)]
+    pub mpd: Mpd,
+    #[serde(default, rename = "m3u8")]
+    pub m3u8: Bitrates,
+    #[serde(default, rename = "isDRM")]
+    pub is_drm: bool,
+    #[serde(default, rename = "keyUrl")]
+    pub key_url: String,
+    #[serde(default, rename = "algoName")]
+    pub algo_name: String,
+    /// Not part of the wire format: filled in after parsing from whichever
+    /// stream URL carried a `hdnea=` query parameter (see `Television::live`).
+    #[serde(skip)]
+    pub hdnea: String,
+}
+
+impl LiveUrlOutput {
+    /// The DRM license URL: live channels carry it in `mpd.key`, premium
+    /// provider content returns a top-level `keyUrl`.
+    pub fn resolved_license_url(&self) -> &str {
+        if !self.key_url.trim().is_empty() {
+            self.key_url.trim()
+        } else {
+            self.mpd.key.trim()
+        }
+    }
+
+    pub fn has_drm_stream(&self) -> bool {
+        !self.mpd.resolved_bitrates().auto.is_empty() && !self.resolved_license_url().is_empty()
+    }
+}
+
+/// Picks a bitrate by name, mirroring `internalUtils.SelectQuality`.
+pub fn select_quality<'a>(quality: &str, auto: &'a str, high: &'a str, medium: &'a str, low: &'a str) -> &'a str {
+    match quality {
+        "high" | "h" => high,
+        "medium" | "med" | "m" => medium,
+        "low" | "l" => low,
+        _ => auto,
+    }
+}
+
+fn extract_hdnea_from_url(u: &str) -> Option<String> {
+    let idx = u.find("hdnea=")?;
+    let rest = &u[idx + "hdnea=".len()..];
+    let end = rest.find('&').unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
+fn append_hdnea(u: &str, hdnea: &str) -> String {
+    if u.is_empty() || u.contains("hdnea=") {
+        return u.to_string();
+    }
+    let sep = if u.contains('?') { '&' } else { '?' };
+    format!("{u}{sep}hdnea={hdnea}")
+}
+
 pub struct Television {
     pub creds: RwLock<Option<Credentials>>,
     pub client: reqwest::Client,
+    pub device_id: String,
 }
 
 impl Television {
     pub fn new(client: reqwest::Client) -> Television {
+        Television::with_device_id(client, String::new())
+    }
+
+    pub fn with_device_id(client: reqwest::Client, device_id: String) -> Television {
         Television {
             creds: RwLock::new(None),
             client,
+            device_id,
         }
     }
 
@@ -183,6 +311,218 @@ impl Television {
         let resp = req.send().await?.error_for_status()?;
         Ok(resp.json::<ChannelsResponse>().await?)
     }
+
+    /// The form headers `Television::New` builds in the Go version, sent on
+    /// every `Live`/`GetCatchupURL` call.
+    fn playback_headers(&self) -> Vec<(&'static str, String)> {
+        let creds = self.creds.read().unwrap();
+        let (crm, unique_id, access_token) = creds
+            .as_ref()
+            .map(|c| (c.crm.clone(), c.unique_id.clone(), c.access_token.clone()))
+            .unwrap_or_default();
+        vec![
+            ("appkey", "NzNiMDhlYzQyNjJm".to_string()),
+            ("crmid", crm.clone()),
+            ("userId", crm.clone()),
+            ("deviceId", self.device_id.clone()),
+            ("devicetype", "phone".to_string()),
+            ("isott", "false".to_string()),
+            ("languageId", "6".to_string()),
+            ("lbcookie", "1".to_string()),
+            ("os", "android".to_string()),
+            ("osVersion", "13".to_string()),
+            ("subscriberId", crm),
+            ("uniqueId", unique_id),
+            ("usergroup", "tvYR7NSNn7rymo3F".to_string()),
+            ("versionCode", "422".to_string()),
+            ("accessToken", access_token),
+        ]
+    }
+
+    fn access_token(&self) -> String {
+        self.creds.read().unwrap().as_ref().map(|c| c.access_token.clone()).unwrap_or_default()
+    }
+
+    /// Requests a playback URL for a live channel (`POST
+    /// /playback/apis/v1.1/geturl`), mirroring `Television.Live` in the Go
+    /// tree: same form fields, and the same after-the-fact `hdnea=`
+    /// extraction/propagation across every URL field in the response (the
+    /// API does not set it via `Set-Cookie` on this call).
+    pub async fn live(&self, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
+        self.live_at(&format!("https://{JIOTV_API_DOMAIN}{PLAYBACK_API_PATH}"), channel_id)
+            .await
+    }
+
+    pub async fn live_at(&self, url: &str, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
+        let form = [
+            ("channel_id", channel_id.to_string()),
+            ("stream_type", "Seek".to_string()),
+            ("begin", chrono_like_now("%Y%m%dT%H%M%S")),
+            ("srno", chrono_like_now("%Y%m%d")),
+        ];
+        let mut req = self.client.post(url).header("accessToken", self.access_token());
+        for (k, v) in self.playback_headers() {
+            req = req.header(k, v);
+        }
+        let resp = req.form(&form).send().await?.error_for_status()?;
+        let mut result: LiveUrlOutput = resp.json().await?;
+        finish_live_result(&mut result);
+        Ok(result)
+    }
+
+    /// Requests a catchup playback URL, mirroring `Television.GetCatchupURL`.
+    pub async fn catchup_url(&self, channel_id: &str, srno: &str, start: &str, end: &str) -> anyhow::Result<LiveUrlOutput> {
+        self.catchup_url_at(&format!("https://{JIOTV_API_DOMAIN}{PLAYBACK_API_PATH}"), channel_id, srno, start, end)
+            .await
+    }
+
+    pub async fn catchup_url_at(&self, url: &str, channel_id: &str, srno: &str, start: &str, end: &str) -> anyhow::Result<LiveUrlOutput> {
+        let form = [
+            ("stream_type", "Catchup".to_string()),
+            ("channel_id", channel_id.to_string()),
+            ("programId", srno.to_string()),
+            ("showtime", "000000".to_string()),
+            ("srno", srno.to_string()),
+            ("begin", start.to_string()),
+            ("end", end.to_string()),
+        ];
+        let mut req = self.client.post(url).header("accessToken", self.access_token());
+        for (k, v) in self.playback_headers() {
+            req = req.header(k, v);
+        }
+        let resp = req.form(&form).send().await?.error_for_status()?;
+        let mut result: LiveUrlOutput = resp.json().await?;
+        finish_live_result(&mut result);
+        Ok(result)
+    }
+
+    /// GETs a stream URL (an m3u8/mpd manifest), sending the `__hdnea__`
+    /// cookie when one is known, and returns the body, status, and any fresh
+    /// `__hdnea__` the upstream set via `Set-Cookie` — mirroring
+    /// `Television.Render`.
+    pub async fn render(&self, stream_url: &str, hdnea_token: &str) -> (Vec<u8>, u16, String) {
+        let mut req = self
+            .client
+            .get(stream_url)
+            .header("User-Agent", PLAYER_USER_AGENT);
+        let token = if !hdnea_token.is_empty() {
+            Some(hdnea_token.to_string())
+        } else {
+            extract_hdnea_from_url(stream_url)
+        };
+        if let Some(t) = &token {
+            req = req.header(header::COOKIE, format!("__hdnea__={t}"));
+        }
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(_) => return (Vec::new(), 502, String::new()),
+        };
+        let status = resp.status().as_u16();
+        let new_hdnea = resp
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .find_map(|sc| {
+                sc.split(';').map(str::trim).find_map(|part| part.strip_prefix("__hdnea__=")).map(str::to_string)
+            })
+            .unwrap_or_default();
+        let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+        (body, status, new_hdnea)
+    }
+}
+
+pub const PLAYER_USER_AGENT: &str = "plaYtv/7.1.8 (Linux;Android 8.1.0) ExoPlayerLib/2.11.7";
+
+use axum::http::header;
+
+fn chrono_like_now(fmt: &str) -> String {
+    // Avoids pulling in the `chrono` crate for two UTC timestamp formats.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    let (y, m, d, hh, mm, ss) = civil_from_unix(now.as_secs());
+    match fmt {
+        "%Y%m%d" => format!("{y:04}{m:02}{d:02}"),
+        _ => format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}"),
+    }
+}
+
+/// Splits a Unix timestamp into UTC (year, month, day, hour, minute, second)
+/// using a tiny hand-rolled civil calendar (Howard Hinnant's
+/// days_from_civil algorithm), just enough to reproduce a few of Go's
+/// `time.Now().UTC().Format(...)` call sites without a date/time dependency.
+pub fn civil_from_unix(secs: u64) -> (i64, i64, i64, i64, i64, i64) {
+    let days = (secs / 86400) as i64;
+    let rem = (secs % 86400) as i64;
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d, hh, mm, ss)
+}
+
+fn finish_live_result(result: &mut LiveUrlOutput) {
+    let hdnea = extract_hdnea_from_url(&result.bitrates.auto)
+        .or_else(|| extract_hdnea_from_url(&result.mpd.result))
+        .unwrap_or_default();
+    result.hdnea = hdnea.clone();
+    if !hdnea.is_empty() {
+        result.bitrates.auto = append_hdnea(&result.bitrates.auto, &hdnea);
+        result.bitrates.high = append_hdnea(&result.bitrates.high, &hdnea);
+        result.bitrates.medium = append_hdnea(&result.bitrates.medium, &hdnea);
+        result.bitrates.low = append_hdnea(&result.bitrates.low, &hdnea);
+        result.result = append_hdnea(&result.result, &hdnea);
+        if !result.mpd.result.is_empty() {
+            result.mpd.result = append_hdnea(&result.mpd.result, &hdnea);
+        }
+        if !result.mpd.key.is_empty() {
+            result.mpd.key = append_hdnea(&result.mpd.key, &hdnea);
+        }
+    }
+}
+
+/// Picks the best available HLS URL for a quality, mirroring
+/// `selectBestLiveHLSURL`: the requested quality first, then any other HLS
+/// bitrate, then `result`/`mpd.result` if either looks like an `.m3u8` URL.
+pub fn select_best_live_hls_url(live: &LiveUrlOutput, quality: &str) -> String {
+    let b = &live.bitrates;
+    let selected = select_quality(quality, &b.auto, &b.high, &b.medium, &b.low);
+    if !selected.is_empty() {
+        return selected.to_string();
+    }
+    for candidate in [&b.high, &b.auto, &b.medium, &b.low] {
+        if !candidate.is_empty() {
+            return candidate.clone();
+        }
+    }
+    if live.result.to_lowercase().contains(".m3u8") {
+        return live.result.clone();
+    }
+    if live.mpd.result.to_lowercase().contains(".m3u8") {
+        return live.mpd.result.clone();
+    }
+    String::new()
+}
+
+/// Mirrors `selectBestLiveMPDURL`.
+pub fn select_best_live_mpd_url(live: &LiveUrlOutput, quality: &str) -> String {
+    let b = live.mpd.resolved_bitrates();
+    let selected = select_quality(quality, &b.auto, &b.high, &b.medium, &b.low);
+    if !selected.is_empty() {
+        return selected.to_string();
+    }
+    for candidate in [&b.high, &b.auto, &b.medium, &b.low] {
+        if !candidate.is_empty() {
+            return candidate.clone();
+        }
+    }
+    live.mpd.result.clone()
 }
 
 /// Generates an M3U playlist, mirroring `GenerateM3UPlaylist` in

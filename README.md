@@ -139,6 +139,16 @@ directory keeps working.
   same `/render.m3u8` pipeline as live channels.
 - A reduced `EnsureFreshCredentials`: refreshes the JioTV access token when
   its own JWT `exp` claim is close, using the saved refresh token.
+- `Watch.svelte`'s in-app player (the same pattern `VodPlayer.svelte`
+  already used): Shaka Player for DASH + Widevine (license through
+  `/live/key/:id`, reached with the same key/session as everything else),
+  hls.js 1.7.3 for HLS (including HEVC-in-MPEG-TS, which newer hls.js and
+  Chrome's native HLS can't play), falling back to a plain `<video src>`
+  when neither can handle the stream. Backed by a new `/api/live/play/:id`
+  endpoint returning `{dash, url, license}`, resolved the same way
+  `/live/mpd/:id` is (DASH first via `get_drm_mpd`, HLS fallback). Shaka and
+  hls.js themselves are vendored (not from a CDN) and served from
+  `/static/external/...`, the same path the Go version used.
 - On-demand playback via JioTV+ — JioCinema, ZEE5 and MX Player only (every
   other provider in the catalogue only opens a partner app and is filtered
   out): `/api/ott/search`, `/api/ott/screen/:id`, `/api/ott/show/:id`,
@@ -197,9 +207,8 @@ This is a partial rewrite. The pieces below exist in the Go version and do
 - **Premium providers** (SonyLIV/ZEE5-style content bundled into a JioTV
   account itself, distinct from JioTV+ on-demand — `PremiumProviders`,
   `/premium/*` in the Go tree) are not implemented.
-- `update`, `epg`, `background`, `autostart` CLI subcommands are not ported.
-- The Watch page in the Svelte UI still expects the old Go-template player
-  pages; it has not been re-pointed at an in-app Shaka/hls.js player.
+- `update`, `background`, `autostart` CLI subcommands are not ported (`epg`
+  is; see below).
 - Login credential refresh (`login::LoginClient::refresh`,
   `token_refresh::ensure_fresh`) only covers the JWT-`exp` case; the SSO
   token's own fallback-TTL refresh path (for non-JWT tokens) is not ported.

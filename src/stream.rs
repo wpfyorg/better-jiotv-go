@@ -703,6 +703,7 @@ mod tests {
             render_caches: Default::default(),
             dash_state: Default::default(),
             tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
+            vod_state: Default::default(),
         };
         let body = "#EXTM3U\nseg1.ts\n";
         let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");

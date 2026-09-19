@@ -139,6 +139,16 @@ directory keeps working.
   same `/render.m3u8` pipeline as live channels.
 - A reduced `EnsureFreshCredentials`: refreshes the JioTV access token when
   its own JWT `exp` claim is close, using the saved refresh token.
+- On-demand playback via JioTV+ — JioCinema, ZEE5 and MX Player only (every
+  other provider in the catalogue only opens a partner app and is filtered
+  out): `/api/ott/search`, `/api/ott/screen/:id`, `/api/ott/show/:id`,
+  `/api/ott/play/:id`, `/api/ott/license/:id` for the browser, `/vod.m3u`
+  (6h cache) and `/vod/:id` for IPTV players, and `/vod/license/:id` /
+  `/api/ott/license/:id` proxying the Widevine license to the title's own
+  server — JioCinema's or **ZEE5's own** (the owner-approved exception to
+  proxying only JioTV/JioTV+ hosts) — with the algo-specific headers
+  (`appId`/`appKey` for JioCinema, `customData`/`nl` for ZEE5). Playback
+  responses are cached 10 minutes.
 - EPG generation (`jiotv epg generate`/`epg delete`, a background
   regenerate-if-missing-or-stale check on `serve` startup when `epg = true`,
   and a recurring ~24h background regeneration loop for as long as the
@@ -176,9 +186,6 @@ This is a partial rewrite. The pieces below exist in the Go version and do
 - The Sony DAI (`sl*`) channels and JioTV's own "premium providers"
   (SonyLIV/ZEE5 content bundled into a *JioTV* account, unrelated to TV+) are
   not part of the TV+ routing — see their own bullets below.
-- **On-demand (JioCinema/ZEE5/MX Player)** — the `/api/ott/*`, `/vod.m3u`,
-  `/vod/:id`, `/vod/license/:id` surface is not implemented (`/api/ott/play/:id`
-  returns 501).
 - **Catchup EPG browsing** (`/catchup/:id` listing page, catchup player
   pages) is not implemented — only the stream-resolution endpoint is. There
   is no template engine in this rewrite and the Svelte UI has no catchup

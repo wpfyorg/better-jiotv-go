@@ -96,6 +96,19 @@ impl TvPlusState {
         self.client.read().unwrap().clone()
     }
 
+    /// The client, only if TV+ is enabled and logged in with a working
+    /// access token — for on-demand playback, which (like live) needs a
+    /// completed login. Mirrors `tvPlusClient`.
+    pub fn client_for_vod(&self) -> Option<Arc<Client>> {
+        let client = self.client()?;
+        let cr = client.credentials()?;
+        if cr.auth_token.is_empty() {
+            None
+        } else {
+            Some(client)
+        }
+    }
+
     /// Enabled and logged in with a working access token.
     pub fn connected(&self) -> bool {
         match self.client() {

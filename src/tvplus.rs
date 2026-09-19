@@ -867,6 +867,34 @@ pub struct PlaybackData {
     pub algo_name: String,
     #[serde(rename = "playbackToken", default)]
     pub playback_token: String,
+    #[serde(default)]
+    pub algo: i64,
+    #[serde(rename = "nl", default)]
+    pub nl: String,
+    #[serde(rename = "playbackUrl", default)]
+    pub playback_url: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(rename = "totalDuration", default)]
+    pub total_duration: i64,
+    #[serde(default)]
+    pub name: String,
+}
+
+impl PlaybackData {
+    /// Picks the stream to play: DASH when there is one, else HLS, else the
+    /// raw `playbackUrl` (MX Player). Mirrors `PlaybackData.VODStream`.
+    pub fn vod_stream(&self) -> (String, bool) {
+        if !self.mpd.auto.is_empty() {
+            return (self.mpd.auto.clone(), true);
+        }
+        if !self.m3u8.auto.is_empty() {
+            return (self.m3u8.auto.clone(), false);
+        }
+        let url = self.playback_url.trim().to_string();
+        let is_dash = url.contains(".mpd");
+        (url, is_dash)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -915,6 +943,201 @@ fn hdnea_from(stream: &str) -> String {
         .ok()
         .and_then(|u| u.query_pairs().find(|(k, _)| k == "__hdnea__").map(|(_, v)| v.into_owned()))
         .unwrap_or_default()
+}
+
+// ---- On-demand (VOD): JioCinema, ZEE5, MX Player only ----
+
+/// Providers JioTV Go plays on demand, keyed by the catalogue's `provider`
+/// field. Every other provider (Prime Video, JioHotstar, SonyLIV, ...) only
+/// opens a partner app and is never shown.
+pub fn vod_provider_name(provider: &str) -> Option<&'static str> {
+    match provider {
+        "JioCinema" => Some("JioCinema"),
+        "MXPlayer" => Some("MX Player"),
+        "Zee5" => Some("ZEE5"),
+        _ => None,
+    }
+}
+
+pub const ALGO_JIO_VOD: i64 = 4;
+pub const ALGO_ZEE5: i64 = 6;
+pub const ALGO_MX: i64 = 14;
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct VodItem {
+    #[serde(rename = "contentId", default)]
+    pub content_id: String,
+    #[serde(rename = "contentType", default)]
+    pub content_type: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(rename = "showName", default)]
+    pub show_name: String,
+    #[serde(default)]
+    pub thumbnail: String,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(rename = "playbackType", default)]
+    pub playback_type: String,
+    #[serde(default)]
+    pub season: i64,
+    #[serde(rename = "episodeNo", default)]
+    pub episode_no: i64,
+    #[serde(rename = "totalDuration", default)]
+    pub total_duration: i64,
+}
+
+impl VodItem {
+    /// Mirrors `VODItem.Playable`.
+    pub fn playable(&self) -> bool {
+        if vod_provider_name(&self.provider).is_none() || self.playback_type != "playback" {
+            return false;
+        }
+        matches!(self.content_type.as_str(), "Movie" | "Show" | "Episode" | "Video")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct Rail {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub items: Vec<VodItem>,
+}
+
+#[derive(Deserialize, Default)]
+struct RailsMetadata {
+    #[serde(rename = "totalPages", default)]
+    #[allow(dead_code)]
+    total_pages: i64,
+}
+
+#[derive(Deserialize, Default)]
+struct RailsResponse {
+    #[serde(default)]
+    data: Vec<Rail>,
+    #[serde(rename = "_metadata", default)]
+    #[allow(dead_code)]
+    metadata: RailsMetadata,
+}
+
+fn content_headers(page: &str) -> Vec<(&'static str, String)> {
+    let mut h = common_headers();
+    h.push(("x-page", page.to_string()));
+    h.push(("x-livetv", "no".to_string()));
+    h
+}
+
+/// Drops items JioTV Go cannot play, duplicates within a rail, and empty
+/// rails. Mirrors `keepPlayable`.
+fn keep_playable(rails: Vec<Rail>) -> Vec<Rail> {
+    rails
+        .into_iter()
+        .filter_map(|r| {
+            let mut seen = std::collections::HashSet::new();
+            let items: Vec<VodItem> = r
+                .items
+                .into_iter()
+                .filter(|it| it.playable() && seen.insert(it.content_id.clone()))
+                .collect();
+            if items.is_empty() {
+                None
+            } else {
+                Some(Rail { title: r.title, items })
+            }
+        })
+        .collect()
+}
+
+impl Client {
+    pub async fn search(&self, query: &str) -> Result<Vec<Rail>, TvPlusError> {
+        let e = self.endpoints();
+        let mut req = self.http.get(format!("{}/search/v1/search", e.content)).query(&[("q", query), ("isKids", "false")]);
+        for (k, v) in content_headers("Search") {
+            req = req.header(k, v);
+        }
+        let resp = req.send().await?;
+        check_status(&resp, "search")?;
+        let r: RailsResponse = resp.json().await?;
+        Ok(keep_playable(r.data))
+    }
+
+    /// One page (five rails) of a catalogue screen (1 = home, 100021 =
+    /// movies, 100023 = shows, 100025 = kids, 100097 = TV shows). `more` is
+    /// false on the last page.
+    pub async fn screen(&self, screen_id: &str, page: i64) -> Result<(Vec<Rail>, bool), TvPlusError> {
+        let e = self.endpoints();
+        let mut req = self
+            .http
+            .get(format!("{}/screen/v2/{screen_id}", e.content))
+            .query(&[("pageNo", page.to_string()), ("isKids", "false".to_string())]);
+        for (k, v) in content_headers("Home") {
+            req = req.header(k, v);
+        }
+        let resp = req.send().await?;
+        check_status(&resp, "screen")?;
+        let r: RailsResponse = resp.json().await?;
+        let more = !r.data.is_empty();
+        Ok((keep_playable(r.data), more))
+    }
+
+    /// A show's episodes; `season <= 0` means the default season.
+    pub async fn episodes(&self, show_id: &str, season: i64) -> Result<Vec<VodItem>, TvPlusError> {
+        let e = self.endpoints();
+        let mut url = format!("{}/metadata/v2/metadata/Show/{}", e.content, urlencoding::encode(show_id));
+        if season > 0 {
+            url.push_str(&format!("?season={season}"));
+        }
+        #[derive(Deserialize)]
+        struct Resp {
+            data: Rail,
+        }
+        let mut req = self.http.get(url);
+        for (k, v) in content_headers("Metadata") {
+            req = req.header(k, v);
+        }
+        let resp = req.send().await?;
+        check_status(&resp, "episodes")?;
+        let r: Resp = resp.json().await?;
+        Ok(r.data.items.into_iter().filter(|it| it.content_type == "Episode" && it.playable()).collect())
+    }
+
+    /// Headers for a Widevine license request for on-demand content
+    /// (`k2/k.java`), varying by `PlaybackData.algo`. Mirrors
+    /// `VODLicenseHeaders`.
+    pub fn vod_license_headers(&self, d: &PlaybackData) -> Vec<(String, String)> {
+        let cr = match self.credentials() {
+            Some(c) => c,
+            None => return Vec::new(),
+        };
+        let mut h = vec![
+            ("os".to_string(), "android".to_string()),
+            ("playbackToken".to_string(), d.playback_token.clone()),
+            ("srno".to_string(), "230203144000".to_string()),
+            ("usergroup".to_string(), "474537347347373".to_string()),
+            ("deviceid".to_string(), self.device.android_id.clone()),
+            ("channelid".to_string(), d.content_id.clone()),
+            ("versionCode".to_string(), VERSION_CODE.to_string()),
+            ("devicetype".to_string(), "tv".to_string()),
+            ("uniqueid".to_string(), cr.user_id.clone()),
+            ("ssotoken".to_string(), cr.sso_token.clone()),
+        ];
+        match d.algo {
+            ALGO_JIO_VOD => {
+                h.push(("lbCookie".to_string(), String::new()));
+                h.push(("idamId".to_string(), String::new()));
+                h.push(("jioId".to_string(), String::new()));
+                h.push(("appId".to_string(), "jiovod".to_string()));
+                h.push(("appKey".to_string(), "2ccce09e59153fc9".to_string()));
+            }
+            ALGO_ZEE5 => {
+                h.push(("customData".to_string(), d.playback_token.clone()));
+                h.push(("nl".to_string(), d.nl.clone()));
+            }
+            _ => {}
+        }
+        h
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

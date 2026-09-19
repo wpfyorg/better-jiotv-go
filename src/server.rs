@@ -65,7 +65,23 @@ fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/tvplus/login/sendOTP", post(crate::api::tvplus_send_otp))
         .route("/api/tvplus/login/verifyOTP", post(crate::api::tvplus_verify_otp))
         .route("/api/tvplus/logout", post(crate::api::tvplus_logout))
-        .route("/api/ott/play/:id", get(crate::api::ott_not_implemented))
+        .route("/api/ott/search", get(crate::vod::api_ott_search))
+        .route("/api/ott/screen/:id", get(crate::vod::api_ott_screen))
+        .route("/api/ott/show/:id", get(crate::vod::api_ott_episodes))
+        .route("/api/ott/play/:id", get(crate::vod::api_ott_play))
+        .route("/api/ott/license/:id", post(crate::vod::ott_license))
+        .with_state(state)
+}
+
+/// On-demand playback: manifests/segments come straight from the
+/// providers' own CDNs, but the playlist, the stream redirect and the
+/// license proxy are ours. Kept behind the key/session gate like the live
+/// routes above (`content_routes`).
+fn vod_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/vod.m3u", get(crate::vod::vod_playlist_handler))
+        .route("/vod/:id", get(crate::vod::vod_stream_handler))
+        .route("/vod/license/:id", post(crate::vod::ott_license))
         .with_state(state)
 }
 
@@ -93,6 +109,7 @@ fn build_router(state: Arc<AppState>) -> Router {
     let mut router = Router::new()
         .merge(content_routes(state.clone()))
         .merge(api_routes(state.clone()))
+        .merge(vod_routes(state.clone()))
         .merge(open_stream_routes(state.clone()));
 
     #[cfg(feature = "full")]
@@ -416,6 +433,7 @@ mod tests {
             render_caches: Default::default(),
             dash_state: Default::default(),
             tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
+            vod_state: Default::default(),
         })
     }
 
@@ -517,6 +535,11 @@ mod tests {
             "/epg/999999/0",
             "/jtvimage/does-not-exist.png",
             "/jtvposter/2024-01-01/does-not-exist.png",
+            // TV+ is off in this test state, so these resolve at
+            // require_client()'s check, never touching the network either.
+            "/vod/999999",
+            "/api/ott/screen/1",
+            "/api/ott/show/999999",
         ];
         for path in paths {
             assert_reaches_handler(state.clone(), &key, Some(&cookie), path).await;
@@ -558,13 +581,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ott_route_is_not_yet_implemented_but_still_reachable() {
+    async fn ott_play_route_reaches_its_handler_through_the_key_prefix() {
         let state = test_state();
         let key = state.access.key().unwrap();
-        // /api/ott/play/:id takes no Path extractor today, so it was never
-        // susceptible to this bug, but it's on the lead's list; confirm it
-        // resolves to its documented 501 rather than a routing 404.
+        // TV+ is off in the test state, so this can't get past "connect
+        // JioTV+ in Settings" — but that response, not a routing 404 or the
+        // path-extraction bug, is exactly what proves /api/ott/play/:id was
+        // reached through the /k/<key> prefix.
         let resp = send(state, &format!("/k/{key}/api/ott/play/999")).await;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let status = resp.status();
+        let body = body_text(resp).await;
+        assert!(!body.contains(PATH_EXTRACTION_FAILURE));
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 }

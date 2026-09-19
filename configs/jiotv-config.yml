@@ -19,6 +19,9 @@ drm: true
 # Enable JioTV+ channels (the JioFiber/AirFiber set-top box catalogue). Needs a separate JioTV+ login. Default: false
 tvplus: false
 
+# Serve without the access key (/k/<key>/ in every URL). Default: false
+disable_auth: false
+
 # Title of the webpage. Default: JioTV Go
 title: ""
 

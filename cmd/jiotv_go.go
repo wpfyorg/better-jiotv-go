@@ -3,10 +3,9 @@ package cmd
 import (
 	"fmt"
 	"log" // Added import for *log.Logger type
-	"net/http"
-	"strings"
 	"time"
 
+	"github.com/jiotv-go/jiotv_go/v3/internal/access"
 	"github.com/jiotv-go/jiotv_go/v3/internal/config"
 	"github.com/jiotv-go/jiotv_go/v3/internal/constants"
 	"github.com/jiotv-go/jiotv_go/v3/internal/constants/tasks"
@@ -14,15 +13,11 @@ import (
 	"github.com/jiotv-go/jiotv_go/v3/internal/middleware"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/epg"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/scheduler"
-	"github.com/jiotv-go/jiotv_go/v3/pkg/tvplus"
 	"github.com/jiotv-go/jiotv_go/v3/pkg/utils"
-	"github.com/jiotv-go/jiotv_go/v3/web"
 
 	"github.com/gofiber/fiber/v2"
-	"github.com/gofiber/fiber/v2/middleware/filesystem"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	"github.com/gofiber/fiber/v2/middleware/recover"
-	"github.com/gofiber/template/html/v2"
 )
 
 // LoadConfig loads the application configuration from the given path.
@@ -76,16 +71,8 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 		scheduler.Add(tasks.TVPlusRefreshTokenTaskID, 30*time.Minute, handlers.RefreshTVPlusTokenTask)
 	}
 
-	engine := html.NewFileSystem(http.FS(web.GetViewFiles()), ".html")
-	if config.Cfg.Debug {
-		engine.Reload(true)
-	}
-	engine.AddFunc("isTVPlus", func(channelID string) bool {
-		return strings.HasPrefix(channelID, tvplus.IDPrefix)
-	})
-
 	app := fiber.New(fiber.Config{
-		Views:             engine,
+		Views:             newViews(),
 		Network:           fiber.NetworkTCP,
 		StreamRequestBody: true,
 		CaseSensitive:     false,
@@ -107,25 +94,28 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 		Output:   utils.Log.Writer(),
 	}))
 
-	app.Use("/static", filesystem.New(filesystem.Config{
-		Root:       http.FS(web.GetStaticFiles()),
-		PathPrefix: "static",
-		Browse:     false,
-	}))
+	if config.Cfg.DisableAuth {
+		utils.Log.Println("WARNING: auth is disabled; anyone who can reach this server can use it")
+	} else {
+		if config.Cfg.DisableURLEncryption {
+			// Stream proxy routes are open because their encrypted parameters
+			// cannot be forged; without encryption they would be an open proxy.
+			return fmt.Errorf("disable_url_encryption needs disable_auth: the access key relies on encrypted stream URLs")
+		}
+		playlistPath, err := access.PlaylistPath()
+		if err != nil {
+			return fmt.Errorf("cannot load the access key: %w", err)
+		}
+		app.Use(access.Middleware())
+		fmt.Printf("Playlist: http://%s:%s%s\n", displayHost(jiotvServerConfig.Host), jiotvServerConfig.Port, playlistPath)
+	}
 
-	// Handle all /out/* routes
-	app.Use("/out/", handlers.SLHandler)
+	registerUI(app)
 
-	// Initialize the television object
 	handlers.Init()
 
-	app.Get("/", handlers.IndexHandler)
-	app.Post("/login/sendOTP", handlers.LoginSendOTPHandler)
-	app.Post("/login/verifyOTP", handlers.LoginVerifyOTPHandler)
-	app.Get("/logout", handlers.LogoutHandler)
-	app.Post("/tvplus/login/sendOTP", handlers.TVPlusSendOTPHandler)
-	app.Post("/tvplus/login/verifyOTP", handlers.TVPlusVerifyOTPHandler)
-	app.Get("/tvplus/logout", handlers.TVPlusLogoutHandler)
+	// Routes used by IPTV players. Both builds serve them.
+	app.Use("/out/", handlers.SLHandler)
 	app.Get("/live/mpd/:channelID", handlers.LiveManifestMpdHandler)
 	app.Post("/live/key/:channelID", handlers.LiveManifestKeyHandler)
 	app.Get("/live/:id", handlers.LiveHandler)
@@ -135,26 +125,11 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 	app.Get("/render.key", handlers.RenderKeyHandler)
 	app.Get("/channels", handlers.ChannelsHandler)
 	app.Get("/playlist.m3u", handlers.PlaylistHandler)
-	app.Get("/play/:id", handlers.PlayHandler)
-	app.Get("/player/:id", handlers.PlayerHandler)
-	app.Get("/premium/providers", handlers.PremiumProvidersHandler)
-	app.Get("/premium/providers/:id/catalog", handlers.PremiumProviderCatalogHandler)
-	app.Get("/premium/providers/:id/watch", handlers.PremiumProviderWatchHandler)
-	app.Get("/premium/providers/:id/play", handlers.PremiumProviderPlayHandler)
-	app.Get("/premium/player", handlers.PremiumPlayerHandler)
-	app.Get("/catchup/:id", handlers.CatchupHandler)
-	app.Get("/catchup/play/:id", handlers.CatchupPlayerHandler)
-	app.Get("/catchup/render/:id", handlers.CatchupRenderPlayerHandler)
 	app.Get("/catchup/stream/:id", handlers.CatchupStreamHandler)
-	app.Get("/favicon.ico", handlers.FaviconHandler)
 	app.Get("/jtvimage/:file", handlers.ImageHandler)
 	app.Get("/epg.xml.gz", handlers.EPGHandler)
-	app.Get("/epg/:channelID/:offset", handlers.WebEPGHandler)
-	app.Get("/jtvposter/:date/:file", handlers.PosterHandler)
-	app.Get("/mpd/:channelID", handlers.LiveMpdHandler)
 	app.Post("/drm", handlers.DRMKeyHandler)
 	app.Get("/dashtime", handlers.DASHTimeHandler)
-
 	app.Get("/render.mpd", handlers.MpdHandler)
 	app.Use("/render.dash", handlers.DashHandler)
 
@@ -166,4 +141,13 @@ func JioTVServer(jiotvServerConfig JioTVServerConfig) error {
 	} else {
 		return app.Listen(fmt.Sprintf("%s:%s", jiotvServerConfig.Host, jiotvServerConfig.Port))
 	}
+}
+
+// displayHost turns a listen address into one a player can use.
+func displayHost(host string) string {
+	switch host {
+	case "", "0.0.0.0", "[::]", "::":
+		return "<this-machine>"
+	}
+	return host
 }

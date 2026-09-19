@@ -80,6 +80,22 @@ JioTV+ streams are Widevine DASH, like JioTV's DRM channels: the web player fall
 
 The title is displayed in the browser tab and the web interface.
 
+### Access key:
+
+| Purpose | Config Value | Environment Variable | Default |
+| ----- | ------------ | -------------------- | ------- |
+| Serve without the access key. | `disable_auth` | `JIOTV_DISABLE_AUTH` | `false` |
+
+Every playlist, channel, license and EPG URL carries an access key as a path prefix, for example `http://192.168.1.10:5001/k/<key>/playlist.m3u`. Requests without the key get 401. The server prints the playlist path on start, and `jiotv_go key` prints it at any time. `jiotv_go key rotate` makes a new key; old playlist URLs stop working.
+
+The stream proxy routes (`/render.*`, `/drm`) need no key. Their parameters are encrypted with a key that changes on every start, so they cannot be forged and are only handed out through keyed URLs. For that reason the access key cannot be used with `disable_url_encryption`.
+
+In the full build, opening `/k/<key>/` in a browser once sets a cookie that lets that browser use the web interface.
+
+### Headless build:
+
+`go build -tags headless` builds a server without the web interface, the web player and their assets, for routers and other small devices. It serves only what IPTV players use: the playlist, channels, streams, licenses, EPG and logos. Log in from the terminal with `jiotv_go login otp` (JioTV) and `jiotv_go tvplus login` (JioTV+), then restart the server.
+
 ### URL Encryption:
 
 Enable or disable URL encryption.
@@ -205,6 +221,9 @@ drm = true
 # Enable JioTV+ channels (the JioFiber/AirFiber set-top box catalogue). Needs a separate JioTV+ login. Default: false
 tvplus = false
 
+# Serve without the access key (/k/<key>/ in every URL). Default: false
+disable_auth = false
+
 # Title of the webpage. Default: JioTV Go
 title = ""
 
@@ -251,6 +270,7 @@ disable_ts_handler: false
 disable_logout: false
 drm: true
 tvplus: false
+disable_auth: false
 title: ""
 disable_url_encryption: false
 path_prefix: ""
@@ -276,6 +296,7 @@ The file is also available at [configs/jiotv-config.json](https://github.com/jio
     "disable_logout": false,
     "drm": true,
     "tvplus": false,
+    "disable_auth": false,
     "title": "",
     "disable_url_encryption": false,
     "path_prefix": "",

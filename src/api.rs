@@ -257,6 +257,7 @@ mod tests {
         std::mem::forget(dir);
         Arc::new(AppState {
             config: Config::default(),
+            path_prefix: String::new(),
             access: Arc::new(Access::new(store.clone())),
             store,
             tv: Arc::new(Television::new(reqwest::Client::new())),

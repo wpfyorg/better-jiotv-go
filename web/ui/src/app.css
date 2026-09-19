@@ -1,0 +1,104 @@
+:root {
+  --bg: #0c0e12;
+  --surface: #151922;
+  --surface-2: #1d2230;
+  --border: #2a3142;
+  --text: #e8ebf2;
+  --muted: #98a1b3;
+  --accent: #5b8cff;
+  --accent-text: #0b1020;
+  --tvplus: #f4b740;
+  --danger: #ff6b6b;
+  --ok: #3ecf8e;
+  --radius: 12px;
+  --focus: 0 0 0 3px color-mix(in srgb, var(--accent) 60%, transparent);
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f5f6f9;
+    --surface: #ffffff;
+    --surface-2: #eef0f5;
+    --border: #d9dde6;
+    --text: #151922;
+    --muted: #5c6475;
+    --accent: #2f62e8;
+    --accent-text: #ffffff;
+    --tvplus: #b97a00;
+    --danger: #d63b3b;
+    --ok: #13875a;
+    color-scheme: light;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+a { color: inherit; }
+
+button, input, select {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible { outline: none; box-shadow: var(--focus); }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 9px 16px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  cursor: pointer;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); color: var(--accent-text); border-color: transparent; font-weight: 600; }
+.btn.danger { color: var(--danger); }
+.btn:disabled { opacity: 0.55; cursor: default; }
+
+.input {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.muted { color: var(--muted); }
+.error { color: var(--danger); }
+.ok { color: var(--ok); }
+
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.badge.tvplus { color: var(--tvplus); border-color: color-mix(in srgb, var(--tvplus) 45%, transparent); }
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}

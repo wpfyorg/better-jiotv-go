@@ -3,7 +3,7 @@
 package cmd
 
 import (
-	"crypto/subtle"
+	"io/fs"
 	"net/http"
 	"strings"
 
@@ -31,29 +31,33 @@ func newViews() fiber.Views {
 	return engine
 }
 
-// keyCookie lets a browser that opened /k/<key>/ use the web interface.
-const keyCookie = "jiotv_key"
-
-// registerUI adds the web interface and its player.
+// registerUI adds the web interface: the Svelte app at /, its JSON API
+// under /api, and the player pages it embeds.
 func registerUI(app *fiber.App) {
-	access.SessionCheck = func(c *fiber.Ctx) bool {
-		want, err := access.Key()
-		got := c.Cookies(keyCookie)
-		return err == nil && got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
-	}
-	app.Use(func(c *fiber.Ctx) error {
-		if prefix := access.Prefix(c); prefix != "" && c.Method() == fiber.MethodGet {
-			c.Cookie(&fiber.Cookie{
-				Name:     keyCookie,
-				Value:    strings.TrimPrefix(prefix, "/k/"),
-				Path:     "/",
-				HTTPOnly: true,
-				SameSite: fiber.CookieSameSiteLaxMode,
-				MaxAge:   365 * 24 * 3600,
-			})
+	access.SessionCheck = access.RequestHasSession
+
+	ui := web.GetUIFiles()
+	app.Use("/ui", filesystem.New(filesystem.Config{Root: http.FS(ui), MaxAge: 31536000}))
+	app.Get("/", func(c *fiber.Ctx) error {
+		index, err := fs.ReadFile(ui, "index.html")
+		if err != nil {
+			return err
 		}
-		return c.Next()
+		c.Set(fiber.HeaderCacheControl, "no-cache")
+		c.Type("html")
+		return c.Send(index)
 	})
+
+	app.Get("/api/auth/state", handlers.APIAuthState)
+	app.Post("/api/auth/setup", handlers.APISetup)
+	app.Post("/api/auth/login", handlers.APILogin)
+	app.Post("/api/auth/logout", handlers.APILogout)
+	app.Post("/api/account/password", handlers.APIChangePassword)
+	app.Get("/api/status", handlers.APIStatus)
+	app.Get("/api/channels", handlers.APIChannels)
+	app.Post("/api/jiotv/logout", handlers.APIJioTVLogout)
+	app.Post("/api/tvplus/logout", handlers.APITVPlusLogout)
+	app.Post("/api/key/rotate", handlers.APIRotateKey)
 
 	app.Use("/static", filesystem.New(filesystem.Config{
 		Root:       http.FS(web.GetStaticFiles()),
@@ -61,7 +65,7 @@ func registerUI(app *fiber.App) {
 		Browse:     false,
 	}))
 
-	app.Get("/", handlers.IndexHandler)
+	app.Get("/classic", handlers.IndexHandler)
 	app.Post("/login/sendOTP", handlers.LoginSendOTPHandler)
 	app.Post("/login/verifyOTP", handlers.LoginVerifyOTPHandler)
 	app.Get("/logout", handlers.LogoutHandler)

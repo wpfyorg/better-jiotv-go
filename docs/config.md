@@ -90,7 +90,9 @@ Every playlist, channel, license and EPG URL carries an access key as a path pre
 
 The stream proxy routes (`/render.*`, `/drm`) need no key. Their parameters are encrypted with a key that changes on every start, so they cannot be forged and are only handed out through keyed URLs. For that reason the access key cannot be used with `disable_url_encryption`.
 
-In the full build, opening `/k/<key>/` in a browser once sets a cookie that lets that browser use the web interface.
+The web interface in the full build uses a single admin password. On first start the server prints a setup link, `http://<server>:<port>/k/<key>/`; open it to choose the password, or run `jiotv_go admin password` on the server. After that, sign in at `http://<server>:<port>/`. Sessions last 30 days and end when the password changes. Five wrong passwords from one address lock it out for 10 minutes.
+
+The interface is a Svelte app in `web/ui`. `npm install && npm run build` there writes `web/ui/dist`, which is embedded in the binary; the old server-rendered pages are still at `/classic`.
 
 ### Headless build:
 

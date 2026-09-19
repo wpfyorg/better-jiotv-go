@@ -170,6 +170,17 @@ func main() {
 				},
 			},
 			{
+				Name:  "admin",
+				Usage: "Manage the web interface login",
+				Subcommands: []*cli.Command{
+					{
+						Name:   "password",
+						Usage:  "Set the admin password",
+						Action: func(c *cli.Context) error { return cmd.SetAdminPassword() },
+					},
+				},
+			},
+			{
 				Name:        "key",
 				Usage:       "Show or replace the access key",
 				Description: "Every playlist, channel and EPG URL carries the access key as /k/<key>/. Replacing the key breaks old playlist URLs.",

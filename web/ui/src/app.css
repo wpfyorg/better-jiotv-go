@@ -7,7 +7,7 @@
   --muted: #98a1b3;
   --accent: #5b8cff;
   --accent-text: #0b1020;
-  --tvplus: #f4b740;
+  --extras: #f4b740;
   --danger: #ff6b6b;
   --ok: #3ecf8e;
   --radius: 12px;
@@ -25,7 +25,7 @@
     --muted: #5c6475;
     --accent: #2f62e8;
     --accent-text: #ffffff;
-    --tvplus: #b97a00;
+    --extras: #b97a00;
     --danger: #d63b3b;
     --ok: #13875a;
     color-scheme: light;
@@ -97,7 +97,7 @@ button, input, select {
   border: 1px solid var(--border);
   color: var(--muted);
 }
-.badge.tvplus { color: var(--tvplus); border-color: color-mix(in srgb, var(--tvplus) 45%, transparent); }
+.badge.extras { color: var(--extras); border-color: color-mix(in srgb, var(--extras) 45%, transparent); }
 
 .sr-only {
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;

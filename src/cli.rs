@@ -5,8 +5,8 @@ pub enum Command {
     Serve(ServeArgs),
     LoginOtp,
     LoginReset,
-    TvplusLogin,
-    TvplusLogout,
+    ExtrasLogin,
+    ExtrasLogout,
     AdminPassword,
     KeyShow,
     KeyRotate,
@@ -98,10 +98,10 @@ pub fn parse() -> anyhow::Result<Args> {
                 Some("reset") | Some("logout") | Some("lo") => Command::LoginReset,
                 Some(other) => anyhow::bail!("unknown login subcommand: {other}"),
             },
-            Some("tvplus") => match positionals.get(1).map(String::as_str) {
-                Some("login") => Command::TvplusLogin,
-                Some("logout") => Command::TvplusLogout,
-                other => anyhow::bail!("usage: jiotv tvplus login|logout (got {other:?})"),
+            Some("extras") => match positionals.get(1).map(String::as_str) {
+                Some("login") => Command::ExtrasLogin,
+                Some("logout") => Command::ExtrasLogout,
+                other => anyhow::bail!("usage: jiotv extras login|logout (got {other:?})"),
             },
             Some("admin") => match positionals.get(1).map(String::as_str) {
                 Some("password") => Command::AdminPassword,

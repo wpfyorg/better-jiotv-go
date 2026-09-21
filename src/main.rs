@@ -18,8 +18,9 @@ mod stream;
 mod television;
 mod token_refresh;
 mod tunnel;
-mod tvplus;
-mod tvplus_state;
+mod extras;
+mod extras_state;
+mod unlock;
 mod update;
 mod vod;
 
@@ -30,6 +31,9 @@ use std::io::Write;
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
+    // Must run before any other thread exists (see `unlock::init_local_offset`).
+    unlock::init_local_offset();
+
     let args = cli::parse()?;
 
     if let cli::Command::Help = args.command {
@@ -62,8 +66,8 @@ fn main() -> anyhow::Result<()> {
         }
         cli::Command::LoginOtp => runtime.block_on(login_otp(store)),
         cli::Command::LoginReset => login_reset(&store),
-        cli::Command::TvplusLogin => runtime.block_on(tvplus_login_cli(&store)),
-        cli::Command::TvplusLogout => tvplus_logout_cli(&store),
+        cli::Command::ExtrasLogin => runtime.block_on(extras_login_cli(&store)),
+        cli::Command::ExtrasLogout => extras_logout_cli(&store),
         cli::Command::AdminPassword => admin_password(&access),
         cli::Command::KeyShow => show_key(&access),
         cli::Command::KeyRotate => rotate_key(&access),
@@ -97,9 +101,9 @@ async fn epg_task_loop(state: Arc<state::AppState>, http: reqwest::Client, epg_p
         };
         if needs_generation {
             println!("Generating EPG file in the background (JIOTV_EPG=true)...");
-            let (extra_channels, extra_programmes) = if state.tvplus.enabled() {
-                state.tvplus.epg_source(&state.tv).await.unwrap_or_else(|e| {
-                    tracing::warn!("JioTV+ EPG source skipped: {e}");
+            let (extra_channels, extra_programmes) = if state.extras.enabled() {
+                state.extras.epg_source(&state.tv).await.unwrap_or_else(|e| {
+                    tracing::warn!("extras EPG source skipped: {e}");
                     (Vec::new(), Vec::new())
                 })
             } else {
@@ -272,11 +276,14 @@ async fn serve(
         }
     }
 
-    let tvplus_state = Arc::new(tvplus_state::TvPlusState::new(cfg.tvplus));
-    tvplus_state.init(&http, &store);
-    if cfg.tvplus {
-        println!("JioTV+ enabled{}", if tvplus_state.connected() { " (logged in)" } else { " (run `jiotv tvplus login`)" });
+    let stored_unlocked = store.get_opt(unlock::STORE_KEY_UNLOCKED).as_deref() == Some("true");
+    let extras_state = Arc::new(extras_state::ExtrasState::new(cfg.extras, stored_unlocked));
+    extras_state.init(&http, &store);
+    if cfg.extras || stored_unlocked {
+        println!("extras enabled{}", if extras_state.connected() { " (logged in)" } else { " (run `jiotv extras login`)" });
     }
+    let public_ip = Arc::new(unlock::PublicIp::new(http.clone()));
+    let unlock_limiter = Arc::new(unlock::AttemptLimiter::default());
 
     let state = Arc::new(state::AppState {
         config: cfg.clone(),
@@ -290,8 +297,10 @@ async fn serve(
         custom_channels,
         render_caches: Default::default(),
         dash_state: Default::default(),
-        tvplus: tvplus_state,
+        extras: extras_state,
         vod_state: Default::default(),
+        public_ip,
+        unlock_limiter,
     });
 
     if cfg.epg {
@@ -387,9 +396,9 @@ async fn login_otp(store: Arc<store::Store>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn tvplus_login_cli(store: &store::Store) -> anyhow::Result<()> {
-    let device = tvplus::Device::load_or_create(store)?;
-    let client = tvplus::Client::new(reqwest::Client::new(), device);
+async fn extras_login_cli(store: &store::Store) -> anyhow::Result<()> {
+    let device = extras::Device::load_or_create(store)?;
+    let client = extras::Client::new(reqwest::Client::new(), device);
 
     print!("Mobile number registered to the fibre account: +91 ");
     std::io::stdout().flush()?;
@@ -416,7 +425,7 @@ async fn tvplus_login_cli(store: &store::Store) -> anyhow::Result<()> {
         resp = client.send_otp(&number, &conns[pick - 1].identifier).await.map_err(|e| anyhow::anyhow!("could not send the OTP: {e}"))?;
     }
     if resp.identifier.is_empty() {
-        anyhow::bail!("JioTV+ did not send an OTP");
+        anyhow::bail!("extras did not send an OTP");
     }
 
     print!("OTP: ");
@@ -429,15 +438,15 @@ async fn tvplus_login_cli(store: &store::Store) -> anyhow::Result<()> {
         cr.save(store)?;
     }
     match result {
-        Ok(_) => println!("JioTV+ login saved. Restart the server to use it."),
+        Ok(_) => println!("extras login saved. Restart the server to use it."),
         Err(e) => anyhow::bail!("login failed: {e}"),
     }
     Ok(())
 }
 
-fn tvplus_logout_cli(store: &store::Store) -> anyhow::Result<()> {
-    tvplus::delete_credentials(store)?;
-    println!("JioTV+ login deleted.");
+fn extras_logout_cli(store: &store::Store) -> anyhow::Result<()> {
+    extras::delete_credentials(store)?;
+    println!("extras login deleted.");
     Ok(())
 }
 
@@ -484,7 +493,7 @@ fn print_help() {
          COMMANDS:\n  \
          serve [--host H] [--port P] [--public] [--tls] [--tls-cert] [--tls-key] [--tunnel] [--tunnel-token T]\n  \
          login otp | login reset\n  \
-         tvplus login | tvplus logout   (JioTV+, off by default; needs tvplus = true / JIOTV_TVPLUS=true)\n  \
+         extras login | extras logout   (off by default; needs extras = true / JIOTV_EXTRAS=true)\n  \
          epg generate | epg delete\n  \
          admin password\n  \
          key show | key rotate\n  \

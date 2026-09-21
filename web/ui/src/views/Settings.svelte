@@ -1,9 +1,9 @@
 <script>
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { api, loadChannels } from "../lib/api.js";
   import CopyField from "../lib/CopyField.svelte";
   import JioTVLogin from "../lib/JioTVLogin.svelte";
-  import TVPlusLogin from "../lib/TVPlusLogin.svelte";
+  import ExtrasLogin from "../lib/ExtrasLogin.svelte";
 
   let status = $state(null);
   let error = $state("");
@@ -24,7 +24,7 @@
   }
 
   async function logout(which) {
-    if (!confirm(`Log out of ${which === "jiotv" ? "JioTV" : "JioTV+"}?`)) return;
+    if (!confirm(`Log out of ${which === "jiotv" ? "JioTV" : "the extra source"}?`)) return;
     try {
       await api(`/api/${which}/logout`, { method: "POST" });
       await loginChanged();
@@ -32,6 +32,21 @@
       error = err.message;
     }
   }
+
+  async function lockExtras() {
+    try {
+      await api("/api/extras/lock", { method: "POST" });
+      await loginChanged();
+    } catch (err) {
+      error = err.message;
+    }
+  }
+
+  // Typing the unlock code into the channel search box (Channels.svelte)
+  // dispatches this once it succeeds, so this section can appear without a
+  // reload.
+  window.addEventListener("jiotv:extras-changed", refresh);
+  onDestroy(() => window.removeEventListener("jiotv:extras-changed", refresh));
 
   async function rotateKey() {
     if (!confirm("Make a new access key? Every player using the current playlist URL will stop working until you give it the new one.")) return;
@@ -75,23 +90,24 @@
         <p class="ok">Logged in</p>
         {#if !status.logoutDisabled}<button class="btn" onclick={() => logout("jiotv")}>Log out</button>{/if}
       {:else}
-        <p class="muted">Not logged in. {status.tvplus.connected ? "Channels that JioTV+ carries play through JioTV+." : ""}</p>
+        <p class="muted">Not logged in. {status.extras.connected ? "Channels the extra source carries play through it." : ""}</p>
         <JioTVLogin ondone={loginChanged} />
       {/if}
     </section>
 
-    <section class="card">
-      <h2>JioTV+</h2>
-      {#if !status.tvplus.enabled}
-        <p class="muted">Off. Turn on the <code>tvplus</code> option to add JioFiber/AirFiber channels.</p>
-      {:else if status.tvplus.connected}
-        <p class="ok">Connected</p>
-        {#if !status.logoutDisabled}<button class="btn" onclick={() => logout("tvplus")}>Disconnect</button>{/if}
-      {:else}
-        <p class="muted">Use the mobile number registered to your JioFiber or AirFiber account.</p>
-        <TVPlusLogin ondone={loginChanged} />
-      {/if}
-    </section>
+    {#if status.extras.enabled}
+      <section class="card">
+        <h2>Extra channels</h2>
+        {#if status.extras.connected}
+          <p class="ok">Connected</p>
+          {#if !status.logoutDisabled}<button class="btn" onclick={() => logout("extras")}>Disconnect</button>{/if}
+        {:else}
+          <p class="muted">Use the registered mobile number for the extra source.</p>
+          <ExtrasLogin ondone={loginChanged} />
+        {/if}
+        <button class="btn" onclick={lockExtras}>Lock</button>
+      </section>
+    {/if}
 
     <section class="card">
       <h2>Admin password</h2>

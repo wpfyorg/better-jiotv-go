@@ -63,8 +63,8 @@ jiotv login reset      # delete the saved login
 jiotv admin password   # set/replace the full build's admin password
 jiotv key show         # print the current keyed playlist URL
 jiotv key rotate       # replace the access key (old playlist URLs stop working)
-jiotv tvplus login     # interactive OTP login to JioTV+ (needs tvplus = true)
-jiotv tvplus logout    # delete the saved JioTV+ login
+jiotv extras login     # interactive OTP login to the optional extra channel source (needs extras = true, or the panel unlock)
+jiotv extras logout    # delete the saved extra-source login
 jiotv epg generate     # generate epg.xml.gz now
 jiotv epg delete       # delete epg.xml.gz
 jiotv background start [--args "..."]   # run `serve` detached, args passed through
@@ -77,7 +77,7 @@ jiotv autostart remove                  # remove that service
 ### Update
 
 `jiotv update` downloads the build you are running (full or slim, for this
-OS and CPU) from the GitHub releases of `wpfyorg/jiotv_go-tvplus`, checks it
+OS and CPU) from the GitHub releases of `wpfyorg/jiotv_go-extras`, checks it
 against the release's `SHA256SUMS`, and replaces the binary. Restart the
 server afterwards. The repository is private, so set `JIOTV_UPDATE_TOKEN`
 (or `GITHUB_TOKEN`) to a token that can read it; `JIOTV_UPDATE_REPO` points
@@ -178,16 +178,17 @@ directory keeps working.
   `/live/mpd/:id` is (DASH first via `get_drm_mpd`, HLS fallback). Shaka and
   hls.js themselves are vendored (not from a CDN) and served from
   `/static/external/...`, the same path the Go version used.
-- On-demand playback via JioTV+ — JioCinema, ZEE5 and MX Player only (every
-  other provider in the catalogue only opens a partner app and is filtered
-  out): `/api/ott/search`, `/api/ott/screen/:id`, `/api/ott/show/:id`,
-  `/api/ott/play/:id`, `/api/ott/license/:id` for the browser, `/vod.m3u`
-  (6h cache) and `/vod/:id` for IPTV players, and `/vod/license/:id` /
-  `/api/ott/license/:id` proxying the Widevine license to the title's own
-  server — JioCinema's or **ZEE5's own** (the owner-approved exception to
-  proxying only JioTV/JioTV+ hosts) — with the algo-specific headers
-  (`appId`/`appKey` for JioCinema, `customData`/`nl` for ZEE5). Playback
-  responses are cached 10 minutes.
+- On-demand playback via the optional extra source — a small, fixed
+  allowlist of the providers in its catalogue this server can actually
+  resolve a playable stream for (every other provider only opens a partner
+  app and is filtered out): `/api/ott/search`, `/api/ott/screen/:id`,
+  `/api/ott/show/:id`, `/api/ott/play/:id`, `/api/ott/license/:id` for the
+  browser, `/vod.m3u` (6h cache) and `/vod/:id` for IPTV players, and
+  `/vod/license/:id` / `/api/ott/license/:id` proxying the Widevine license
+  to the title's own server — including, for one provider, that provider's
+  own separate license host (the owner-approved exception to proxying only
+  JioTV/extra-source hosts) — with per-provider algo-specific headers.
+  Playback responses are cached 10 minutes.
 - EPG generation (`jiotv epg generate`/`epg delete`, a background
   regenerate-if-missing-or-stale check on `serve` startup when `epg = true`,
   and a recurring ~24h background regeneration loop for as long as the
@@ -195,36 +196,41 @@ directory keeps working.
   upstream day-lag correction), `/jtvposter/:date/:file`.
 - Concurrent-request de-duplication (a per-key async mutex map, same effect
   as Go's `singleflight`, no extra crate) on: JioTV's live-URL recovery
-  refetch, and TV+'s catalogue/token-refresh/playback caches.
+  refetch, and the extra source's catalogue/token-refresh/playback caches.
 - `/render.mpd` forwards the CDN's `Set-Cookie` to the client (Domain
   stripped, Path rewritten to `/render.dash`).
-- **JioTV+ (`tvplus`, off by default)**, compiled into both builds but only
-  active when `tvplus = true`: device identity + saved-login store keys
-  (`tvplus_device`, `tvplus_credentials`, `tvplus_dash`) byte-compatible
-  with the Go tree; OTP login (`jiotv tvplus login` and
-  `/api/tvplus/login/sendOTP`+`/verifyOTP`), `tvplus logout` and
-  `/api/tvplus/logout`; token refresh (1h lead, de-duplicated); catalogue
-  (6h cache) with `Mirrors`/`Exclusive`/`normalizeName`/test-channel
-  filtering; routing (`tvp_` IDs always, a JioTV ID only when there's no
-  JioTV login and TV+ carries it); playback (60s cache, de-duplicated) with
-  learned per-channel DASH/HLS persisted to `tvplus_dash` and the
-  MPD→HLS/HLS→MPD fallback redirects; the TV+ player User-Agent on TV+ CDN
-  hosts for MPD/segment requests; TV+ license/key headers through `/drm` and
-  `/live/key`; `isDRMChannel`/playlist-hiding (`channelPlayable`) using TV+
-  state; TV+ channels folded into the EPG.
+- **The optional extra channel source (`extras`, off by default)**,
+  compiled into both builds but only active when `extras = true` or the
+  panel's unlock code has been entered (see `docs/config.md`): device
+  identity + saved-login store keys (`extras_device`, `extras_credentials`,
+  `extras_stream_kinds`; the pre-rename names `tvplus_device`,
+  `tvplus_credentials`, `tvplus_dash` are read as a fallback so an existing
+  store keeps working) byte-compatible with the Go tree; OTP login (`jiotv
+  extras login` and `/api/extras/login/sendOTP`+`/verifyOTP`), `extras
+  logout` and `/api/extras/logout`; token refresh (1h lead, de-duplicated);
+  catalogue (6h cache) with mirrors/exclusive/name-normalizing/test-channel
+  filtering; routing (its own ID prefix always, a JioTV ID only when
+  there's no JioTV login and it carries that channel); playback (60s
+  cache, de-duplicated) with learned per-channel DASH/HLS persisted to
+  `extras_stream_kinds` and the MPD→HLS/HLS→MPD fallback redirects; its
+  player User-Agent on its CDN hosts for MPD/segment requests; its
+  license/key headers through `/drm` and `/live/key`;
+  `isDRMChannel`/playlist-hiding (`channelPlayable`) using its state; its
+  channels folded into the EPG. The panel unlock itself (`/api/extras/unlock`,
+  `/api/extras/lock`) is rate-limited per IP the same as admin login.
 
 ## What is NOT at parity yet (be aware before relying on this)
 
 This is a partial rewrite. The pieces below exist in the Go version and do
 **not** exist here yet, or exist at reduced fidelity:
 
-- **TV+ is compiled into both builds**, not feature-gated out of `slim`
-  (it's small — a JSON HTTP client — and disabled by default via
-  `tvplus = false`, but it does add a little to the slim binary that a
-  router deployment with TV+ permanently off will never use).
-- The Sony DAI (`sl*`) channels and JioTV's own "premium providers"
-  (SonyLIV/ZEE5 content bundled into a *JioTV* account, unrelated to TV+) are
-  not part of the TV+ routing — see their own bullets below.
+- **The extra source is compiled into both builds**, not feature-gated out
+  of `slim` (it's small — a JSON HTTP client — and disabled by default via
+  `extras = false`, but it does add a little to the slim binary that a
+  router deployment with it permanently off will never use).
+- The Sony DAI (`sl*`) channels and JioTV's own "premium providers" (extra
+  content bundled into a *JioTV* account itself, unrelated to the extra
+  source above) are not part of that routing — see their own bullets below.
 - **Catchup EPG browsing** (`/catchup/:id` listing page, catchup player
   pages) is not implemented — only the stream-resolution endpoint is. There
   is no template engine in this rewrite and the Svelte UI has no catchup
@@ -233,8 +239,8 @@ This is a partial rewrite. The pieces below exist in the Go version and do
   version also auto-detected YAML.
 - **Sony DAI channels** (`sl*`-prefixed IDs backed by Google DAI HLS URLs,
   `SONY_CHANNELS`/`SONY_JIO_MAP` in the Go tree) are not implemented.
-- **Premium providers** (SonyLIV/ZEE5-style content bundled into a JioTV
-  account itself, distinct from JioTV+ on-demand — `PremiumProviders`,
+- **Premium providers** (extra content bundled into a JioTV account itself,
+  distinct from the extra source's on-demand catalogue — `PremiumProviders`,
   `/premium/*` in the Go tree) are not implemented.
 - `background start`/`background stop` (run `serve` detached, stop it via a
   PID file) **are** ported — see the CLI list above.
@@ -242,7 +248,7 @@ This is a partial rewrite. The pieces below exist in the Go version and do
   off-peak hour the next day" scheduling with a simpler "~24h +/- 1h
   jitter" sleep, rather than reproducing its exact hour arithmetic.
 
-None of the above were exercised against the real JioTV/JioTV+/ZEE5 APIs —
+None of the above were exercised against the real JioTV or extra-source APIs —
 per the project's rules, this was built and tested with unit tests, a mock
 HTTP server (`wiremock`), and manifest/URL-rewriting unit tests using
 hand-written fixtures.

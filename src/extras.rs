@@ -1,14 +1,14 @@
-//! JioTV+ (JioFiber/AirFiber set-top box) API client. Mirrors `pkg/tvplus`
-//! in the Go tree: device identity, OTP login, token exchange/refresh,
-//! catalogue, playback, EPG. Behind the `tvplus` config flag, off by
-//! default (see `src/tvplus_state.rs` for the routing/caching layer that
-//! actually wires this into the server).
+//! Client for an optional extra channel/on-demand source. Off by default
+//! and gated behind its own unlock (see `src/extras_state.rs` for the
+//! routing/caching layer, and `docs/config.md` for how the unlock works):
+//! device identity, OTP login, token exchange/refresh, catalogue, playback,
+//! EPG.
 
 use serde::{Deserialize, Serialize};
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-pub const ID_PREFIX: &str = "tvp_";
+pub const ID_PREFIX: &str = "ex_";
 pub const PLAYER_USER_AGENT: &str = "JioTV.Plus/6.0.8 (Linux;Android 12) AndroidXMedia3/1.4.1";
 
 const API_SIGNATURE: &str = "37ca682625d7";
@@ -23,13 +23,19 @@ const LOGIN_APP_KEY: &str = "NzNiMDhlYzQyNjJm";
 const LOGIN_USER_GROUP: &str = "tvYR7NSNn7rymo3F";
 const LOGIN_SESSION_ID: &str = "fa06b053-5b38-4c5b-b9f0-6459827b";
 
-/// Store key names, kept byte-identical to the Go tree so an existing
-/// `store_v4.toml` (device + saved login) keeps working.
-pub const STORE_KEY_DEVICE: &str = "tvplus_device";
-pub const STORE_KEY_CREDENTIALS: &str = "tvplus_credentials";
-pub const STORE_KEY_DASH: &str = "tvplus_dash";
+/// Current store key names. `STORE_KEY_*_OLD` are the names an earlier
+/// build of this server used; `Device::load_or_create`/`Credentials::load`
+/// read the old name when the new one is absent (a store carried over from
+/// before this rename keeps working), and always write the new name from
+/// then on.
+pub const STORE_KEY_DEVICE: &str = "extras_device";
+pub const STORE_KEY_DEVICE_OLD: &str = "tvplus_device";
+pub const STORE_KEY_CREDENTIALS: &str = "extras_credentials";
+pub const STORE_KEY_CREDENTIALS_OLD: &str = "tvplus_credentials";
+pub const STORE_KEY_DASH: &str = "extras_stream_kinds";
+pub const STORE_KEY_DASH_OLD: &str = "tvplus_dash";
 
-/// The device identity presented to JioTV+. JSON field names match the Go
+/// The device identity presented to the extra source. JSON field names match the Go
 /// struct's tags exactly (store compatibility).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Device {
@@ -54,10 +60,15 @@ impl Device {
     }
 
     pub fn load_or_create(store: &crate::store::Store) -> anyhow::Result<Device> {
-        if let Some(json) = store.get_opt(STORE_KEY_DEVICE) {
-            if let Ok(d) = serde_json::from_str::<Device>(&json) {
-                if !d.android_id.is_empty() {
-                    return Ok(d);
+        for key in [STORE_KEY_DEVICE, STORE_KEY_DEVICE_OLD] {
+            if let Some(json) = store.get_opt(key) {
+                if let Ok(d) = serde_json::from_str::<Device>(&json) {
+                    if !d.android_id.is_empty() {
+                        if key == STORE_KEY_DEVICE_OLD {
+                            store.set(STORE_KEY_DEVICE, &json)?;
+                        }
+                        return Ok(d);
+                    }
                 }
             }
         }
@@ -111,13 +122,18 @@ impl Credentials {
     }
 
     pub fn load(store: &crate::store::Store) -> Option<Credentials> {
-        let json = store.get_opt(STORE_KEY_CREDENTIALS)?;
+        let (json, from_old) = match store.get_opt(STORE_KEY_CREDENTIALS) {
+            Some(j) => (j, false),
+            None => (store.get_opt(STORE_KEY_CREDENTIALS_OLD)?, true),
+        };
         let cr: Credentials = serde_json::from_str(&json).ok()?;
         if cr.sso_token.is_empty() {
-            None
-        } else {
-            Some(cr)
+            return None;
         }
+        if from_old {
+            let _ = store.set(STORE_KEY_CREDENTIALS, &json);
+        }
+        Some(cr)
     }
 
     pub fn save(&self, store: &crate::store::Store) -> anyhow::Result<()> {
@@ -128,11 +144,12 @@ impl Credentials {
 
 pub fn delete_credentials(store: &crate::store::Store) -> anyhow::Result<()> {
     let _ = store.delete(STORE_KEY_CREDENTIALS);
+    let _ = store.delete(STORE_KEY_CREDENTIALS_OLD);
     Ok(())
 }
 
-/// Maps a TV+ channel ID (`tvp_<contentId>`) to its content ID, or `None` for
-/// a plain JioTV ID.
+/// Maps an extra-source channel ID (`ex_<contentId>`) to its content ID, or
+/// `None` for a plain channel ID.
 pub fn content_id(channel_id: &str) -> Option<&str> {
     channel_id.strip_prefix(ID_PREFIX)
 }
@@ -175,14 +192,14 @@ fn common_headers() -> Vec<(&'static str, String)> {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub enum TvPlusError {
-    #[error("tvplus: mobile number must have 10 digits")]
+pub enum ExtrasError {
+    #[error("extras: mobile number must have 10 digits")]
     BadNumber,
-    #[error("tvplus: not logged in")]
+    #[error("extras: not logged in")]
     NotLoggedIn,
-    #[error("tvplus: not subscribed")]
+    #[error("extras: not subscribed")]
     NotSubscribed,
-    #[error("tvplus: {0} returned HTTP {1}")]
+    #[error("extras: {0} returned HTTP {1}")]
     Api(String, u16),
     #[error(transparent)]
     Http(#[from] reqwest::Error),
@@ -190,10 +207,10 @@ pub enum TvPlusError {
     Json(#[from] serde_json::Error),
 }
 
-fn normalize_number(number: &str) -> Result<String, TvPlusError> {
+fn normalize_number(number: &str) -> Result<String, ExtrasError> {
     let n = number.trim().strip_prefix("+91").unwrap_or(number.trim());
     if n.len() != 10 || !n.chars().all(|c| c.is_ascii_digit()) {
-        return Err(TvPlusError::BadNumber);
+        return Err(ExtrasError::BadNumber);
     }
     Ok(n.to_string())
 }
@@ -237,7 +254,7 @@ pub struct Connection {
 
 impl SendOtpResponse {
     /// Flattens the fttx list into selectable MSISDN/FLN connections, the
-    /// same identifiers the app offers (AirFiber-only R4GID lines excluded).
+    /// same identifiers the app offers (some fibre-only R4GID lines excluded).
     pub fn connections(&self) -> Vec<Connection> {
         let mut out = Vec::new();
         for f in &self.fttx_ids {
@@ -322,7 +339,7 @@ impl Client {
         ]
     }
 
-    pub async fn send_otp(&self, number: &str, identifier_id: &str) -> Result<SendOtpResponse, TvPlusError> {
+    pub async fn send_otp(&self, number: &str, identifier_id: &str) -> Result<SendOtpResponse, ExtrasError> {
         let n = normalize_number(number)?;
         let e = self.endpoints();
         let mut req = self.http.post(format!("{}/{}", e.auth, e.send_otp)).header(reqwest::header::USER_AGENT, CLIENT_USER_AGENT);
@@ -335,7 +352,7 @@ impl Client {
         Ok(resp.json().await?)
     }
 
-    pub async fn verify_otp(&self, number: &str, identifier: &str, otp: &str) -> Result<Credentials, TvPlusError> {
+    pub async fn verify_otp(&self, number: &str, identifier: &str, otp: &str) -> Result<Credentials, ExtrasError> {
         let n = normalize_number(number)?;
         #[derive(Serialize)]
         struct PlatformInfo {
@@ -409,7 +426,7 @@ impl Client {
         check_status(&resp, "verifyotp")?;
         let v: VerifyOtpResponse = resp.json().await?;
         if v.sso_token.is_empty() {
-            return Err(TvPlusError::Api("verifyotp returned no ssoToken".to_string(), 200));
+            return Err(ExtrasError::Api("verifyotp returned no ssoToken".to_string(), 200));
         }
         let mut cr = Credentials {
             number: n,
@@ -432,10 +449,10 @@ impl Client {
         Ok(cr)
     }
 
-    pub async fn exchange_token(&self) -> Result<(), TvPlusError> {
-        let mut cr = self.credentials().ok_or(TvPlusError::NotLoggedIn)?;
+    pub async fn exchange_token(&self) -> Result<(), ExtrasError> {
+        let mut cr = self.credentials().ok_or(ExtrasError::NotLoggedIn)?;
         if cr.sso_token.is_empty() {
-            return Err(TvPlusError::NotLoggedIn);
+            return Err(ExtrasError::NotLoggedIn);
         }
         use base64::Engine;
         let number_b64 = base64::engine::general_purpose::STANDARD.encode(format!("+91{}", cr.number));
@@ -472,7 +489,7 @@ impl Client {
         check_status(&resp, "exchangetoken")?;
         let x: Resp = resp.json().await?;
         if x.auth_token.is_empty() {
-            return Err(TvPlusError::Api("exchangetoken returned no authToken".to_string(), 200));
+            return Err(ExtrasError::Api("exchangetoken returned no authToken".to_string(), 200));
         }
         cr.auth_token = x.auth_token;
         cr.refresh_token = x.refresh_token;
@@ -484,10 +501,10 @@ impl Client {
         Ok(())
     }
 
-    pub async fn refresh(&self) -> Result<(), TvPlusError> {
-        let mut cr = self.credentials().ok_or(TvPlusError::NotLoggedIn)?;
+    pub async fn refresh(&self) -> Result<(), ExtrasError> {
+        let mut cr = self.credentials().ok_or(ExtrasError::NotLoggedIn)?;
         if cr.refresh_token.is_empty() {
-            return Err(TvPlusError::NotLoggedIn);
+            return Err(ExtrasError::NotLoggedIn);
         }
         #[derive(Serialize)]
         struct Body {
@@ -523,7 +540,7 @@ impl Client {
         check_status(&resp, "refreshtoken")?;
         let out: Resp = resp.json().await?;
         if out.auth_token.is_empty() {
-            return Err(TvPlusError::Api("refreshtoken returned no authToken".to_string(), 200));
+            return Err(ExtrasError::Api("refreshtoken returned no authToken".to_string(), 200));
         }
         cr.auth_token = out.auth_token;
         if !out.refresh_token.is_empty() {
@@ -533,7 +550,7 @@ impl Client {
         Ok(())
     }
 
-    pub async fn channels(&self) -> Result<Vec<LiveChannel>, TvPlusError> {
+    pub async fn channels(&self) -> Result<Vec<LiveChannel>, ExtrasError> {
         #[derive(Deserialize)]
         struct Resp {
             #[serde(default)]
@@ -562,10 +579,10 @@ impl Client {
         Ok(out)
     }
 
-    pub async fn playback(&self, content_id: &str) -> Result<PlaybackResponse, TvPlusError> {
-        let cr = self.credentials().ok_or(TvPlusError::NotLoggedIn)?;
+    pub async fn playback(&self, content_id: &str) -> Result<PlaybackResponse, ExtrasError> {
+        let cr = self.credentials().ok_or(ExtrasError::NotLoggedIn)?;
         if cr.auth_token.is_empty() {
-            return Err(TvPlusError::NotLoggedIn);
+            return Err(ExtrasError::NotLoggedIn);
         }
         let cid = content_id::content_id(content_id).unwrap_or(content_id);
         let e = self.endpoints();
@@ -608,17 +625,17 @@ impl Client {
         };
         let resp = req.json(&body).send().await?;
         if resp.status().as_u16() == 401 {
-            return Err(TvPlusError::NotSubscribed);
+            return Err(ExtrasError::NotSubscribed);
         }
         check_status(&resp, "playback")?;
         let r: PlaybackResponse = resp.json().await?;
         if r.code == 401 {
-            return Err(TvPlusError::NotSubscribed);
+            return Err(ExtrasError::NotSubscribed);
         }
         Ok(r)
     }
 
-    pub async fn epg(&self, content_ids: &[String], offsets: &[i64]) -> Result<std::collections::HashMap<String, Vec<Programme>>, TvPlusError> {
+    pub async fn epg(&self, content_ids: &[String], offsets: &[i64]) -> Result<std::collections::HashMap<String, Vec<Programme>>, ExtrasError> {
         let mut out = std::collections::HashMap::new();
         if content_ids.is_empty() {
             return Ok(out);
@@ -694,11 +711,11 @@ impl Client {
     }
 }
 
-fn check_status(resp: &reqwest::Response, name: &str) -> Result<(), TvPlusError> {
+fn check_status(resp: &reqwest::Response, name: &str) -> Result<(), ExtrasError> {
     if resp.status().is_success() {
         Ok(())
     } else {
-        Err(TvPlusError::Api(name.to_string(), resp.status().as_u16()))
+        Err(ExtrasError::Api(name.to_string(), resp.status().as_u16()))
     }
 }
 
@@ -778,8 +795,8 @@ fn lookup(map: &[(i64, &str)], name: &str) -> Option<i64> {
 }
 
 /// Lowercases and strips everything but letters/digits, reading "&" as
-/// "and" — used to match a TV+ channel to a JioTV one by name when there's
-/// no `extId`.
+/// "and" — used to match an extra-source channel to a regular one by name
+/// when there's no `extId`.
 pub fn normalize_name(s: &str) -> String {
     s.to_lowercase()
         .replace('&', "and")
@@ -788,12 +805,12 @@ pub fn normalize_name(s: &str) -> String {
         .collect()
 }
 
-/// The TV+ channels JioTV doesn't carry (no matching `extId` or normalized
-/// name), mapped onto JioTV Go's channel type. Mirrors `tvplus.Exclusive`.
-pub fn exclusive(tvplus: &[LiveChannel], jiotv: &[crate::television::Channel]) -> Vec<crate::television::Channel> {
-    let ids: std::collections::HashSet<&str> = jiotv.iter().map(|c| c.id.as_str()).collect();
-    let names: std::collections::HashSet<String> = jiotv.iter().map(|c| normalize_name(&c.name)).collect();
-    tvplus
+/// The extra-source channels not already carried (no matching `extId` or
+/// normalized name), mapped onto this server's own channel type.
+pub fn exclusive(extra: &[LiveChannel], existing: &[crate::television::Channel]) -> Vec<crate::television::Channel> {
+    let ids: std::collections::HashSet<&str> = existing.iter().map(|c| c.id.as_str()).collect();
+    let names: std::collections::HashSet<String> = existing.iter().map(|c| normalize_name(&c.name)).collect();
+    extra
         .iter()
         .filter(|ch| !ch.is_test_channel() && ch.playback_type != "deeplink")
         .filter(|ch| ch.ext_id.is_empty() || !ids.contains(ch.ext_id.as_str()))
@@ -802,12 +819,12 @@ pub fn exclusive(tvplus: &[LiveChannel], jiotv: &[crate::television::Channel]) -
         .collect()
 }
 
-/// Maps each JioTV channel ID that TV+ also carries to its TV+ content ID.
-/// Mirrors `tvplus.Mirrors`.
-pub fn mirrors(tvplus: &[LiveChannel], jiotv: &[crate::television::Channel]) -> std::collections::HashMap<String, String> {
+/// Maps each existing channel ID that the extra source also carries to
+/// its own content ID.
+pub fn mirrors(extra: &[LiveChannel], existing: &[crate::television::Channel]) -> std::collections::HashMap<String, String> {
     let mut by_ext_id = std::collections::HashMap::new();
     let mut by_name = std::collections::HashMap::new();
-    for ch in tvplus {
+    for ch in extra {
         if ch.is_test_channel() || ch.playback_type == "deeplink" {
             continue;
         }
@@ -820,7 +837,7 @@ pub fn mirrors(tvplus: &[LiveChannel], jiotv: &[crate::television::Channel]) -> 
         }
     }
     let mut out = std::collections::HashMap::new();
-    for ch in jiotv {
+    for ch in existing {
         if let Some(id) = by_ext_id.get(&ch.id) {
             out.insert(ch.id.clone(), id.clone());
         } else if let Some(id) = by_name.get(&normalize_name(&ch.name)) {
@@ -886,7 +903,7 @@ pub struct PlaybackData {
 
 impl PlaybackData {
     /// Picks the stream to play: DASH when there is one, else HLS, else the
-    /// raw `playbackUrl` (MX Player). Mirrors `PlaybackData.VODStream`.
+    /// raw `playbackUrl`, when neither of the first two is set.
     pub fn vod_stream(&self) -> (String, bool) {
         if !self.mpd.auto.is_empty() {
             return (self.mpd.auto.clone(), true);
@@ -948,27 +965,24 @@ fn hdnea_from(stream: &str) -> String {
         .unwrap_or_default()
 }
 
-// ---- On-demand (VOD): JioCinema, ZEE5, MX Player only ----
+// ---- On-demand playback: a fixed allowlist of supported sources ----
 
-/// Providers JioTV Go plays on demand, keyed by the catalogue's `provider`
-/// field. Every other provider (Prime Video, JioHotstar, SonyLIV, ...) only
-/// opens a partner app and is never shown.
-pub fn vod_provider_name(provider: &str) -> Option<&'static str> {
-    match provider {
-        "JioCinema" => Some("JioCinema"),
-        "MXPlayer" => Some("MX Player"),
-        "Zee5" => Some("ZEE5"),
-        _ => None,
-    }
+/// Whether the catalogue's `provider` value is one of the handful this
+/// server can actually resolve a playable stream for. Everything else in
+/// the catalogue only deep-links to a separate app and is never shown.
+/// The display name shown to a client is always `provider` itself (as
+/// the catalogue returns it), never a name chosen by this server.
+pub fn is_supported_provider(provider: &str) -> bool {
+    matches!(provider, "JioCinema" | "MXPlayer" | "Zee5")
 }
 
-pub const ALGO_JIO_VOD: i64 = 4;
-pub const ALGO_ZEE5: i64 = 6;
-/// MX Player's algo number, documented for parity with the Go constants;
-/// `vod_license_headers`'s `match` needs no special case for it (its
-/// `_ => {}` arm covers the "no extra headers" default MX Player uses).
+pub const ALGO_PROVIDER_A: i64 = 4;
+pub const ALGO_PROVIDER_B: i64 = 6;
+/// One provider's algo number, documented for parity with the Go
+/// constants; `vod_license_headers`'s `match` needs no special case for it
+/// (its `_ => {}` arm covers the "no extra headers" default it uses).
 #[allow(dead_code)]
-pub const ALGO_MX: i64 = 14;
+pub const ALGO_PROVIDER_C: i64 = 14;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct VodItem {
@@ -997,7 +1011,7 @@ pub struct VodItem {
 impl VodItem {
     /// Mirrors `VODItem.Playable`.
     pub fn playable(&self) -> bool {
-        if vod_provider_name(&self.provider).is_none() || self.playback_type != "playback" {
+        if !is_supported_provider(&self.provider) || self.playback_type != "playback" {
             return false;
         }
         matches!(self.content_type.as_str(), "Movie" | "Show" | "Episode" | "Video")
@@ -1035,8 +1049,8 @@ fn content_headers(page: &str) -> Vec<(&'static str, String)> {
     h
 }
 
-/// Drops items JioTV Go cannot play, duplicates within a rail, and empty
-/// rails. Mirrors `keepPlayable`.
+/// Drops items this server cannot play, duplicates within a rail, and
+/// empty rails.
 fn keep_playable(rails: Vec<Rail>) -> Vec<Rail> {
     rails
         .into_iter()
@@ -1057,7 +1071,7 @@ fn keep_playable(rails: Vec<Rail>) -> Vec<Rail> {
 }
 
 impl Client {
-    pub async fn search(&self, query: &str) -> Result<Vec<Rail>, TvPlusError> {
+    pub async fn search(&self, query: &str) -> Result<Vec<Rail>, ExtrasError> {
         let e = self.endpoints();
         let mut req = self.http.get(format!("{}/search/v1/search", e.content)).query(&[("q", query), ("isKids", "false")]);
         for (k, v) in content_headers("Search") {
@@ -1072,7 +1086,7 @@ impl Client {
     /// One page (five rails) of a catalogue screen (1 = home, 100021 =
     /// movies, 100023 = shows, 100025 = kids, 100097 = TV shows). `more` is
     /// false on the last page.
-    pub async fn screen(&self, screen_id: &str, page: i64) -> Result<(Vec<Rail>, bool), TvPlusError> {
+    pub async fn screen(&self, screen_id: &str, page: i64) -> Result<(Vec<Rail>, bool), ExtrasError> {
         let e = self.endpoints();
         let mut req = self
             .http
@@ -1089,7 +1103,7 @@ impl Client {
     }
 
     /// A show's episodes; `season <= 0` means the default season.
-    pub async fn episodes(&self, show_id: &str, season: i64) -> Result<Vec<VodItem>, TvPlusError> {
+    pub async fn episodes(&self, show_id: &str, season: i64) -> Result<Vec<VodItem>, ExtrasError> {
         let e = self.endpoints();
         let mut url = format!("{}/metadata/v2/metadata/Show/{}", e.content, urlencoding::encode(show_id));
         if season > 0 {
@@ -1130,14 +1144,14 @@ impl Client {
             ("ssotoken".to_string(), cr.sso_token.clone()),
         ];
         match d.algo {
-            ALGO_JIO_VOD => {
+            ALGO_PROVIDER_A => {
                 h.push(("lbCookie".to_string(), String::new()));
                 h.push(("idamId".to_string(), String::new()));
                 h.push(("jioId".to_string(), String::new()));
                 h.push(("appId".to_string(), "jiovod".to_string()));
                 h.push(("appKey".to_string(), "2ccce09e59153fc9".to_string()));
             }
-            ALGO_ZEE5 => {
+            ALGO_PROVIDER_B => {
                 h.push(("customData".to_string(), d.playback_token.clone()));
                 h.push(("nl".to_string(), d.nl.clone()));
             }
@@ -1192,7 +1206,7 @@ mod tests {
 
     #[test]
     fn content_id_strips_prefix() {
-        assert_eq!(content_id::content_id("tvp_302084"), Some("302084"));
+        assert_eq!(content_id::content_id("ex_302084"), Some("302084"));
         assert_eq!(content_id::content_id("154"), None);
     }
 
@@ -1209,21 +1223,21 @@ mod tests {
             name: "Star Plus".to_string(),
             ..Default::default()
         }];
-        let tvplus = vec![
+        let extra = vec![
             LiveChannel { content_id: "1".into(), ext_id: "154".into(), name: "Star Plus".into(), ..Default::default() },
-            LiveChannel { content_id: "2".into(), name: "Zee5 Exclusive".into(), ..Default::default() },
+            LiveChannel { content_id: "2".into(), name: "Extra Only".into(), ..Default::default() },
             LiveChannel { content_id: "3".into(), name: "Test Channel".into(), ..Default::default() },
         ];
-        let ex = exclusive(&tvplus, &jiotv);
+        let ex = exclusive(&extra, &jiotv);
         assert_eq!(ex.len(), 1);
-        assert_eq!(ex[0].id, "tvp_2");
+        assert_eq!(ex[0].id, "ex_2");
     }
 
     #[test]
     fn mirrors_maps_jiotv_id_to_content_id() {
         let jiotv = vec![crate::television::Channel { id: "154".into(), name: "Star Plus".into(), ..Default::default() }];
-        let tvplus = vec![LiveChannel { content_id: "1".into(), ext_id: "154".into(), name: "Star Plus".into(), ..Default::default() }];
-        let m = mirrors(&tvplus, &jiotv);
+        let extra = vec![LiveChannel { content_id: "1".into(), ext_id: "154".into(), name: "Star Plus".into(), ..Default::default() }];
+        let m = mirrors(&extra, &jiotv);
         assert_eq!(m.get("154"), Some(&"1".to_string()));
     }
 
@@ -1234,6 +1248,49 @@ mod tests {
         let d1 = Device::load_or_create(&store).unwrap();
         let d2 = Device::load_or_create(&store).unwrap();
         assert_eq!(d1.android_id, d2.android_id);
+    }
+
+    #[test]
+    fn device_migrates_from_old_store_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
+        let old = Device {
+            android_id: "old-android-id".into(),
+            model: "m".into(),
+            manufacturer: "mfr".into(),
+            os_version: "1".into(),
+        };
+        store.set(STORE_KEY_DEVICE_OLD, &serde_json::to_string(&old).unwrap()).unwrap();
+
+        let loaded = Device::load_or_create(&store).unwrap();
+        assert_eq!(loaded.android_id, "old-android-id");
+        // Migrated forward: the new key now has it too.
+        assert!(store.get_opt(STORE_KEY_DEVICE).is_some());
+    }
+
+    #[test]
+    fn credentials_migrate_from_old_store_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
+        let cr = Credentials { number: "9876543210".into(), sso_token: "sso".into(), auth_token: "at".into(), ..Default::default() };
+        store.set(STORE_KEY_CREDENTIALS_OLD, &serde_json::to_string(&cr).unwrap()).unwrap();
+
+        let loaded = Credentials::load(&store).expect("migrated credentials");
+        assert_eq!(loaded.auth_token, "at");
+        assert!(store.get_opt(STORE_KEY_CREDENTIALS).is_some());
+    }
+
+    #[test]
+    fn credentials_prefer_new_key_over_old() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
+        let old = Credentials { sso_token: "sso".into(), auth_token: "old".into(), ..Default::default() };
+        let new = Credentials { sso_token: "sso".into(), auth_token: "new".into(), ..Default::default() };
+        store.set(STORE_KEY_CREDENTIALS_OLD, &serde_json::to_string(&old).unwrap()).unwrap();
+        store.set(STORE_KEY_CREDENTIALS, &serde_json::to_string(&new).unwrap()).unwrap();
+
+        let loaded = Credentials::load(&store).expect("credentials");
+        assert_eq!(loaded.auth_token, "new");
     }
 
     #[test]
@@ -1263,7 +1320,7 @@ mod tests {
     /// a local mock server standing in for tv.media.jio.com /
     /// jiotvapi.media.jio.com. No real number, OTP or credential appears
     /// here — everything is a redacted placeholder the mock server echoes
-    /// back, per the project's rule against live JioTV+ calls.
+    /// back, per the project's rule against live calls in tests.
     #[tokio::test]
     async fn full_login_flow_against_mock_server() {
         use wiremock::matchers::{method, path};

@@ -165,7 +165,7 @@ pub async fn status(State(state): State<SharedState>) -> Response {
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "jiotv": {"loggedIn": state.tv.logged_in()},
-        "tvplus": {"enabled": state.tvplus.enabled(), "connected": state.tvplus.connected()},
+        "extras": {"enabled": state.extras.enabled(), "connected": state.extras.connected()},
         "playlistPath": playlist,
         "epgPath": epg_path,
         "epg": state.config.epg,
@@ -183,7 +183,7 @@ struct ApiChannel {
     category: String,
     language: String,
     hd: bool,
-    tvplus: bool,
+    extras: bool,
     catchup: bool,
     playable: bool,
 }
@@ -193,9 +193,9 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
         Ok(l) => l,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    state.tvplus.refresh_catalogue_if_needed(&state.tv).await;
+    state.extras.refresh_catalogue_if_needed(&state.tv).await;
     let mut all = list.result;
-    all.extend(state.tvplus.exclusive_channels(&all));
+    all.extend(state.extras.exclusive_channels(&all));
     all.extend(state.custom_channels.all());
 
     let mut out: Vec<ApiChannel> = all
@@ -213,7 +213,7 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
                 category: crate::television::category_name(ch.category).to_string(),
                 language: crate::television::language_name(ch.language).to_string(),
                 hd: ch.is_hd,
-                tvplus: ch.id.starts_with(crate::tvplus::ID_PREFIX),
+                extras: ch.id.starts_with(crate::extras::ID_PREFIX),
                 catchup: ch.is_catchup_available,
                 playable: state.is_playable(&ch.id),
             }
@@ -281,20 +281,20 @@ pub async fn rotate_key(State(state): State<SharedState>) -> Response {
 
 
 #[derive(Deserialize)]
-pub struct TvPlusSendOtpBody {
+pub struct ExtrasSendOtpBody {
     number: String,
     connection: Option<usize>,
 }
 
-/// `POST /api/tvplus/login/sendOTP`. The first call (number only) returns
+/// `POST /api/extras/login/sendOTP`. The first call (number only) returns
 /// the fibre connections on the number when there's a choice; a second call
 /// with `connection` sends the OTP for that connection. Mirrors
-/// `TVPlusSendOTPHandler`.
-pub async fn tvplus_send_otp(State(state): State<SharedState>, Json(body): Json<TvPlusSendOtpBody>) -> Response {
-    if !state.tvplus.enabled() {
-        return err(StatusCode::BAD_REQUEST, "JioTV+ is not enabled");
+/// `ExtrasSendOTPHandler`.
+pub async fn extras_send_otp(State(state): State<SharedState>, Json(body): Json<ExtrasSendOtpBody>) -> Response {
+    if !state.extras.enabled() {
+        return err(StatusCode::BAD_REQUEST, "extras is not enabled");
     }
-    match state.tvplus.send_otp(&body.number, body.connection).await {
+    match state.extras.send_otp(&body.number, body.connection).await {
         Ok(outcome) => {
             let connections: Vec<_> = outcome
                 .connections
@@ -312,32 +312,88 @@ pub async fn tvplus_send_otp(State(state): State<SharedState>, Json(body): Json<
 }
 
 #[derive(Deserialize)]
-pub struct TvPlusVerifyOtpBody {
+pub struct ExtrasVerifyOtpBody {
     number: String,
     otp: String,
 }
 
-/// `POST /api/tvplus/login/verifyOTP`. Mirrors `TVPlusVerifyOTPHandler`.
-pub async fn tvplus_verify_otp(State(state): State<SharedState>, Json(body): Json<TvPlusVerifyOtpBody>) -> Response {
-    if !state.tvplus.enabled() {
-        return err(StatusCode::BAD_REQUEST, "JioTV+ is not enabled");
+/// `POST /api/extras/login/verifyOTP`. Mirrors `ExtrasVerifyOTPHandler`.
+pub async fn extras_verify_otp(State(state): State<SharedState>, Json(body): Json<ExtrasVerifyOtpBody>) -> Response {
+    if !state.extras.enabled() {
+        return err(StatusCode::BAD_REQUEST, "extras is not enabled");
     }
-    match state.tvplus.verify_otp(&body.number, &body.otp, &state.store).await {
+    match state.extras.verify_otp(&body.number, &body.otp, &state.store).await {
         Ok(ok) => Json(json!({"status": ok})).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
 
-/// `POST /api/tvplus/logout`. Mirrors `TVPlusLogoutHandler` (the device is
+/// `POST /api/extras/logout`. Mirrors `ExtrasLogoutHandler` (the device is
 /// kept so a later login reuses the same device slot).
-pub async fn tvplus_logout(State(state): State<SharedState>) -> Response {
+pub async fn extras_logout(State(state): State<SharedState>) -> Response {
     if state.config.disable_logout {
         return err(StatusCode::FORBIDDEN, "logout is disabled");
     }
-    match state.tvplus.logout(&state.store) {
+    match state.extras.logout(&state.store) {
         Ok(()) => Json(json!({"status": true})).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+}
+
+#[derive(Deserialize)]
+pub struct UnlockBody {
+    code: String,
+}
+
+fn extras_status(state: &AppState) -> serde_json::Value {
+    json!({"enabled": state.extras.enabled(), "connected": state.extras.connected()})
+}
+
+/// `POST /api/extras/unlock`. Only reached when the channel search box's
+/// own shape test decided the query looked like an unlock code (see
+/// `unlock.rs`), so this never sees an ordinary search. Rate-limited per IP
+/// like admin login; a wrong code gets the same generic message regardless
+/// of which part was wrong.
+pub async fn extras_unlock(
+    State(state): State<SharedState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<UnlockBody>,
+) -> Response {
+    if !crate::unlock::looks_like_code(&body.code) {
+        return err(StatusCode::BAD_REQUEST, "wrong code");
+    }
+    let ip = addr.ip().to_string();
+    let now = SystemTime::now();
+    if !state.unlock_limiter.allowed(&ip, now) {
+        return err(StatusCode::TOO_MANY_REQUESTS, "too many attempts, try again later");
+    }
+    let Some(public_ip) = state.public_ip.get().await else {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the server's public IPv4 address isn't available right now, so no unlock code will work",
+        );
+    };
+    if !crate::unlock::code_matches(public_ip, now, &body.code) {
+        state.unlock_limiter.record_failure(&ip, now);
+        return err(StatusCode::UNAUTHORIZED, "wrong code");
+    }
+    state.unlock_limiter.record_success(&ip);
+    if let Err(e) = state.store.set(crate::unlock::STORE_KEY_UNLOCKED, "true") {
+        tracing::warn!("extras unlock: cannot save: {e}");
+    }
+    state.extras.set_unlocked(true, &state.http, &state.store);
+    Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
+}
+
+/// `POST /api/extras/lock` — the Settings page's "Lock" button. Clears the
+/// stored panel unlock; has no effect on the `extras` config/env switch,
+/// which stays the way in for a headless install.
+pub async fn extras_lock(State(state): State<SharedState>) -> Response {
+    if let Err(e) = state.store.set(crate::unlock::STORE_KEY_UNLOCKED, "false") {
+        tracing::warn!("extras lock: cannot save: {e}");
+    }
+    state.extras.set_unlocked(false, &state.http, &state.store);
+    Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
 
 /// `GET /api/live/play/:id?q=` — resolves a live channel to what the
@@ -402,8 +458,10 @@ mod tests {
             custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
-            tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
+            extras: Arc::new(crate::extras_state::ExtrasState::new(false, false)),
             vod_state: Default::default(),
+            public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
+            unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
         })
     }
 

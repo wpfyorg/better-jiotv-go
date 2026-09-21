@@ -16,7 +16,10 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub disable_logout: bool,
     pub drm: bool,
-    pub tvplus: bool,
+    /// `extras` is the current config key; `tvplus` is accepted silently so
+    /// an existing config file from before the rename keeps working.
+    #[serde(alias = "tvplus")]
+    pub extras: bool,
     pub disable_auth: bool,
     pub title: String,
     pub disable_url_encryption: bool,
@@ -42,7 +45,7 @@ impl Default for Config {
             disable_ts_handler: false,
             disable_logout: false,
             drm: true,
-            tvplus: false,
+            extras: false,
             disable_auth: false,
             title: "JioTV Go".to_string(),
             disable_url_encryption: false,
@@ -99,7 +102,10 @@ impl Config {
         env_bool!(disable_ts_handler, "JIOTV_DISABLE_TS_HANDLER");
         env_bool!(disable_logout, "JIOTV_DISABLE_LOGOUT");
         env_bool!(drm, "JIOTV_DRM");
-        env_bool!(tvplus, "JIOTV_TVPLUS");
+        // `JIOTV_EXTRAS` is the current env var; `JIOTV_TVPLUS` is accepted
+        // silently as a fallback so an existing deployment keeps working.
+        env_bool!(extras, "JIOTV_TVPLUS");
+        env_bool!(extras, "JIOTV_EXTRAS");
         env_bool!(disable_auth, "JIOTV_DISABLE_AUTH");
         env_str!(title, "JIOTV_TITLE");
         env_bool!(disable_url_encryption, "JIOTV_DISABLE_URL_ENCRYPTION");
@@ -163,6 +169,36 @@ mod tests {
         assert!(!cfg.drm);
         std::env::remove_var("JIOTV_TITLE");
         std::env::remove_var("JIOTV_DRM");
+    }
+
+    #[test]
+    fn old_env_var_name_still_works() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("JIOTV_TVPLUS", "true");
+        let cfg = Config::load(None).unwrap();
+        assert!(cfg.extras);
+        std::env::remove_var("JIOTV_TVPLUS");
+    }
+
+    #[test]
+    fn new_env_var_name_wins_over_old() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("JIOTV_TVPLUS", "true");
+        std::env::set_var("JIOTV_EXTRAS", "false");
+        let cfg = Config::load(None).unwrap();
+        assert!(!cfg.extras);
+        std::env::remove_var("JIOTV_TVPLUS");
+        std::env::remove_var("JIOTV_EXTRAS");
+    }
+
+    #[test]
+    fn old_toml_key_name_still_works() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jiotv_go.toml");
+        std::fs::write(&path, "tvplus = true\n").unwrap();
+        let cfg = Config::load(Some(path.to_str().unwrap())).unwrap();
+        assert!(cfg.extras);
     }
 
     #[test]

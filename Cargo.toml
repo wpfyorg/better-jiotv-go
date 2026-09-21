@@ -15,9 +15,10 @@ full = ["dep:rust-embed", "dep:mime_guess"]
 # slim: IPTV core only, no UI assets, minimal /api surface. Build with
 # --no-default-features --features slim
 slim = []
-# tvplus: JioTV+ login/catalogue/playback support (off by default even in
-# the full build; gated at runtime by the `tvplus` config key too).
-tvplus = []
+# extras: the optional extra channel source's login/catalogue/playback
+# support (off by default even in the full build; gated at runtime by the
+# `extras` config key too).
+extras = []
 
 [dependencies]
 axum = { version = "0.7", default-features = false, features = ["http1", "tokio", "query", "json"] }
@@ -41,7 +42,7 @@ base64 = "0.22"
 lexopt = "0.3"
 thiserror = "1"
 anyhow = "1"
-time = { version = "0.3", features = ["formatting", "std"] }
+time = { version = "0.3", features = ["formatting", "std", "local-offset"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi", "env-filter"] }
 rust-embed = { version = "8", optional = true }

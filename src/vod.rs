@@ -1,14 +1,15 @@
-//! On-demand (VOD) playback via JioTV+: JioCinema, ZEE5 and MX Player only
-//! (the providers TV+ itself hands out streams for — everything else, like
-//! Prime Video or JioHotstar, only opens a partner app and is never shown).
-//! Mirrors `internal/handlers/vod.go`. Manifests and segments come straight
-//! from the providers' CDNs (which allow cross-origin requests); only the
+//! On-demand playback through the optional extra source: a fixed
+//! allowlist of providers (see `extras::is_supported_provider`) — every
+//! other provider in the catalogue only deep-links to a separate app and
+//! is never shown. Manifests and segments come straight from each
+//! provider's own CDN (which allows cross-origin requests); only the
 //! Widevine license request goes through this server, since it needs the
-//! JioTV+ login headers — including ZEE5's own license server, the one
-//! explicitly owner-approved exception to "only proxy JioTV/JioTV+ hosts".
+//! extra source's login headers — including one provider's own license
+//! server, an explicitly owner-approved exception to "only proxy this
+//! app's own hosts".
 
 use crate::state::AppState;
-use crate::tvplus::{PlaybackData, Rail, VodItem};
+use crate::extras::{PlaybackData, Rail, VodItem};
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, Method, StatusCode};
@@ -52,10 +53,10 @@ async fn vod_playback(state: &AppState, content_id: &str, fresh: bool) -> anyhow
     if let Some(cached) = state.vod_state.get_playback(content_id, fresh) {
         return Ok(cached);
     }
-    if let Err(e) = state.tvplus.ensure_token(false, &state.store).await {
-        tracing::warn!("JioTV+: token refresh failed: {e}");
+    if let Err(e) = state.extras.ensure_token(false, &state.store).await {
+        tracing::warn!("extras: token refresh failed: {e}");
     }
-    let client = state.tvplus.client_for_vod().ok_or_else(|| anyhow::anyhow!("connect JioTV+ in Settings to watch on-demand titles"))?;
+    let client = state.extras.client_for_vod().ok_or_else(|| anyhow::anyhow!("connect the extra source in Settings to watch on-demand titles"))?;
     let resp = client.playback(content_id).await?;
     state.vod_state.set_playback(content_id, resp.data.clone());
     Ok(resp.data)
@@ -65,11 +66,11 @@ fn err(status: StatusCode, message: impl Into<String>) -> Response {
     (status, axum::Json(json!({"message": message.into()}))).into_response()
 }
 
-fn require_client(state: &AppState) -> Result<Arc<crate::tvplus::Client>, Box<Response>> {
+fn require_client(state: &AppState) -> Result<Arc<crate::extras::Client>, Box<Response>> {
     state
-        .tvplus
+        .extras
         .client_for_vod()
-        .ok_or_else(|| Box::new(err(StatusCode::SERVICE_UNAVAILABLE, "connect JioTV+ in Settings to watch on-demand titles")))
+        .ok_or_else(|| Box::new(err(StatusCode::SERVICE_UNAVAILABLE, "connect the extra source in Settings to watch on-demand titles")))
 }
 
 #[derive(serde::Deserialize)]
@@ -90,7 +91,7 @@ pub async fn api_ott_search(State(state): State<Arc<AppState>>, Query(q): Query<
     match client.search(&query).await {
         Ok(rails) => axum::Json(json!({"rails": rails})).into_response(),
         Err(e) => {
-            tracing::warn!("JioTV+ search: {e}");
+            tracing::warn!("extras search: {e}");
             err(StatusCode::INTERNAL_SERVER_ERROR, "search failed")
         }
     }
@@ -111,7 +112,7 @@ pub async fn api_ott_screen(Path(id): Path<String>, Query(q): Query<PageQuery>, 
     match client.screen(&id, page).await {
         Ok((rails, more)) => axum::Json(json!({"rails": rails, "more": more})).into_response(),
         Err(e) => {
-            tracing::warn!("JioTV+ screen: {e}");
+            tracing::warn!("extras screen: {e}");
             err(StatusCode::INTERNAL_SERVER_ERROR, "cannot load this page")
         }
     }
@@ -134,7 +135,7 @@ pub async fn api_ott_episodes(Path(id): Path<String>, Query(q): Query<SeasonQuer
     match client.episodes(&id, q.season.unwrap_or(0)).await {
         Ok(episodes) => axum::Json(json!({"episodes": episodes})).into_response(),
         Err(e) => {
-            tracing::warn!("JioTV+ episodes: {e}");
+            tracing::warn!("extras episodes: {e}");
             err(StatusCode::INTERNAL_SERVER_ERROR, "cannot load the episodes")
         }
     }
@@ -143,7 +144,7 @@ pub async fn api_ott_episodes(Path(id): Path<String>, Query(q): Query<SeasonQuer
 /// `GET /api/ott/play/:id`
 pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> Response {
     if require_client(&state).is_err() {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "connect JioTV+ in Settings to watch on-demand titles");
+        return err(StatusCode::SERVICE_UNAVAILABLE, "connect the extra source in Settings to watch on-demand titles");
     }
     if !valid_content_id(&id) {
         return err(StatusCode::BAD_REQUEST, "invalid id");
@@ -151,13 +152,13 @@ pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppSta
     let d = match vod_playback(&state, &id, true).await {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!("JioTV+ VOD playback {id}: {e}");
+            tracing::warn!("extras on-demand playback {id}: {e}");
             return err(StatusCode::INTERNAL_SERVER_ERROR, "this title cannot be played");
         }
     };
-    let Some(provider_name) = crate::tvplus::vod_provider_name(&d.provider) else {
+    if !crate::extras::is_supported_provider(&d.provider) {
         return err(StatusCode::FORBIDDEN, "this provider is not supported");
-    };
+    }
     let (stream, dash) = d.vod_stream();
     if stream.is_empty() {
         return err(StatusCode::NOT_FOUND, "no stream for this title");
@@ -165,7 +166,7 @@ pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppSta
     let license = if !d.key_url.is_empty() { format!("/api/ott/license/{id}") } else { String::new() };
     axum::Json(json!({
         "name": d.name,
-        "provider": provider_name,
+        "provider": d.provider,
         "duration": d.total_duration,
         "url": stream,
         "dash": dash,
@@ -175,8 +176,8 @@ pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppSta
 }
 
 /// `POST /api/ott/license/:id` and (IPTV players) `POST /vod/license/:id`.
-/// Forwards a Widevine license request to the title's own license server —
-/// JioCinema's (Jio) or ZEE5's own — with the JioTV+ app's headers.
+/// Forwards a Widevine license request to the title's own license server
+/// (which provider hosts it varies) with the extra source app's headers.
 pub async fn ott_license(Path(id): Path<String>, State(state): State<Arc<AppState>>, method: Method, body: Bytes) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
@@ -189,14 +190,14 @@ pub async fn ott_license(Path(id): Path<String>, State(state): State<Arc<AppStat
         Ok(d) if !d.key_url.is_empty() => d,
         _ => return err(StatusCode::NOT_FOUND, "no license for this title"),
     };
-    if crate::tvplus::vod_provider_name(&d.provider).is_none() {
+    if !crate::extras::is_supported_provider(&d.provider) {
         return err(StatusCode::FORBIDDEN, "this provider is not supported");
     }
 
     let mut req = state
         .http
         .request(method, &d.key_url)
-        .header(header::USER_AGENT, crate::tvplus::PLAYER_USER_AGENT)
+        .header(header::USER_AGENT, crate::extras::PLAYER_USER_AGENT)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .body(body);
     for (k, v) in client.vod_license_headers(&d) {
@@ -219,10 +220,10 @@ pub async fn ott_license(Path(id): Path<String>, State(state): State<Arc<AppStat
 }
 
 /// `GET /vod/:id` (`.mpd`/`.m3u8` suffix optional) — sends an IPTV player
-/// straight to a fresh stream URL. Mirrors `VODStreamHandler`.
+/// straight to a fresh stream URL.
 pub async fn vod_stream_handler(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> Response {
     if require_client(&state).is_err() {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "connect JioTV+ in Settings to watch on-demand titles");
+        return err(StatusCode::SERVICE_UNAVAILABLE, "connect the extra source in Settings to watch on-demand titles");
     }
     let id = id.trim_end_matches(".mpd").trim_end_matches(".m3u8");
     if !valid_content_id(id) {
@@ -231,11 +232,11 @@ pub async fn vod_stream_handler(Path(id): Path<String>, State(state): State<Arc<
     let d = match vod_playback(&state, id, true).await {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!("JioTV+ VOD playback {id}: {e}");
+            tracing::warn!("extras on-demand playback {id}: {e}");
             return err(StatusCode::INTERNAL_SERVER_ERROR, "this title cannot be played");
         }
     };
-    if crate::tvplus::vod_provider_name(&d.provider).is_none() {
+    if !crate::extras::is_supported_provider(&d.provider) {
         return err(StatusCode::FORBIDDEN, "this provider is not supported");
     }
     let (stream, _) = d.vod_stream();
@@ -248,7 +249,7 @@ pub async fn vod_stream_handler(Path(id): Path<String>, State(state): State<Arc<
 const VOD_PLAYLIST_SCREENS: &[(&str, i64)] = &[("1", 4), ("100021", 6), ("100023", 6), ("100025", 4), ("100097", 4)];
 const MAX_PLAYLIST_SHOWS: usize = 40;
 
-async fn build_vod_playlist(client: &crate::tvplus::Client) -> Vec<(VodItem, String)> {
+async fn build_vod_playlist(client: &crate::extras::Client) -> Vec<(VodItem, String)> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut shows = 0usize;
@@ -258,13 +259,13 @@ async fn build_vod_playlist(client: &crate::tvplus::Client) -> Vec<(VodItem, Str
             let (rails, more) = match client.screen(screen_id, page).await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!("JioTV+ VOD playlist, screen {screen_id}: {e}");
+                    tracing::warn!("extras on-demand playlist, screen {screen_id}: {e}");
                     break;
                 }
             };
             for r in rails {
                 for it in r.items {
-                    let provider = crate::tvplus::vod_provider_name(&it.provider).unwrap_or_default();
+                    let provider = it.provider.as_str();
                     if it.content_type != "Show" {
                         if seen.insert(it.content_id.clone()) {
                             let group = format!("{provider} · {}", r.title);

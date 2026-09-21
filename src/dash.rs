@@ -3,7 +3,7 @@
 //! / `LiveManifestKeyHandler` / `MpdHandler` / `DashHandler` /
 //! `DRMKeyHandler` / `DASHTimeHandler` in `internal/handlers/drm.go`, with
 //! the same reduced fidelity noted in `stream.rs` (no singleflight, and here
-//! also: no TV+-specific CDN user-agent switching, and Set-Cookie from the
+//! also: no extras-specific CDN user-agent switching, and Set-Cookie from the
 //! CDN is not forwarded to the client — the embedded `/hdnea/<enc>` segment
 //! in the rewritten `BaseURL` carries the token instead, which is enough for
 //! same-process segment proxying but not for a client using cookies to talk
@@ -73,7 +73,7 @@ impl DashState {
 /// `parsed := url.Parse(tvURL); dir := strings.Join(strings.Split(parsed.Path, "/")[:n-1], "/") + "/"`.
 ///
 /// Operates only on `Url::path()`, never on the raw URL string, so a query
-/// string containing its own `/` characters (a real shape for JioTV/TV+'s
+/// string containing its own `/` characters (a real shape for JioTV/extras's
 /// `hdnea` token, e.g. `...~acl=/*~...`) can never leak into the split: the
 /// `url` crate has already separated path from query at the first
 /// unescaped `?` by the time `.path()` returns anything, regardless of what
@@ -171,7 +171,7 @@ pub async fn live_mpd_handler(
     }
 
     // get_drm_mpd -> fetch_live already refreshes the right credentials
-    // (JioTV's or TV+'s, depending on how the channel routes).
+    // (JioTV's or extras's, depending on how the channel routes).
     let drm = get_drm_mpd(&state, &channel_id, &quality).await;
     match drm {
         Ok(out) if !out.play_url.is_empty() => Redirect::to(&out.play_url).into_response(),
@@ -179,7 +179,7 @@ pub async fn live_mpd_handler(
             // No DRM/DASH stream available; fall back to this server's own
             // HLS route rather than the Go version's HTML fallback player.
             let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
-            let hls_path = format!("{prefix_str}{}", crate::tvplus_state::TvPlusState::live_hls_path(&channel_id, &quality));
+            let hls_path = format!("{prefix_str}{}", crate::extras_state::ExtrasState::live_hls_path(&channel_id, &quality));
             Redirect::to(&hls_path).into_response()
         }
     }
@@ -237,18 +237,18 @@ async fn drm_license_impl(
         Err(_) => return (StatusCode::FORBIDDEN, "invalid auth parameter").into_response(),
     };
 
-    // A TV+ channel's license is authorised by the token already in the
-    // license URL; send the headers the JioTV+ app sends and skip the
+    // A extras channel's license is authorised by the token already in the
+    // license URL; send the headers the extras app sends and skip the
     // cookie-harvesting dance below entirely, mirroring `DRMKeyHandler`'s
-    // `tvPlusLicenseHeaders` branch.
+    // `extrasLicenseHeaders` branch.
     let is_custom = state.custom_channels.contains(&channel_id);
-    if let Some(content_id) = state.tvplus.route(&channel_id, state.tv.logged_in(), is_custom) {
+    if let Some(content_id) = state.extras.route(&channel_id, state.tv.logged_in(), is_custom) {
         let mut req = state
             .http
             .request(method, &decoded_url)
-            .header(header::USER_AGENT, crate::tvplus::PLAYER_USER_AGENT)
+            .header(header::USER_AGENT, crate::extras::PLAYER_USER_AGENT)
             .header(header::CONTENT_TYPE, "application/octet-stream");
-        for (k, v) in state.tvplus.license_headers(&content_id, "") {
+        for (k, v) in state.extras.license_headers(&content_id, "") {
             req = req.header(k, v);
         }
         return send_license_request(req, body).await;
@@ -516,13 +516,13 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// The TV+ CDN refuses DASH manifests/segments unless the User-Agent starts
-/// with `JioTV.Plus/` (see `pkg/tvplus`'s `PlayerUserAgent` doc comment);
-/// `TvPlusState::player_user_agent_for` tracks which hosts need it.
+/// The extras CDN refuses DASH manifests/segments unless the User-Agent starts
+/// with `JioTV.Plus/` (see `pkg/extras`'s `PlayerUserAgent` doc comment);
+/// `ExtrasState::player_user_agent_for` tracks which hosts need it.
 fn player_user_agent_for(state: &AppState, url: &str) -> &'static str {
     url::Url::parse(url)
         .ok()
-        .and_then(|u| u.host_str().map(|h| state.tvplus.player_user_agent_for(h)))
+        .and_then(|u| u.host_str().map(|h| state.extras.player_user_agent_for(h)))
         .unwrap_or(television::PLAYER_USER_AGENT)
 }
 
@@ -716,7 +716,7 @@ mod tests {
         assert_eq!(rewrite_base_url(bases, "/r").matches("<BaseURL>/r/dash/</BaseURL>").count(), 2);
     }
 
-    /// Regression test for a live-verified bug: channel 151's TV+-mirrored
+    /// Regression test for a live-verified bug: channel 151's extras-mirrored
     /// MPD carries an `hdnea` token whose value contains a literal `/`
     /// (Akamai-style ACLs look like `exp=...~acl=/*~data=...~hmac=...`).
     /// The directory must come out exactly as many segments deep as the

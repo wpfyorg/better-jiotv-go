@@ -3,7 +3,7 @@
 //! its (now fresh) result via the caller's own cache re-check inside the
 //! lock — the same effect as Go's `singleflight.Group.Do`, without a
 //! dedicated crate. Used for JioTV's live-URL recovery fetch
-//! (`refreshChannelToken` in the Go tree) and JioTV+'s
+//! (`refreshChannelToken` in the Go tree) and extras's
 //! catalogue/token-refresh/playback caches.
 
 use std::collections::HashMap;

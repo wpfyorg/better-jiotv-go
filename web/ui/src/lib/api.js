@@ -44,6 +44,13 @@ export function loadChannels(force = false) {
   return channelsPromise;
 }
 
+// Shape of the extras unlock code (see docs/config.md and src/unlock.rs).
+// Matched before ever sending a search-box query to the server, so an
+// ordinary channel search never leaves the browser.
+export function looksLikeUnlockCode(s) {
+  return /^\d{1,3}[a-z]{3,9}\d{1,2}a\d{1,3}k\d{1,3}n\d{1,3}$/i.test(s.trim());
+}
+
 export function formatTime(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }

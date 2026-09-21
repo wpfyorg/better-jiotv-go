@@ -1,6 +1,6 @@
 <script>
   import { onMount } from "svelte";
-  import { loadChannels } from "../lib/api.js";
+  import { api, loadChannels, looksLikeUnlockCode } from "../lib/api.js";
 
   const saved = (() => {
     try {
@@ -16,14 +16,28 @@
   let query = $state("");
   let category = $state(saved.category ?? "");
   let language = $state(saved.language ?? "");
-  let tvplusOnly = $state(saved.tvplusOnly ?? false);
+  let extrasOnly = $state(saved.extrasOnly ?? false);
   let hdOnly = $state(saved.hdOnly ?? false);
   let showUnplayable = $state(saved.showUnplayable ?? false);
 
   $effect(() => {
     try {
-      localStorage.setItem("channelFilters", JSON.stringify({ category, language, tvplusOnly, hdOnly, showUnplayable }));
+      localStorage.setItem("channelFilters", JSON.stringify({ category, language, extrasOnly, hdOnly, showUnplayable }));
     } catch {}
+  });
+
+  // If (and only if) the search box holds something shaped like the extras
+  // unlock code, try it against the server. An ordinary search never
+  // matches this shape, so it never leaves the browser.
+  let triedCode = "";
+  $effect(() => {
+    const q = query.trim();
+    if (q && q !== triedCode && looksLikeUnlockCode(q)) {
+      triedCode = q;
+      api("/api/extras/unlock", { method: "POST", body: { code: q } })
+        .then(() => window.dispatchEvent(new CustomEvent("jiotv:extras-changed")))
+        .catch(() => {});
+    }
   });
 
   const categories = $derived([...new Set(channels.map((c) => c.category).filter(Boolean))].sort());
@@ -34,7 +48,7 @@
     return channels.filter(
       (c) =>
         (showUnplayable || c.playable) &&
-        (!tvplusOnly || c.tvplus) &&
+        (!extrasOnly || c.extras) &&
         (!hdOnly || c.hd) &&
         (!category || c.category === category) &&
         (!language || c.language === language) &&
@@ -64,7 +78,7 @@
     {#each languages as l}<option>{l}</option>{/each}
   </select>
   <label class="toggle"><input type="checkbox" bind:checked={hdOnly} /> HD</label>
-  <label class="toggle"><input type="checkbox" bind:checked={tvplusOnly} /> JioTV+ only</label>
+  <label class="toggle"><input type="checkbox" bind:checked={extrasOnly} /> Extra channels only</label>
   <label class="toggle"><input type="checkbox" bind:checked={showUnplayable} /> Show unavailable</label>
 </section>
 
@@ -82,7 +96,7 @@
           <span class="name">{c.name}</span>
           <span class="tags">
             {#if c.hd}<span class="badge">HD</span>{/if}
-            {#if c.tvplus}<span class="badge tvplus">TV+</span>{/if}
+            {#if c.extras}<span class="badge extras">Extra</span>{/if}
           </span>
         </a>
       </li>

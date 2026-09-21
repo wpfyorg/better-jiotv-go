@@ -110,7 +110,7 @@
         <h1>{channel?.name ?? id}</h1>
         <p class="muted">
           {[channel?.category, channel?.language].filter(Boolean).join(" · ")}
-          {#if channel?.tvplus}<span class="badge tvplus">TV+</span>{/if}
+          {#if channel?.extras}<span class="badge extras">Extra</span>{/if}
         </p>
       </div>
     </div>

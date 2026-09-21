@@ -64,11 +64,13 @@ fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/jiotv/logout", post(crate::api::jiotv_logout))
         .route("/login/sendOTP", post(crate::api::jiotv_send_otp))
         .route("/login/verifyOTP", post(crate::api::jiotv_verify_otp))
-        .route("/tvplus/login/sendOTP", post(crate::api::tvplus_send_otp))
-        .route("/tvplus/login/verifyOTP", post(crate::api::tvplus_verify_otp))
-        .route("/api/tvplus/login/sendOTP", post(crate::api::tvplus_send_otp))
-        .route("/api/tvplus/login/verifyOTP", post(crate::api::tvplus_verify_otp))
-        .route("/api/tvplus/logout", post(crate::api::tvplus_logout))
+        .route("/extras/login/sendOTP", post(crate::api::extras_send_otp))
+        .route("/extras/login/verifyOTP", post(crate::api::extras_verify_otp))
+        .route("/api/extras/login/sendOTP", post(crate::api::extras_send_otp))
+        .route("/api/extras/login/verifyOTP", post(crate::api::extras_verify_otp))
+        .route("/api/extras/logout", post(crate::api::extras_logout))
+        .route("/api/extras/unlock", post(crate::api::extras_unlock))
+        .route("/api/extras/lock", post(crate::api::extras_lock))
         .route("/api/ott/search", get(crate::vod::api_ott_search))
         .route("/api/ott/screen/:id", get(crate::vod::api_ott_screen))
         .route("/api/ott/show/:id", get(crate::vod::api_ott_episodes))
@@ -308,8 +310,8 @@ async fn channels_or_playlist(
         Ok(l) => l,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    state.tvplus.refresh_catalogue_if_needed(&state.tv).await;
-    list.result.extend(state.tvplus.exclusive_channels(&list.result));
+    state.extras.refresh_catalogue_if_needed(&state.tv).await;
+    list.result.extend(state.extras.exclusive_channels(&list.result));
     list.result.extend(state.custom_channels.all());
 
     if q.get("type").map(String::as_str) != Some("m3u") {
@@ -400,7 +402,7 @@ mod tests {
     /// call fails instantly with a connection error instead of making a
     /// live request. Used to prove a handler's `Path`/`Query` extraction
     /// succeeded (it ran at all) without the test ever touching the real
-    /// JioTV/JioTV+ APIs, per the project's rule against live calls in tests.
+    /// JioTV/extras APIs, per the project's rule against live calls in tests.
     fn blackholed_client() -> reqwest::Client {
         let sink: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
         let hosts = [
@@ -438,8 +440,10 @@ mod tests {
             custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
-            tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
+            extras: Arc::new(crate::extras_state::ExtrasState::new(false, false)),
             vod_state: Default::default(),
+            public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
+            unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
         })
     }
 
@@ -539,7 +543,7 @@ mod tests {
             "/epg/999999/0",
             "/jtvimage/does-not-exist.png",
             "/jtvposter/2024-01-01/does-not-exist.png",
-            // TV+ is off in this test state, so these resolve at
+            // extras is off in this test state, so these resolve at
             // require_client()'s check, never touching the network either.
             "/vod/999999",
             "/api/ott/screen/1",
@@ -589,8 +593,8 @@ mod tests {
     async fn ott_play_route_reaches_its_handler_through_the_key_prefix() {
         let state = test_state();
         let key = state.access.key().unwrap();
-        // TV+ is off in the test state, so this can't get past "connect
-        // JioTV+ in Settings" — but that response, not a routing 404 or the
+        // extras is off in the test state, so this can't get past "connect
+        // extras in Settings" — but that response, not a routing 404 or the
         // path-extraction bug, is exactly what proves /api/ott/play/:id was
         // reached through the /k/<key> prefix.
         let resp = send(state, &format!("/k/{key}/api/ott/play/999")).await;

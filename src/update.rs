@@ -10,7 +10,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
-const DEFAULT_REPO: &str = "wpfyorg/jiotv_go-tvplus";
+const DEFAULT_REPO: &str = "wpfyorg/jiotv_go-extras";
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

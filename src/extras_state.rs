@@ -1,13 +1,13 @@
-//! JioTV+ routing and caching layer: which channels play through TV+, the
+//! extras routing and caching layer: which channels play through extras, the
 //! playback/catalogue caches, and the learned DASH/HLS stream-type map.
-//! Mirrors the `tvPlusState`/package-level functions in
-//! `internal/handlers/tvplus.go`. Only active when `config.tvplus` is true
-//! and a login has been completed (`tvplus login`); otherwise every
+//! Mirrors the `extras_state`/package-level functions in
+//! `internal/handlers/extras.go`. Only active when `config.extras` is true
+//! and a login has been completed (`extras login`); otherwise every
 //! function here is a cheap no-op, matching the Go version's behaviour when
-//! `tvPlus.client == nil`.
+//! `extras.client == nil`.
 
 use crate::television::{Channel, LiveUrlOutput, Television};
-use crate::tvplus::{Client, Credentials, Device, LiveChannel};
+use crate::extras::{Client, Credentials, Device, LiveChannel};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -21,12 +21,13 @@ use crate::keyed_locks::KeyedLocks;
 #[derive(Default)]
 struct PendingLogin {
     number: String,
-    connections: Vec<crate::tvplus::Connection>,
+    connections: Vec<crate::extras::Connection>,
     identifier: String,
 }
 
-pub struct TvPlusState {
-    enabled: bool,
+pub struct ExtrasState {
+    config_enabled: bool,
+    unlocked: std::sync::atomic::AtomicBool,
     client: RwLock<Option<Arc<Client>>>,
     catalogue: RwLock<Vec<LiveChannel>>,
     catalogue_fetched_at: RwLock<Option<Instant>>,
@@ -39,10 +40,14 @@ pub struct TvPlusState {
     locks: KeyedLocks,
 }
 
-impl TvPlusState {
-    pub fn new(enabled: bool) -> TvPlusState {
-        TvPlusState {
-            enabled,
+impl ExtrasState {
+    /// `config_enabled` is the `extras` config/env switch (headless/router
+    /// installs, always on). `unlocked` is the panel unlock gate's stored
+    /// state (`extras_unlocked` in the store); either one turns extras on.
+    pub fn new(config_enabled: bool, unlocked: bool) -> ExtrasState {
+        ExtrasState {
+            config_enabled,
+            unlocked: std::sync::atomic::AtomicBool::new(unlocked),
             client: RwLock::new(None),
             catalogue: RwLock::new(Vec::new()),
             catalogue_fetched_at: RwLock::new(None),
@@ -56,10 +61,24 @@ impl TvPlusState {
         }
     }
 
+    /// Whether extras is switched on at all, from the config/env switch or
+    /// a stored panel unlock -- either is enough.
+    fn gate_enabled(&self) -> bool {
+        self.config_enabled || self.unlocked.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Flips the panel-unlock gate and reloads, so the feature turns on (or
+    /// off, via the Settings "Lock" button) without restarting the server.
+    /// Does not touch the `extras` config/env switch.
+    pub fn set_unlocked(&self, v: bool, http: &reqwest::Client, store: &crate::store::Store) {
+        self.unlocked.store(v, std::sync::atomic::Ordering::Relaxed);
+        self.init(http, store);
+    }
+
     /// Loads (or creates) the device and any saved login from the store.
-    /// Safe to call again after login/logout, mirroring `InitTVPlus`.
+    /// Safe to call again after login/logout, mirroring `InitExtras`.
     pub fn init(&self, http: &reqwest::Client, store: &crate::store::Store) {
-        if !self.enabled {
+        if !self.gate_enabled() {
             *self.client.write().unwrap() = None;
             return;
         }
@@ -68,7 +87,7 @@ impl TvPlusState {
             match Device::load_or_create(store) {
                 Ok(device) => *self.client.write().unwrap() = Some(Arc::new(Client::new(http.clone(), device))),
                 Err(e) => {
-                    tracing::warn!("JioTV+: cannot load device: {e}");
+                    tracing::warn!("extras: cannot load device: {e}");
                     return;
                 }
             }
@@ -78,27 +97,33 @@ impl TvPlusState {
             client.set_credentials(creds.clone());
         }
         self.live.write().unwrap().clear();
-        if let Some(raw) = store.get_opt(crate::tvplus::STORE_KEY_DASH) {
+        // `extras_stream_kinds` is the current store key; `tvplus_dash` is
+        // read as a fallback so an existing store's learned map survives
+        // the rename, and gets migrated forward on the next save below.
+        let raw = store
+            .get_opt(crate::extras::STORE_KEY_DASH)
+            .or_else(|| store.get_opt(crate::extras::STORE_KEY_DASH_OLD));
+        if let Some(raw) = raw {
             if let Ok(dash) = serde_json::from_str::<HashMap<String, bool>>(&raw) {
                 *self.dash.write().unwrap() = dash;
             }
         }
         if creds.is_some() {
-            tracing::info!("JioTV+ login loaded");
+            tracing::info!("extras login loaded");
         }
     }
 
-    pub fn is_tvplus_channel(channel_id: &str) -> bool {
-        channel_id.starts_with(crate::tvplus::ID_PREFIX)
+    pub fn is_extras_channel(channel_id: &str) -> bool {
+        channel_id.starts_with(crate::extras::ID_PREFIX)
     }
 
     fn client(&self) -> Option<Arc<Client>> {
         self.client.read().unwrap().clone()
     }
 
-    /// The client, only if TV+ is enabled and logged in with a working
+    /// The client, only if extras is enabled and logged in with a working
     /// access token — for on-demand playback, which (like live) needs a
-    /// completed login. Mirrors `tvPlusClient`.
+    /// completed login. Mirrors `extrasClient`.
     pub fn client_for_vod(&self) -> Option<Arc<Client>> {
         let client = self.client()?;
         let cr = client.credentials()?;
@@ -121,11 +146,11 @@ impl TvPlusState {
         self.client().is_some()
     }
 
-    /// Refreshes the catalogue/mirrors cache if stale. Cheap no-op when TV+
+    /// Refreshes the catalogue/mirrors cache if stale. Cheap no-op when extras
     /// isn't connected. Must be awaited once before any of the sync lookup
     /// methods below (`route`, `is_drm_channel`, `channel_playable`) so they
     /// see up-to-date mirrors — mirrors the Go version calling
-    /// `tvPlusCatalogue()` synchronously inline.
+    /// `extrasCatalogue()` synchronously inline.
     pub async fn refresh_catalogue_if_needed(&self, tv: &Television) {
         let Some(client) = self.client() else { return };
         if client.credentials().map(|c| c.auth_token.is_empty()).unwrap_or(true) {
@@ -154,9 +179,9 @@ impl TvPlusState {
         match client.channels().await {
             Ok(fetched) => {
                 let mirrors = match tv.channels().await {
-                    Ok(jiotv) => Some(crate::tvplus::mirrors(&fetched, &jiotv.result)),
+                    Ok(jiotv) => Some(crate::extras::mirrors(&fetched, &jiotv.result)),
                     Err(e) => {
-                        tracing::warn!("JioTV+: cannot fetch JioTV channels: {e}");
+                        tracing::warn!("extras: cannot fetch JioTV channels: {e}");
                         None
                     }
                 };
@@ -173,7 +198,7 @@ impl TvPlusState {
                 *self.catalogue.write().unwrap() = fetched;
                 *self.catalogue_fetched_at.write().unwrap() = Some(Instant::now());
             }
-            Err(e) => tracing::warn!("JioTV+: cannot fetch channels: {e}"),
+            Err(e) => tracing::warn!("extras: cannot fetch channels: {e}"),
         }
     }
 
@@ -181,18 +206,18 @@ impl TvPlusState {
         self.catalogue.read().unwrap().clone()
     }
 
-    /// The TV+ channels JioTV doesn't already carry (`tvplus.Exclusive`).
+    /// The extras channels JioTV doesn't already carry (`extras.Exclusive`).
     pub fn exclusive_channels(&self, jiotv: &[Channel]) -> Vec<Channel> {
-        crate::tvplus::exclusive(&self.catalogue(), jiotv)
+        crate::extras::exclusive(&self.catalogue(), jiotv)
     }
 
-    /// Resolves a channel ID to a TV+ content ID: always for `tvp_` IDs;
-    /// for a plain JioTV ID, only when there's no JioTV login, TV+ is
-    /// connected, and TV+ mirrors that channel. Requires
+    /// Resolves a channel ID to a extras content ID: always for `ex_` IDs;
+    /// for a plain JioTV ID, only when there's no JioTV login, extras is
+    /// connected, and extras mirrors that channel. Requires
     /// `refresh_catalogue_if_needed` to have been awaited first for the
-    /// mirrors lookup to be current. Mirrors `tvPlusRoute`.
+    /// mirrors lookup to be current. Mirrors `extrasRoute`.
     pub fn route(&self, channel_id: &str, jiotv_logged_in: bool, is_custom_channel: bool) -> Option<String> {
-        if let Some(id) = crate::tvplus::content_id::content_id(channel_id) {
+        if let Some(id) = crate::extras::content_id::content_id(channel_id) {
             return Some(id.to_string());
         }
         if is_custom_channel || jiotv_logged_in || !self.connected() {
@@ -207,16 +232,16 @@ impl TvPlusState {
 
     pub fn player_user_agent_for(&self, host: &str) -> &'static str {
         if self.is_cdn_host(host) {
-            crate::tvplus::PLAYER_USER_AGENT
+            crate::extras::PLAYER_USER_AGENT
         } else {
             crate::television::PLAYER_USER_AGENT
         }
     }
 
-    /// Fetches (or returns cached) stream URLs for a TV+ content ID, with a
-    /// 60s cache and per-content-ID de-duplication. Mirrors `tvPlusLive`.
+    /// Fetches (or returns cached) stream URLs for a extras content ID, with a
+    /// 60s cache and per-content-ID de-duplication. Mirrors `extrasLive`.
     pub async fn live(&self, content_id: &str, store: &crate::store::Store) -> anyhow::Result<LiveUrlOutput> {
-        let client = self.client().ok_or_else(|| anyhow::anyhow!("JioTV+ is not enabled"))?;
+        let client = self.client().ok_or_else(|| anyhow::anyhow!("extras is not enabled"))?;
         if let Some((result, at)) = self.live.read().unwrap().get(content_id).cloned() {
             if at.elapsed() < LIVE_TTL {
                 return Ok(result);
@@ -230,13 +255,13 @@ impl TvPlusState {
         }
 
         if let Err(e) = self.ensure_token(false, store).await {
-            tracing::warn!("JioTV+: token refresh failed: {e}");
+            tracing::warn!("extras: token refresh failed: {e}");
         }
 
         let resp = match client.playback(content_id).await {
             Ok(r) => r,
-            Err(crate::tvplus::TvPlusError::NotSubscribed) => {
-                anyhow::bail!("channel {content_id} is not in your JioTV+ plan")
+            Err(crate::extras::ExtrasError::NotSubscribed) => {
+                anyhow::bail!("channel {content_id} is not in your extras plan")
             }
             Err(e) => return Err(e.into()),
         };
@@ -261,8 +286,8 @@ impl TvPlusState {
             dash_map.insert(content_id.to_string(), has_dash);
             let json = serde_json::to_string(&*dash_map)?;
             drop(dash_map);
-            if let Err(e) = store.set(crate::tvplus::STORE_KEY_DASH, &json) {
-                tracing::warn!("JioTV+: cannot save stream types: {e}");
+            if let Err(e) = store.set(crate::extras::STORE_KEY_DASH, &json) {
+                tracing::warn!("extras: cannot save stream types: {e}");
             }
         }
 
@@ -271,16 +296,16 @@ impl TvPlusState {
 
     /// Refreshes the access token if it's within `TOKEN_LEAD` of expiry (or
     /// always, if `force`). Concurrent callers share one refresh. Mirrors
-    /// `ensureTVPlusToken`.
+    /// `ensureExtrasToken`.
     pub async fn ensure_token(&self, force: bool, store: &crate::store::Store) -> anyhow::Result<()> {
-        let client = self.client().ok_or_else(|| anyhow::anyhow!("JioTV+ is not enabled"))?;
-        let cr = client.credentials().ok_or_else(|| anyhow::anyhow!("JioTV+ is not connected"))?;
+        let client = self.client().ok_or_else(|| anyhow::anyhow!("extras is not enabled"))?;
+        let cr = client.credentials().ok_or_else(|| anyhow::anyhow!("extras is not connected"))?;
         if !force && !cr.needs_refresh(std::time::SystemTime::now(), TOKEN_LEAD) {
             return Ok(());
         }
         let _guard = self.locks.lock("refresh").await;
         // Re-check: another caller may have just refreshed it.
-        let cr = client.credentials().ok_or_else(|| anyhow::anyhow!("JioTV+ is not connected"))?;
+        let cr = client.credentials().ok_or_else(|| anyhow::anyhow!("extras is not connected"))?;
         if !force && !cr.needs_refresh(std::time::SystemTime::now(), TOKEN_LEAD) {
             return Ok(());
         }
@@ -302,14 +327,14 @@ impl TvPlusState {
         client.license_headers(content_id, playback_token)
     }
 
-    /// Mirrors `isDRMChannel`'s TV+ branch: a channel played through TV+ is
+    /// Mirrors `isDRMChannel`'s extras branch: a channel played through extras is
     /// DRM (DASH) when its last playback had a DASH stream; before it's been
-    /// played, a `tvp_` channel is assumed DASH.
-    pub fn is_drm(&self, content_id: &str, is_tvp_id: bool) -> Option<bool> {
+    /// played, a `ex_` channel is assumed DASH.
+    pub fn is_drm(&self, content_id: &str, is_ex_id: bool) -> Option<bool> {
         if let Some(had) = self.dash.read().unwrap().get(content_id) {
             return Some(*had);
         }
-        if is_tvp_id {
+        if is_ex_id {
             Some(true)
         } else {
             None
@@ -317,7 +342,7 @@ impl TvPlusState {
     }
 
     /// `/live/:channelID`'s HLS path, used as the fallback redirect for a
-    /// TV+ channel that turns out to have no DASH stream. Mirrors
+    /// extras channel that turns out to have no DASH stream. Mirrors
     /// `liveHLSPath`.
     pub fn live_hls_path(channel_id: &str, quality: &str) -> String {
         if quality.is_empty() || quality == "auto" {
@@ -327,10 +352,10 @@ impl TvPlusState {
         }
     }
 
-    // ---- OTP login flow (mirrors TVPlusSendOTPHandler/TVPlusVerifyOTPHandler) ----
+    // ---- OTP login flow (mirrors ExtrasSendOTPHandler/ExtrasVerifyOTPHandler) ----
 
     pub async fn send_otp(&self, number: &str, connection_index: Option<usize>) -> anyhow::Result<SendOtpOutcome> {
-        let client = self.client().ok_or_else(|| anyhow::anyhow!("JioTV+ is not enabled"))?;
+        let client = self.client().ok_or_else(|| anyhow::anyhow!("extras is not enabled"))?;
         let number = number.trim().strip_prefix("+91").unwrap_or(number.trim()).to_string();
 
         if let Some(i) = connection_index {
@@ -358,7 +383,7 @@ impl TvPlusState {
     }
 
     pub async fn verify_otp(&self, number: &str, otp: &str, store: &crate::store::Store) -> anyhow::Result<bool> {
-        let client = self.client().ok_or_else(|| anyhow::anyhow!("JioTV+ is not enabled"))?;
+        let client = self.client().ok_or_else(|| anyhow::anyhow!("extras is not enabled"))?;
         let number = number.trim().strip_prefix("+91").unwrap_or(number.trim()).to_string();
         let identifier = {
             let p = self.pending.lock().unwrap();
@@ -384,35 +409,35 @@ impl TvPlusState {
         }
     }
 
-    /// TV+ channels and their next two days' programmes, for
+    /// extras channels and their next two days' programmes, for
     /// `epg::generate_xml`'s `extra_sources`/`extra_programmes`. Mirrors
-    /// `TVPlusEPGSource`.
+    /// `ExtrasEPGSource`.
     pub async fn epg_source(&self, tv: &Television) -> anyhow::Result<(Vec<(String, String)>, Vec<crate::epg::XmlProgramme>)> {
-        let client = self.client().ok_or_else(|| anyhow::anyhow!("JioTV+ is not enabled"))?;
+        let client = self.client().ok_or_else(|| anyhow::anyhow!("extras is not enabled"))?;
         self.refresh_catalogue_if_needed(tv).await;
         let jiotv = tv.channels().await?;
         let channels = self.exclusive_channels(&jiotv.result);
         let ids: Vec<String> = channels
             .iter()
-            .filter_map(|ch| crate::tvplus::content_id::content_id(&ch.id).map(str::to_string))
+            .filter_map(|ch| crate::extras::content_id::content_id(&ch.id).map(str::to_string))
             .collect();
         let guide = client.epg(&ids, &[0, 1]).await?;
 
         let mut xml_channels = Vec::new();
         let mut programmes = Vec::new();
         for ch in &channels {
-            let Some(id) = crate::tvplus::content_id::content_id(&ch.id) else { continue };
+            let Some(id) = crate::extras::content_id::content_id(&ch.id) else { continue };
             xml_channels.push((ch.id.clone(), ch.name.clone()));
             if let Some(progs) = guide.get(id) {
                 let category = crate::television::category_name(ch.category);
-                programmes.extend(crate::tvplus::to_xmltv(id, category, progs));
+                programmes.extend(crate::extras::to_xmltv(id, category, progs));
             }
         }
         Ok((xml_channels, programmes))
     }
 
     pub fn logout(&self, store: &crate::store::Store) -> anyhow::Result<()> {
-        crate::tvplus::delete_credentials(store)?;
+        crate::extras::delete_credentials(store)?;
         if let Some(client) = self.client() {
             client.set_credentials(None);
         }
@@ -422,7 +447,7 @@ impl TvPlusState {
 
 pub struct SendOtpOutcome {
     pub sent: bool,
-    pub connections: Vec<crate::tvplus::Connection>,
+    pub connections: Vec<crate::extras::Connection>,
 }
 
 use crate::television::has_dash;
@@ -433,31 +458,73 @@ mod tests {
 
     #[test]
     fn disabled_state_reports_not_connected() {
-        let s = TvPlusState::new(false);
+        let s = ExtrasState::new(false, false);
         assert!(!s.connected());
         assert!(!s.enabled());
         assert_eq!(s.route("154", false, false), None);
-        // A tvp_ id always maps to its content id even when disabled...
-        assert_eq!(s.route("tvp_1", false, false), Some("1".to_string()));
+        // A ex_ id always maps to its content id even when disabled...
+        assert_eq!(s.route("ex_1", false, false), Some("1".to_string()));
     }
 
     #[test]
-    fn route_prefers_jiotv_login_over_tvplus() {
-        let s = TvPlusState::new(true);
+    fn set_unlocked_turns_extras_on_without_the_config_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
+        let s = ExtrasState::new(false, false);
+        s.init(&reqwest::Client::new(), &store);
+        assert!(!s.enabled());
+        s.set_unlocked(true, &reqwest::Client::new(), &store);
+        assert!(s.enabled());
+        s.set_unlocked(false, &reqwest::Client::new(), &store);
+        assert!(!s.enabled());
+    }
+
+    #[test]
+    fn route_prefers_jiotv_login_over_extras() {
+        let s = ExtrasState::new(true, false);
         // Not connected (no client set up), so a plain JioTV id never routes.
         assert_eq!(s.route("154", true, false), None);
         assert_eq!(s.route("154", false, false), None);
     }
 
     #[test]
-    fn live_hls_path_matches_quality() {
-        assert_eq!(TvPlusState::live_hls_path("tvp_1", "auto"), "/live/tvp_1.m3u8");
-        assert_eq!(TvPlusState::live_hls_path("tvp_1", "high"), "/live/high/tvp_1.m3u8");
+    fn stream_kind_map_migrates_from_old_store_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
+        let mut old_map = HashMap::new();
+        old_map.insert("1".to_string(), true);
+        store.set(crate::extras::STORE_KEY_DASH_OLD, &serde_json::to_string(&old_map).unwrap()).unwrap();
+
+        let s = ExtrasState::new(true, false);
+        s.init(&reqwest::Client::new(), &store);
+        assert_eq!(s.dash.read().unwrap().get("1"), Some(&true));
     }
 
     #[test]
-    fn is_drm_defaults_to_true_for_unplayed_tvp_channel() {
-        let s = TvPlusState::new(true);
+    fn stream_kind_map_prefers_new_store_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
+        let mut old_map = HashMap::new();
+        old_map.insert("1".to_string(), true);
+        store.set(crate::extras::STORE_KEY_DASH_OLD, &serde_json::to_string(&old_map).unwrap()).unwrap();
+        let mut new_map = HashMap::new();
+        new_map.insert("1".to_string(), false);
+        store.set(crate::extras::STORE_KEY_DASH, &serde_json::to_string(&new_map).unwrap()).unwrap();
+
+        let s = ExtrasState::new(true, false);
+        s.init(&reqwest::Client::new(), &store);
+        assert_eq!(s.dash.read().unwrap().get("1"), Some(&false));
+    }
+
+    #[test]
+    fn live_hls_path_matches_quality() {
+        assert_eq!(ExtrasState::live_hls_path("ex_1", "auto"), "/live/ex_1.m3u8");
+        assert_eq!(ExtrasState::live_hls_path("ex_1", "high"), "/live/high/ex_1.m3u8");
+    }
+
+    #[test]
+    fn is_drm_defaults_to_true_for_unplayed_ex_channel() {
+        let s = ExtrasState::new(true, false);
         assert_eq!(s.is_drm("5", true), Some(true));
         assert_eq!(s.is_drm("5", false), None);
     }

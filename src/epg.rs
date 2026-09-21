@@ -54,9 +54,9 @@ struct EpgResponse {
     epg: Vec<EpgObject>,
 }
 
-/// One `<programme>` entry, public so `tvplus::to_xmltv` can hand in extra
-/// entries from the TV+-only channels (mirrors `epg.Programme` in the Go
-/// tree, used the same way by `TVPlusEPGSource`).
+/// One `<programme>` entry, public so `extras::to_xmltv` can hand in extra
+/// entries from the extras-only channels (mirrors `epg.Programme` in the Go
+/// tree, used the same way by `ExtrasEPGSource`).
 pub struct XmlProgramme {
     pub channel: String,
     pub start: String,
@@ -106,9 +106,9 @@ async fn fetch_epg_for_channel(client: &reqwest::Client, channel_id: i64) -> Vec
 }
 
 /// Fetches the full channel list and every channel's EPG, appends any extra
-/// (channel, programme) pairs from `extra_sources` (TV+'s catalogue, when
-/// enabled — see `tvplus_state::epg_source`, mirroring `RegisterSource` /
-/// `TVPlusEPGSource` in the Go tree), and renders the XMLTV document as a
+/// (channel, programme) pairs from `extra_sources` (extras's catalogue, when
+/// enabled — see `extras_state::epg_source`, mirroring `RegisterSource` /
+/// `ExtrasEPGSource` in the Go tree), and renders the XMLTV document as a
 /// string (without the leading `<?xml ...?>` header, added by the caller —
 /// mirrors `genXML`/`GenXMLGz`).
 pub async fn generate_xml(client: &reqwest::Client, extra_sources: Vec<(String, String)>, extra_programmes: Vec<XmlProgramme>) -> anyhow::Result<String> {
@@ -261,8 +261,8 @@ async fn fetch_web_epg(state: &AppState, channel_id: &str, offset: i64) -> Optio
 /// present moment, falling back to the original response if that retry
 /// fails. Mirrors `WebEPGHandler`/`webEPGWithCorrectedDay`.
 pub async fn web_epg_handler(Path((channel_id, offset)): Path<(String, String)>, State(state): State<Arc<AppState>>) -> Response {
-    if let Some(content_id) = crate::tvplus::content_id::content_id(&channel_id) {
-        return tvplus_web_epg(&state, content_id, &offset).await;
+    if let Some(content_id) = crate::extras::content_id::content_id(&channel_id) {
+        return extras_web_epg(&state, content_id, &offset).await;
     }
     let channel_id_trimmed = channel_id.strip_prefix("sl").unwrap_or(&channel_id);
     if channel_id_trimmed.parse::<i64>().is_err() {
@@ -293,11 +293,11 @@ pub async fn web_epg_handler(Path((channel_id, offset)): Path<(String, String)>,
     Response::builder().status(status).header(header::CONTENT_TYPE, "application/json").body(Body::from(body)).unwrap()
 }
 
-/// The web guide for a JioTV+ channel, in the same shape as JioTV's.
-/// Mirrors `tvPlusWebEPG`.
-async fn tvplus_web_epg(state: &AppState, content_id: &str, offset: &str) -> Response {
-    let Some(client) = state.tvplus.client_for_vod() else {
-        return (StatusCode::NOT_FOUND, "JioTV+ is not connected").into_response();
+/// The web guide for a extras channel, in the same shape as JioTV's.
+/// Mirrors `extrasWebEPG`.
+async fn extras_web_epg(state: &AppState, content_id: &str, offset: &str) -> Response {
+    let Some(client) = state.extras.client_for_vod() else {
+        return (StatusCode::NOT_FOUND, "extras is not connected").into_response();
     };
     let offset = match offset.parse::<i64>() {
         Ok(o) if o >= 0 => o,

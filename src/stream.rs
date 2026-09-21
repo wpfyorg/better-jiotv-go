@@ -26,7 +26,7 @@ pub struct RenderCaches {
     dead: std::sync::RwLock<HashMap<String, Instant>>,
     /// De-duplicates concurrent JioTV live-URL recovery fetches for the same
     /// channel (mirrors `refreshChannelToken`'s `singleflight.Group`); the
-    /// TV+ path has its own dedup in `tvplus_state`.
+    /// extras path has its own dedup in `extras_state`.
     refresh_locks: crate::keyed_locks::KeyedLocks,
 }
 
@@ -145,16 +145,16 @@ pub(crate) fn absolute_base_from_live(live: &LiveUrlOutput) -> Option<String> {
     None
 }
 
-/// Fetches a fresh playback URL for `channel_id`, from TV+ when it routes
+/// Fetches a fresh playback URL for `channel_id`, from extras when it routes
 /// there and from JioTV otherwise — mirrors `getLiveResult`. JioTV's own
-/// token refresh is skipped on a TV+ route (TV+ manages its own tokens).
-/// JioTV calls have no singleflight dedup (see module docs); the TV+ path
-/// does, via `TvPlusState::live`.
+/// token refresh is skipped on a extras route (extras manages its own tokens).
+/// JioTV calls have no singleflight dedup (see module docs); the extras path
+/// does, via `ExtrasState::live`.
 pub(crate) async fn fetch_live(state: &AppState, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
     let is_custom = state.custom_channels.contains(channel_id);
-    state.tvplus.refresh_catalogue_if_needed(&state.tv).await;
-    if let Some(content_id) = state.tvplus.route(channel_id, state.tv.logged_in(), is_custom) {
-        return state.tvplus.live(&content_id, &state.store).await;
+    state.extras.refresh_catalogue_if_needed(&state.tv).await;
+    if let Some(content_id) = state.extras.route(channel_id, state.tv.logged_in(), is_custom) {
+        return state.extras.live(&content_id, &state.store).await;
     }
     crate::token_refresh::ensure_fresh(state).await;
     state.tv.live(channel_id).await
@@ -208,10 +208,10 @@ async fn live_impl(state: &Arc<AppState>, id: &str, quality: &str, prefix: &Opti
 
     let mut live_url = television::select_best_live_hls_url(&live, quality);
     if live_url.is_empty() {
-        // A TV+ channel with only DASH: send the player to the MPD route.
+        // A extras channel with only DASH: send the player to the MPD route.
         let is_custom = state.custom_channels.contains(id);
-        let via_tvplus = state.tvplus.route(id, state.tv.logged_in(), is_custom).is_some();
-        if via_tvplus && television::has_dash(&live) {
+        let via_extras = state.extras.route(id, state.tv.logged_in(), is_custom).is_some();
+        if via_extras && television::has_dash(&live) {
             let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
             return Redirect::to(&format!("{prefix_str}/live/mpd/{id}?q={quality}")).into_response();
         }
@@ -550,7 +550,7 @@ pub async fn render_ts_handler(State(state): State<Arc<AppState>>, Query(q): Que
 async fn proxy_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16, Vec<u8>, Option<String>) {
     let ua = url::Url::parse(url)
         .ok()
-        .and_then(|u| u.host_str().map(|h| state.tvplus.player_user_agent_for(h)))
+        .and_then(|u| u.host_str().map(|h| state.extras.player_user_agent_for(h)))
         .unwrap_or(television::PLAYER_USER_AGENT);
     let mut req = state.http.get(url).header(header::USER_AGENT, ua);
     if let Some(t) = hdnea {
@@ -568,8 +568,8 @@ async fn proxy_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16
 }
 
 /// `/render.key` — an AES-128 HLS key request. Mirrors `RenderKeyHandler`:
-/// a TV+-routed channel gets the JioTV+ app's key headers
-/// (`tvPlusKeyHeaders`); otherwise it gets the usual JioTV ones.
+/// a extras-routed channel gets the extras app's key headers
+/// (`extrasKeyHeaders`); otherwise it gets the usual JioTV ones.
 pub async fn render_key_handler(State(state): State<Arc<AppState>>, Query(q): Query<SegmentQuery>) -> Response {
     let Some(auth) = q.auth else {
         return (StatusCode::BAD_REQUEST, "auth is required").into_response();
@@ -586,8 +586,8 @@ pub async fn render_key_handler(State(state): State<Arc<AppState>>, Query(q): Qu
     if let Some(t) = &hdnea {
         req = req.header(header::COOKIE, format!("__hdnea__={t}"));
     }
-    if let Some(content_id) = state.tvplus.route(&channel_id, state.tv.logged_in(), is_custom) {
-        for (k, v) in state.tvplus.key_headers(&content_id) {
+    if let Some(content_id) = state.extras.route(&channel_id, state.tv.logged_in(), is_custom) {
+        for (k, v) in state.extras.key_headers(&content_id) {
             req = req.header(k, v);
         }
     } else {
@@ -702,8 +702,10 @@ mod tests {
             custom_channels: std::sync::Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
-            tvplus: Arc::new(crate::tvplus_state::TvPlusState::new(false)),
+            extras: Arc::new(crate::extras_state::ExtrasState::new(false, false)),
             vod_state: Default::default(),
+            public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
+            unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
         };
         let body = "#EXTM3U\nseg1.ts\n";
         let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");

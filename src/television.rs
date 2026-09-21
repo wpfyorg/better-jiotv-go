@@ -236,7 +236,7 @@ impl LiveUrlOutput {
     }
 
     /// Kept for parity with the Go method; `AppState::is_drm_channel` (the
-    /// static DRM-ID list plus TV+'s learned map) is what actually decides
+    /// static DRM-ID list plus extras's learned map) is what actually decides
     /// this in the current routing.
     #[allow(dead_code)]
     pub fn has_drm_stream(&self) -> bool {
@@ -529,7 +529,7 @@ pub fn select_best_live_hls_url(live: &LiveUrlOutput, quality: &str) -> String {
 }
 
 /// Reports whether a playback response has a DASH stream. Mirrors `hasDASH`
-/// in the Go tree (used for TV+ channels that fall back between HLS/DASH).
+/// in the Go tree (used for extras channels that fall back between HLS/DASH).
 pub fn has_dash(r: &LiveUrlOutput) -> bool {
     let b = r.mpd.resolved_bitrates();
     !b.auto.is_empty() || !b.high.is_empty() || !b.medium.is_empty() || !b.low.is_empty() || !r.mpd.result.is_empty()

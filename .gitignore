@@ -27,3 +27,6 @@ epg.xml.gz
 
 # Logs
 jiotv*.log
+
+# Local JioTV+ / extra-source notes (never commit)
+extra.md

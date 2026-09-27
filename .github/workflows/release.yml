@@ -107,6 +107,8 @@ jobs:
         with:
           name: jiotv-slim-${{ matrix.arch == 'x86_64' && 'x86_64-unknown-linux-musl' || matrix.arch == 'aarch64' && 'aarch64-unknown-linux-musl' || 'armv7-unknown-linux-musleabihf' }}
           path: dist/bin
+      - name: Restore executable permissions
+        run: chmod 0755 dist/bin/jiotv-*
       - name: Install SDK archive support
         run: sudo apt-get update && sudo apt-get install -y zstd
       - name: Build packages with the OpenWrt SDK

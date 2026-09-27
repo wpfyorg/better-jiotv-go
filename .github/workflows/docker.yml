@@ -1,9 +1,9 @@
 name: Docker
 
 on:
+  workflow_call:
   push:
     tags:
-      - "v*"
       - "docker-v*"
 
 permissions:

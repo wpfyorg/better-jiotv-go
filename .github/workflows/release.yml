@@ -160,3 +160,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --generate-notes
+  docker:
+    needs: release
+    uses: ./.github/workflows/docker.yml
+    permissions:
+      contents: read
+      packages: write

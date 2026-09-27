@@ -27,14 +27,17 @@ done
 printf '%s\n' "$url" >>"$JIOTV_TEST_LOG"
 case "$url" in
   https://api.github.com/*)
-    cat >"$out" <<JSON
-{
-  "tag_name": "v1.1.0",
-  "assets": [
-    {"name": "$JIOTV_TEST_ASSET_NAME"}
-  ]
-}
-JSON
+    {
+      echo '{'
+      echo '  "tag_name": "v1.1.0",'
+      echo '  "assets": ['
+      if [ -n "${JIOTV_TEST_EXTRA_ASSET_NAME:-}" ]; then
+        printf '    {"name": "%s"},\n' "$JIOTV_TEST_EXTRA_ASSET_NAME"
+      fi
+      printf '    {"name": "%s"}\n' "$JIOTV_TEST_ASSET_NAME"
+      echo '  ]'
+      echo '}'
+    } >"$out"
     ;;
   */SHA256SUMS)
     if [ "${JIOTV_TEST_BAD_SUM:-0}" = 1 ]; then hash=$(printf bad | sha256sum | awk '{print $1}')
@@ -101,22 +104,55 @@ echo "unsupported architecture and checksum rejection OK"
 
 cat >"$tmp/bin/apk" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = --print-arch ]; then
+  echo "${JIOTV_TEST_PACKAGE_ARCH:-x86_64}"
+  exit 0
+fi
 printf '%s\n' "$*" >>"$JIOTV_TEST_PACKAGE_LOG"
+if [ "${1:-}" = info ] && [ "${2:-}" = -e ]; then
+  [ "${3:-}" = "${JIOTV_TEST_INSTALLED_PACKAGE:-}" ]
+  exit
+fi
+[ "${1:-}" = del ] && exit 0
 test -f "${3:-}"
 EOF
 chmod +x "$tmp/bin/apk"
 openwrt_apk=jiotv-1.1.0-r1_x86_64.apk
-  JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 \
-  JIOTV_TEST_ASSET_NAME=$openwrt_apk JIOTV_TEST_LOG="$tmp/openwrt-apk-downloads" \
+openwrt_slim_apk=jiotv-slim-1.1.0-r1_x86_64.apk
+JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_apk JIOTV_TEST_EXTRA_ASSET_NAME=$openwrt_slim_apk \
+  JIOTV_TEST_INSTALLED_PACKAGE=jiotv-slim JIOTV_TEST_LOG="$tmp/openwrt-apk-downloads" \
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-apk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >/dev/null
+grep -F "del jiotv-slim" "$tmp/openwrt-apk-package" >/dev/null
 grep -F "add --allow-untrusted" "$tmp/openwrt-apk-package" >/dev/null
 grep -F "/$openwrt_apk" "$tmp/openwrt-apk-downloads" >/dev/null
+if grep -F "/$openwrt_slim_apk" "$tmp/openwrt-apk-downloads" >/dev/null; then
+  echo "full OpenWrt install selected the slim package" >&2
+  exit 1
+fi
+if JIOTV_PLATFORM=openwrt JIOTV_TEST_PACKAGE_ARCH=aarch64_cortex-a72 \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-unsupported-package" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >/dev/null 2>&1; then
+  echo "unsupported OpenWrt package ABI unexpectedly installed" >&2
+  exit 1
+fi
 rm "$tmp/bin/apk"
 
 cat >"$tmp/bin/opkg" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = print-architecture ]; then
+  echo 'arch all 1'
+  echo "arch ${JIOTV_TEST_PACKAGE_ARCH:-aarch64_cortex-a53} 10"
+  exit 0
+fi
 printf '%s\n' "$*" >>"$JIOTV_TEST_PACKAGE_LOG"
+if [ "${1:-}" = status ]; then
+  [ "${2:-}" = "${JIOTV_TEST_INSTALLED_PACKAGE:-}" ] || exit 1
+  echo 'Status: install user installed'
+  exit 0
+fi
+[ "${1:-}" = remove ] && exit 0
 test -f "${2:-}"
 EOF
 chmod +x "$tmp/bin/opkg"

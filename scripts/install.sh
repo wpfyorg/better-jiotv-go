@@ -44,23 +44,23 @@ if [ "${JIOTV_PLATFORM:-}" = openwrt ] || [ -r /etc/openwrt_release ]; then open
 if [ "$openwrt" = true ]; then
   [ "$(id -u 2>/dev/null || echo 1)" = 0 ] || { echo "OpenWrt installation must be run as root" >&2; exit 1; }
 
-  case "$machine" in
-    x86_64) package_arch=x86_64 ;;
-    aarch64|arm64) package_arch=aarch64_cortex-a53 ;;
-    armv7l|armv7*) package_arch=arm_cortex-a7_neon-vfpv4 ;;
-    *) echo "unsupported OpenWrt architecture: $machine" >&2; exit 1 ;;
-  esac
-
   if command -v apk >/dev/null 2>&1; then
     package_manager=apk
     package_ext=apk
+    package_arch=$(apk --print-arch 2>/dev/null || true)
   elif command -v opkg >/dev/null 2>&1; then
     package_manager=opkg
     package_ext=ipk
+    package_arch=$(opkg print-architecture 2>/dev/null | awk '$1 == "arch" && $2 != "all" && ($3 + 0) >= best { best = $3 + 0; arch = $2 } END { print arch }')
   else
     echo "OpenWrt package manager not found (expected apk or opkg)" >&2
     exit 1
   fi
+
+  case "$package_arch" in
+    x86_64|aarch64_cortex-a53|arm_cortex-a7_neon-vfpv4) ;;
+    *) echo "unsupported OpenWrt package architecture: ${package_arch:-unknown}" >&2; exit 1 ;;
+  esac
 
   if [ "$version" = latest ]; then
     release_api="https://api.github.com/repos/${repo}/releases/latest"
@@ -75,7 +75,11 @@ if [ "$openwrt" = true ]; then
   package_name=jiotv
   [ "$variant" = slim ] && package_name=jiotv-slim
   if [ "$package_ext" = apk ]; then
-    pattern="^${package_name}-.*_${package_arch}\\.apk$"
+    if [ "$variant" = full ]; then
+      pattern="^jiotv-[0-9].*_${package_arch}\\.apk$"
+    else
+      pattern="^jiotv-slim-.*_${package_arch}\\.apk$"
+    fi
   else
     pattern="^${package_name}_.*_${package_arch}\\.ipk$"
   fi
@@ -87,9 +91,13 @@ if [ "$openwrt" = true ]; then
   download "$base/SHA256SUMS" "$tmp/SHA256SUMS"
   verify_asset "$asset" "$tmp/SHA256SUMS" "$tmp/$asset"
 
+  other_package=jiotv-slim
+  [ "$variant" = slim ] && other_package=jiotv
   if [ "$package_manager" = apk ]; then
+    if apk info -e "$other_package" >/dev/null 2>&1; then apk del "$other_package"; fi
     apk add --allow-untrusted "$tmp/$asset"
   else
+    if opkg status "$other_package" 2>/dev/null | grep -q '^Status: .* installed$'; then opkg remove "$other_package"; fi
     opkg install "$tmp/$asset"
   fi
   init_script=${JIOTV_INIT_SCRIPT:-/etc/init.d/jiotv}

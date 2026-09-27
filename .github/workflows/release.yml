@@ -40,7 +40,7 @@ jobs:
         run: |
           pip3 install ziglang
           cargo install --locked cargo-zigbuild
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
         if: matrix.target.kind == 'android'
       - name: Install Android NDK
         if: matrix.target.kind == 'android'

@@ -21,13 +21,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@mdbook
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
       - uses: actions/configure-pages@v5
+      - run: npm ci
+        working-directory: docs
       - run: python3 scripts/check-doc-links.py
-      - run: mdbook build docs
+      - run: npm run build
+        working-directory: docs
       - uses: actions/upload-pages-artifact@v4
         with:
-          path: docs/book
+          path: docs/build
 
   deploy:
     if: github.event_name == 'push' && github.ref == 'refs/heads/rust'

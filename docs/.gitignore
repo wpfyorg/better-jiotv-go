@@ -1,1 +1,4 @@
 book
+build
+node_modules
+.docusaurus

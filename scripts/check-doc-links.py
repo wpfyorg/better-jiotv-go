@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Check local Markdown links and mdBook SUMMARY entries."""
+"""Check local Markdown links in the Docusaurus documentation source."""
 from pathlib import Path
 import re
 import sys
 from urllib.parse import unquote, urlsplit
 
-root = Path(__file__).resolve().parents[1] / "docs"
+root = Path(__file__).resolve().parents[1] / "docs" / "content"
 errors = []
 link_re = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)|^\s*-\s*\[[^\]]+\]\(([^)]+)\)", re.M)
 

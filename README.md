@@ -34,4 +34,4 @@ wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts
 
 For Docker and step-by-step setup, see the [simple installation guide](https://wpfyorg.github.io/better-jiotv-go/).
 
-See the [configuration reference](https://wpfyorg.github.io/better-jiotv-go/config.html) for `JIOTV_*` options.
+See the [configuration reference](https://wpfyorg.github.io/better-jiotv-go/config) for `JIOTV_*` options.

@@ -3,7 +3,7 @@
 Install the native Intel or Apple Silicon build:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 The default location is `$HOME/.local/bin`. Set `JIOTV_INSTALL_DIR` to change it, and add that directory to `PATH` if needed. Use `JIOTV_VARIANT=slim` for a headless install or `JIOTV_VERSION` to pin a release.

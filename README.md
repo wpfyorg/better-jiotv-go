@@ -17,19 +17,19 @@ Pick your platform and run one command. The installer detects your CPU automatic
 **Linux, macOS, Android/Termux**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 **Windows PowerShell**
 
 ```powershell
-irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.ps1 | iex
 ```
 
 **OpenWrt**
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 For Docker and step-by-step setup, see the [simple installation guide](https://wpfyorg.github.io/better-jiotv-go/).

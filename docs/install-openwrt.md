@@ -5,7 +5,7 @@
 SSH into the router as `root` and run:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 That is the recommended installation method. The script automatically:
@@ -38,7 +38,7 @@ The normal `full` package includes the web UI. Most people should use it.
 Run the same installer command again:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 It installs the latest package through `apk` or `opkg`, so the package database stays correct. Your `/etc/config/jiotv` settings and `/etc/jiotv` data are preserved.

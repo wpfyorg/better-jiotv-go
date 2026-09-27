@@ -3,7 +3,7 @@
 Install Termux from a trusted distribution source, open its shell, then run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 The installer detects the Android ABI under Termux and selects ARM64, ARMv7, or x86_64. It installs under `$PREFIX/bin`. These native Android binaries target API 21. Set `JIOTV_VARIANT=slim` for headless use.

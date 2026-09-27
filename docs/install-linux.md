@@ -3,7 +3,7 @@
 The one-line installer detects x86_64, aarch64, ARMv7, and 32-bit x86 Linux and verifies the downloaded release checksum:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 The default is `full`. Set `JIOTV_VARIANT=slim` for a headless installation. Set `JIOTV_VERSION`, `JIOTV_REPO`, or `JIOTV_INSTALL_DIR` to select a release or install location. Without an override, the installer uses `/usr/local/bin` when run as root and writable, otherwise `$HOME/.local/bin`.

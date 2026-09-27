@@ -9,7 +9,7 @@ The normal `full` version includes the web UI and is the recommended choice.
 Open a terminal and run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 ## Windows
@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/script
 Open PowerShell and run:
 
 ```powershell
-irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.ps1 | iex
 ```
 
 ## OpenWrt
@@ -25,7 +25,7 @@ irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/insta
 SSH into the router as `root` and run:
 
 ```sh
-wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
 The installer automatically detects `apk` or `opkg`, chooses the matching package for the router CPU, verifies its checksum, installs it, and enables the JioTV service.
@@ -75,7 +75,7 @@ Most people should stay with the default `full` version. `slim` removes the web 
 On Linux, macOS, Android, or OpenWrt:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | JIOTV_VARIANT=slim sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | JIOTV_VARIANT=slim sh
 ```
 
 On Windows, see the [Windows guide](install-windows.md) only if you need advanced options such as `slim`, a pinned version, or a custom install folder.

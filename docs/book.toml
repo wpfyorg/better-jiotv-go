@@ -7,7 +7,7 @@ src = "."
 [output.html]
 site-url = "/better-jiotv-go/"
 git-repository-url = "https://github.com/wpfyorg/better-jiotv-go"
-edit-url-template = "https://github.com/wpfyorg/better-jiotv-go/edit/rust/docs/{path}"
+edit-url-template = "https://github.com/wpfyorg/better-jiotv-go/edit/main/docs/{path}"
 default-theme = "navy"
 preferred-dark-theme = "navy"
 

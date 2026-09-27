@@ -1,8 +1,10 @@
 name: Docker
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
+      - "docker-v*"
 
 permissions:
   contents: read
@@ -29,9 +31,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ref="${GITHUB_REF_NAME}"
+          case "$ref" in
+            docker-v*) release_tag="v${ref#docker-v}" ;;
+            v*) release_tag="$ref" ;;
+            *) echo "unsupported tag: $ref"; exit 1 ;;
+          esac
           asset="jiotv-${{ matrix.variant }}-${{ matrix.target }}"
           mkdir -p docker/context
-          gh release download "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --pattern SHA256SUMS --dir docker/context
+          for attempt in $(seq 1 60); do
+            if gh release download "$release_tag" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --pattern SHA256SUMS --dir docker/context; then
+              break
+            fi
+            rm -f "docker/context/$asset" docker/context/SHA256SUMS
+            if [ "$attempt" -eq 60 ]; then
+              echo "release assets for $release_tag were not available in time"
+              exit 1
+            fi
+            sleep 10
+          done
           (cd docker/context && grep -F "  $asset" SHA256SUMS | sha256sum -c -)
           mv "docker/context/$asset" docker/context/jiotv
           chmod 0755 docker/context/jiotv
@@ -62,9 +80,9 @@ jobs:
       - name: Push architecture image
         env:
           IMAGE: ghcr.io/${{ github.repository }}
-          VERSION: ${{ github.event.release.tag_name }}
         run: |
-          version=${VERSION#v}
+          version=${GITHUB_REF_NAME#docker-v}
+          version=${version#v}
           docker buildx build \
             --platform "${{ matrix.platform }}" \
             --build-arg VARIANT="${{ matrix.variant }}" \
@@ -85,9 +103,9 @@ jobs:
       - name: Create multi-architecture tags
         env:
           IMAGE: ghcr.io/${{ github.repository }}
-          VERSION: ${{ github.event.release.tag_name }}
         run: |
-          version=${VERSION#v}
+          version=${GITHUB_REF_NAME#docker-v}
+          version=${version#v}
           major=${version%%.*}
           minor=${version%.*}
           for variant in full slim; do

@@ -22,9 +22,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: taiki-e/install-action@mdbook
+      - uses: actions/configure-pages@v5
       - run: python3 scripts/check-doc-links.py
       - run: mdbook build docs
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: docs/book
 

@@ -1,6 +1,4 @@
-# JioTV in Rust
-
-JioTV provides a local server for live TV, catch-up, EPG, IPTV playlists, and supported on-demand playback, with an optional web UI.
+# Introduction
 
 > **Acknowledgment**
 >
@@ -10,10 +8,8 @@ JioTV provides a local server for live TV, catch-up, EPG, IPTV playlists, and su
 >
 > Huge thanks to the JioTV Go maintainers and contributors for the work that made this project possible.
 
-## Installation
+JioTV runs a local HTTP server that makes JioTV live channels, catch-up, EPG, and supported on-demand content available to a web browser and compatible IPTV clients. The `full` build includes the web interface. The `slim` build is intended for headless IPTV deployments.
 
-Start with the [JioTV installation guide](https://wpfyorg.github.io/better-jiotv-go/). It covers Linux, macOS, Windows, Android/Termux, Docker, OpenWrt, SBCs, and homelabs.
+The server uses provider-issued playback URLs and license services. Protected streams remain protected; this project does not extract Widevine keys or decrypt media.
 
-For a quick install, use the platform installer shown in the guide. OpenWrt users should install the matching `.apk` or `.ipk` package.
-
-See the [configuration reference](https://wpfyorg.github.io/better-jiotv-go/config.html) for `JIOTV_*` options.
+Choose a platform in [Get started](get-started.md), then use [Configuration](config.md) and [IPTV, M3U, and XMLTV](iptv.md) for setup details.

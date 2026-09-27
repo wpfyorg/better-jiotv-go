@@ -40,18 +40,33 @@ fn token() -> Option<String> {
 
 /// The asset name for this binary, e.g. `jiotv-slim-aarch64-unknown-linux-musl`.
 pub fn asset_name() -> String {
-    format!("jiotv-{VARIANT}-{}", target_triple())
+    asset_for(VARIANT, target_triple(), cfg!(target_os = "windows"))
 }
 
-fn target_triple() -> &'static str {
-    match (std::env::consts::ARCH, std::env::consts::OS) {
+pub fn target_triple() -> &'static str {
+    target_for(std::env::consts::ARCH, std::env::consts::OS)
+}
+
+fn target_for(arch: &str, os: &str) -> &'static str {
+    match (arch, os) {
         ("aarch64", "linux") => "aarch64-unknown-linux-musl",
         ("x86_64", "linux") => "x86_64-unknown-linux-musl",
+        ("x86", "linux") => "i686-unknown-linux-musl",
         ("arm", "linux") => "armv7-unknown-linux-musleabihf",
         ("aarch64", "macos") => "aarch64-apple-darwin",
         ("x86_64", "macos") => "x86_64-apple-darwin",
+        ("x86_64", "windows") => "x86_64-pc-windows-msvc",
+        ("x86", "windows") => "i686-pc-windows-msvc",
+        ("aarch64", "windows") => "aarch64-pc-windows-msvc",
+        ("aarch64", "android") => "aarch64-linux-android",
+        ("arm", "android") => "armv7-linux-androideabi",
+        ("x86_64", "android") => "x86_64-linux-android",
         _ => "unsupported",
     }
+}
+
+fn asset_for(variant: &str, target: &str, windows: bool) -> String {
+    format!("jiotv-{variant}-{target}{}", if windows { ".exe" } else { "" })
 }
 
 /// Parses "v1.2.3" or "1.2.3" into comparable numbers.
@@ -135,11 +150,39 @@ fn replace_executable(data: &[u8]) -> anyhow::Result<std::path::PathBuf> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     }
+    #[cfg(windows)]
+    {
+        let pid = std::process::id();
+        let script = dir.join(format!(".jiotv-update-{pid}.ps1"));
+        std::fs::write(&script, windows_replacement_script(pid, &tmp, &exe))?;
+        if let Err(e) = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .spawn()
+        {
+            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&script);
+            anyhow::bail!("cannot start the Windows updater process: {e}");
+        }
+        return Ok(exe);
+    }
+    #[cfg(not(windows))]
     if let Err(e) = std::fs::rename(&tmp, &exe) {
         let _ = std::fs::remove_file(&tmp);
         anyhow::bail!("cannot replace {}: {e}", exe.display());
     }
     Ok(exe)
+}
+
+#[cfg(windows)]
+fn windows_replacement_script(pid: u32, staged: &std::path::Path, exe: &std::path::Path) -> String {
+    fn quote(path: &std::path::Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+    }
+    format!(
+        "$ErrorActionPreference = 'Stop'\n$pidToWait = {pid}\n$staged = {}\n$exe = {}\n$script = $MyInvocation.MyCommand.Path\ntry {{\n  while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ Start-Sleep -Milliseconds 250 }}\n  Move-Item -LiteralPath $staged -Destination $exe -Force\n}} finally {{\n  Remove-Item -LiteralPath $script -Force -ErrorAction SilentlyContinue\n  Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue\n}}\n",
+        quote(staged), quote(exe)
+    )
 }
 
 /// `jiotv update [--version vX.Y.Z]`.
@@ -174,6 +217,9 @@ pub async fn run(version: Option<&str>) -> anyhow::Result<()> {
         anyhow::bail!("checksum mismatch for {name}: expected {want}, got {got}");
     }
     let path = replace_executable(&data)?;
+    #[cfg(windows)]
+    println!("Downloaded {} to {}. The updater will replace it after this process exits.", release.tag_name, path.display());
+    #[cfg(not(windows))]
     println!("Updated {} to {}.", path.display(), release.tag_name);
     if crate::autostart::installed() {
         println!("Restart the service to use it: {}", crate::autostart::restart_hint());
@@ -219,5 +265,42 @@ mod tests {
     #[test]
     fn hashes() {
         assert_eq!(sha256_hex(b"abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    }
+
+    #[test]
+    fn target_mapping_covers_release_matrix() {
+        let cases = [
+            (("x86_64", "linux"), "x86_64-unknown-linux-musl"),
+            (("aarch64", "linux"), "aarch64-unknown-linux-musl"),
+            (("arm", "linux"), "armv7-unknown-linux-musleabihf"),
+            (("x86", "linux"), "i686-unknown-linux-musl"),
+            (("x86_64", "macos"), "x86_64-apple-darwin"),
+            (("x86_64", "windows"), "x86_64-pc-windows-msvc"),
+            (("x86", "windows"), "i686-pc-windows-msvc"),
+            (("aarch64", "windows"), "aarch64-pc-windows-msvc"),
+            (("aarch64", "android"), "aarch64-linux-android"),
+            (("arm", "android"), "armv7-linux-androideabi"),
+            (("x86_64", "android"), "x86_64-linux-android"),
+        ];
+        for ((arch, os), expected) in cases {
+            assert_eq!(target_for(arch, os), expected);
+        }
+        assert_eq!(target_for("mips", "linux"), "unsupported");
+    }
+
+    #[test]
+    fn asset_names_keep_variant_and_windows_extension() {
+        assert_eq!(asset_for("slim", "i686-pc-windows-msvc", true), "jiotv-slim-i686-pc-windows-msvc.exe");
+        assert_eq!(asset_for("full", "aarch64-linux-android", false), "jiotv-full-aarch64-linux-android");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn staged_windows_replacement_waits_and_cleans_up() {
+        let script = windows_replacement_script(123, std::path::Path::new(r"C:\Apps\JioTV\.jiotv.exe.update"), std::path::Path::new(r"C:\Apps\JioTV\jiotv.exe"));
+        assert!(script.contains("Get-Process -Id $pidToWait"));
+        assert!(script.contains("Move-Item -LiteralPath $staged -Destination $exe -Force"));
+        assert!(script.contains("Remove-Item -LiteralPath $script"));
+        assert!(script.contains("123"));
     }
 }

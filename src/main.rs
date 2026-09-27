@@ -237,11 +237,32 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     let prefix = if !cfg.path_prefix.is_empty() {
         cfg.path_prefix.clone()
     } else {
-        let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("cannot resolve $HOME"))?;
+        let home = home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve the user profile directory"))?;
         format!("{home}/.jiotv_go")
     };
     std::fs::create_dir_all(&prefix)?;
     Ok(if prefix.ends_with('/') { prefix } else { format!("{prefix}/") })
+}
+
+fn home_dir() -> Option<String> {
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            return Some(home);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(home) = std::env::var("USERPROFILE") {
+            if !home.is_empty() {
+                return Some(home);
+            }
+        }
+        let drive = std::env::var("HOMEDRIVE").ok()?;
+        let path = std::env::var("HOMEPATH").ok()?;
+        return Some(format!("{drive}{path}"));
+    }
+    #[cfg(not(windows))]
+    None
 }
 
 fn init_logging(cfg: &config::Config) {

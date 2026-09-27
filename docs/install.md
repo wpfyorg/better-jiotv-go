@@ -1,6 +1,6 @@
 # Installation
 
-Start with [Get started](get-started.md) for installer commands, supported platform targets, build variants, and first login.
+Start with [Get started](get-started.md). For most people, installation is one command and the installer chooses the correct CPU build automatically.
 
 Platform guides:
 
@@ -14,4 +14,4 @@ Platform guides:
 - [Raspberry Pi / SBC](install-sbc.md)
 - [Homelab Linux, VM, and LXC](install-homelab.md)
 
-`full` includes the embedded web UI and is recommended for most installations. `slim` is for headless IPTV deployments. See [Configuration](config.md) for `JIOTV_*` settings and state paths.
+`full` includes the embedded web UI and is recommended for most installations. `slim` is an optional headless build. See [Configuration](config.md) only when you need advanced settings.

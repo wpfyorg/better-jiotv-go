@@ -1,0 +1,4 @@
+#!/bin/sh
+mkdir -p /etc/jiotv
+chmod 0700 /etc/jiotv
+exit 0

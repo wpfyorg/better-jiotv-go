@@ -1,0 +1,43 @@
+name: Documentation
+
+on:
+  push:
+    branches: [rust]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+      - 'scripts/check-doc-links.py'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - '.github/workflows/docs.yml'
+      - 'scripts/check-doc-links.py'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@mdbook
+      - run: python3 scripts/check-doc-links.py
+      - run: mdbook build docs
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/rust'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

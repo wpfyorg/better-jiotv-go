@@ -46,7 +46,7 @@ default_languages = [1, 6]
 | `default_languages`       | `JIOTV_DEFAULT_LANGUAGES`         | `[]`           | Language IDs to default the UI to (comma-separated in the env var). |
 
 `JIOTV_TUNNEL_TOKEN` (no config-file key) sets the token for a named
-`cloudflared` tunnel; see the README's Tunnel section.
+`cloudflared` tunnel.
 
 ## Data directory
 

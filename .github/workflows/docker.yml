@@ -1,0 +1,107 @@
+name: Docker
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { variant: full, arch: amd64, target: x86_64-unknown-linux-musl, platform: linux/amd64 }
+          - { variant: full, arch: arm64, target: aarch64-unknown-linux-musl, platform: linux/arm64 }
+          - { variant: full, arch: armv7, target: armv7-unknown-linux-musleabihf, platform: linux/arm/v7 }
+          - { variant: full, arch: 386, target: i686-unknown-linux-musl, platform: linux/386 }
+          - { variant: slim, arch: amd64, target: x86_64-unknown-linux-musl, platform: linux/amd64 }
+          - { variant: slim, arch: arm64, target: aarch64-unknown-linux-musl, platform: linux/arm64 }
+          - { variant: slim, arch: armv7, target: armv7-unknown-linux-musleabihf, platform: linux/arm/v7 }
+          - { variant: slim, arch: 386, target: i686-unknown-linux-musl, platform: linux/386 }
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the release binary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          asset="jiotv-${{ matrix.variant }}-${{ matrix.target }}"
+          mkdir -p docker/context
+          gh release download "${GITHUB_REF_NAME}" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --pattern SHA256SUMS --dir docker/context
+          (cd docker/context && grep -F "  $asset" SHA256SUMS | sha256sum -c -)
+          mv "docker/context/$asset" docker/context/jiotv
+          chmod 0755 docker/context/jiotv
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and smoke test architecture image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --build-arg VARIANT="${{ matrix.variant }}" \
+            --file docker/Dockerfile \
+            --load --tag "jiotv-smoke:${{ matrix.variant }}" docker/context
+          docker run --rm --platform "${{ matrix.platform }}" --entrypoint /usr/local/bin/jiotv \
+            "jiotv-smoke:${{ matrix.variant }}" --help
+          docker run -d --name jiotv-smoke --platform "${{ matrix.platform }}" \
+            -p 5001:5001 "jiotv-smoke:${{ matrix.variant }}"
+          sleep 3
+          docker inspect -f '{{.State.Running}}' jiotv-smoke | grep -qx true
+          docker logs jiotv-smoke
+          docker rm -f jiotv-smoke
+      - name: Push architecture image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          version=${VERSION#v}
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            --build-arg VARIANT="${{ matrix.variant }}" \
+            --file docker/Dockerfile \
+            --tag "$IMAGE:${version}-${{ matrix.variant }}-${{ matrix.arch }}" \
+            --push docker/context
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-architecture tags
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}
+          VERSION: ${{ github.event.release.tag_name }}
+        run: |
+          version=${VERSION#v}
+          major=${version%%.*}
+          minor=${version%.*}
+          for variant in full slim; do
+            arch_tags=()
+            for arch in amd64 arm64 armv7 386; do
+              arch_tags+=("$IMAGE:${version}-${variant}-${arch}")
+            done
+            if [ "$variant" = full ]; then
+              for tag in latest "$version" "$minor" "$major"; do
+                docker buildx imagetools create --tag "$IMAGE:$tag" "${arch_tags[@]}"
+              done
+            else
+              for tag in slim "${version}-slim" "${minor}-slim" "${major}-slim"; do
+                docker buildx imagetools create --tag "$IMAGE:$tag" "${arch_tags[@]}"
+              done
+            fi
+          done

@@ -1,26 +1,17 @@
 # Installation
 
-Pick the guide that matches where the server will run:
+Start with [Get started](get-started.md) for installer commands, supported platform targets, build variants, and first login.
 
-- [OpenWrt routers](install-openwrt.md) — raw musl binary, `procd` service, and notes on `apk`/`opkg` packaging.
-- [Raspberry Pi and other SBCs](install-sbc.md) — Raspberry Pi OS, Debian/Ubuntu/Armbian-style systems, and systemd autostart.
-- [Homelab Linux servers](install-homelab.md) — x86_64/aarch64 servers, VMs/LXC, dedicated service user, and reverse-proxy notes.
+Platform guides:
 
-## Release variants
+- [Linux](install-linux.md)
+- [macOS](install-macos.md)
+- [Windows](install-windows.md)
+- [Android / Termux](install-android.md)
+- [Android TV](android-tv.md)
+- [Docker](install-docker.md)
+- [OpenWrt](install-openwrt.md)
+- [Raspberry Pi / SBC](install-sbc.md)
+- [Homelab Linux, VM, and LXC](install-homelab.md)
 
-Releases contain two variants for each supported target:
-
-- `full` — recommended for most users; includes the embedded Svelte web UI.
-- `slim` — headless/IPTV-oriented build without the embedded web UI assets.
-
-Current Linux release targets are:
-
-| Machine | Release target |
-|---|---|
-| x86_64 / amd64 | `x86_64-unknown-linux-musl` |
-| 64-bit ARM / arm64 / aarch64 | `aarch64-unknown-linux-musl` |
-| 32-bit ARMv7 | `armv7-unknown-linux-musleabihf` |
-
-There is currently no published MIPS, MIPS64, ARMv6, or 32-bit x86 release artifact.
-
-After installation, see [Configuration](config.md) for `JIOTV_*` variables and TOML settings.
+`full` includes the embedded web UI and is recommended for most installations. `slim` is for headless IPTV deployments. See [Configuration](config.md) for `JIOTV_*` settings and state paths.

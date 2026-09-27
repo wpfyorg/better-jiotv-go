@@ -12,6 +12,7 @@ define Package/jiotv
   CATEGORY:=Network
   TITLE:=JioTV server with web UI
   URL:=https://github.com/wpfyorg/better-jiotv-go
+  CONFLICTS:=jiotv-slim
 endef
 
 define Package/jiotv/description
@@ -23,6 +24,7 @@ define Package/jiotv-slim
   CATEGORY:=Network
   TITLE:=JioTV headless server
   URL:=https://github.com/wpfyorg/better-jiotv-go
+  CONFLICTS:=jiotv
 endef
 
 define Package/jiotv-slim/description
@@ -38,6 +40,16 @@ endef
 
 define Package/jiotv-slim/conffiles
 /etc/config/jiotv
+endef
+
+define Package/jiotv/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || /etc/uci-defaults/99-jiotv
+endef
+
+define Package/jiotv-slim/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || /etc/uci-defaults/99-jiotv
 endef
 
 define Package/jiotv/install

@@ -2,7 +2,7 @@ name: Documentation
 
 on:
   push:
-    branches: [rust]
+    branches: [main]
     paths:
       - 'docs/**'
       - '.github/workflows/docs.yml'
@@ -30,7 +30,7 @@ jobs:
           path: docs/book
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/rust'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:

@@ -154,7 +154,7 @@ fn replace_executable(data: &[u8]) -> anyhow::Result<std::path::PathBuf> {
     {
         let pid = std::process::id();
         let script = dir.join(format!(".jiotv-update-{pid}.ps1"));
-        std::fs::write(&script, windows_replacement_script(pid, &tmp, &exe))?;
+        std::fs::write(&script, windows_replacement_script_bytes(pid, &tmp, &exe))?;
         if let Err(e) = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
             .arg(&script)
@@ -172,6 +172,15 @@ fn replace_executable(data: &[u8]) -> anyhow::Result<std::path::PathBuf> {
         anyhow::bail!("cannot replace {}: {e}", exe.display());
     }
     Ok(exe)
+}
+
+#[cfg(windows)]
+fn windows_replacement_script_bytes(pid: u32, staged: &std::path::Path, exe: &std::path::Path) -> Vec<u8> {
+    let script = windows_replacement_script(pid, staged, exe);
+    let mut bytes = Vec::with_capacity(script.len() + 3);
+    bytes.extend_from_slice(b"\xEF\xBB\xBF");
+    bytes.extend_from_slice(script.as_bytes());
+    bytes
 }
 
 #[cfg(windows)]
@@ -297,7 +306,11 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn staged_windows_replacement_waits_and_cleans_up() {
-        let script = windows_replacement_script(123, std::path::Path::new(r"C:\Apps\JioTV\.jiotv.exe.update"), std::path::Path::new(r"C:\Apps\JioTV\jiotv.exe"));
+        let staged = std::path::Path::new(r"C:\Apps\JioTV\.jiotv.exe.update");
+        let exe = std::path::Path::new(r"C:\Apps\JioTV\jiotv.exe");
+        let script = windows_replacement_script(123, staged, exe);
+        let encoded = windows_replacement_script_bytes(123, staged, exe);
+        assert!(encoded.starts_with(b"\xEF\xBB\xBF"));
         assert!(script.contains("Get-Process -Id $pidToWait"));
         assert!(script.contains("Move-Item -LiteralPath $staged -Destination $exe -Force"));
         assert!(script.contains("Remove-Item -LiteralPath $script"));

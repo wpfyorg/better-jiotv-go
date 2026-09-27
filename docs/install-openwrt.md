@@ -11,7 +11,7 @@ wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts
 That is the recommended installation method. The script automatically:
 
 - detects whether the router uses `apk` or `opkg`;
-- detects x86_64, aarch64, or ARMv7;
+- reads the package ABI accepted by `apk` or `opkg` and rejects unsupported targets;
 - downloads the matching `jiotv` package from the latest release;
 - verifies it with `SHA256SUMS`;
 - installs it with the router package manager;
@@ -75,7 +75,7 @@ Open the [latest GitHub Release](https://github.com/wpfyorg/better-jiotv-go/rele
 
 - `.apk` for apk-based OpenWrt;
 - `.ipk` for opkg-based OpenWrt;
-- x86_64, aarch64, or ARMv7 only.
+- x86_64, `aarch64_cortex-a53`, or `arm_cortex-a7_neon-vfpv4` package ABI only.
 
 Install the downloaded file with:
 
@@ -89,7 +89,7 @@ or:
 opkg install ./package.ipk
 ```
 
-MIPS, MIPS64, and ARMv6 packages are not currently published.
+Other OpenWrt package ABIs are not currently published; use the raw Linux musl fallback only when you understand the package-manager tradeoff.
 
 ## Raw binary fallback
 

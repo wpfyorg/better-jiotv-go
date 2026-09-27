@@ -26,6 +26,16 @@ while [ "$#" -gt 0 ]; do
 done
 printf '%s\n' "$url" >>"$JIOTV_TEST_LOG"
 case "$url" in
+  https://api.github.com/*)
+    cat >"$out" <<JSON
+{
+  "tag_name": "v1.1.0",
+  "assets": [
+    {"name": "$JIOTV_TEST_ASSET_NAME"}
+  ]
+}
+JSON
+    ;;
   */SHA256SUMS)
     if [ "${JIOTV_TEST_BAD_SUM:-0}" = 1 ]; then hash=$(printf bad | sha256sum | awk '{print $1}')
     else hash=$(printf 'test binary' | sha256sum | awk '{print $1}')
@@ -36,6 +46,19 @@ case "$url" in
 esac
 EOF
 chmod +x "$tmp/bin/uname" "$tmp/bin/curl"
+
+cat >"$tmp/bin/id" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = -u ] && { echo 0; exit 0; }
+exec /usr/bin/id "$@"
+EOF
+chmod +x "$tmp/bin/id"
+
+cat >"$tmp/bin/jiotv-init" <<'EOF'
+#!/bin/sh
+[ "${1:-}" = enable ]
+EOF
+chmod +x "$tmp/bin/jiotv-init"
 
 run_case() {
   expected=$1
@@ -75,3 +98,34 @@ if JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 JIOTV_TEST_ASSET_NAME=jiotv-ful
 fi
 test ! -e "$tmp/bad-install/jiotv"
 echo "unsupported architecture and checksum rejection OK"
+
+cat >"$tmp/bin/apk" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$JIOTV_TEST_PACKAGE_LOG"
+test -f "${3:-}"
+EOF
+chmod +x "$tmp/bin/apk"
+openwrt_apk=jiotv-1.1.0-r1_x86_64.apk
+  JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_apk JIOTV_TEST_LOG="$tmp/openwrt-apk-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-apk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >/dev/null
+grep -F "add --allow-untrusted" "$tmp/openwrt-apk-package" >/dev/null
+grep -F "/$openwrt_apk" "$tmp/openwrt-apk-downloads" >/dev/null
+rm "$tmp/bin/apk"
+
+cat >"$tmp/bin/opkg" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >>"$JIOTV_TEST_PACKAGE_LOG"
+test -f "${2:-}"
+EOF
+chmod +x "$tmp/bin/opkg"
+openwrt_ipk=jiotv-slim_1.1.0-r1_aarch64_cortex-a53.ipk
+JIOTV_PLATFORM=openwrt JIOTV_VARIANT=slim JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_ipk JIOTV_TEST_LOG="$tmp/openwrt-ipk-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-ipk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >/dev/null
+grep -F "install" "$tmp/openwrt-ipk-package" >/dev/null
+grep -F "/$openwrt_ipk" "$tmp/openwrt-ipk-downloads" >/dev/null
+rm "$tmp/bin/opkg"
+echo "OpenWrt apk/opkg auto-selection OK"

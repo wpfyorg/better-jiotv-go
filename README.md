@@ -12,8 +12,26 @@ JioTV provides a local server for live TV, catch-up, EPG, IPTV playlists, and su
 
 ## Installation
 
-Start with the [JioTV installation guide](https://wpfyorg.github.io/better-jiotv-go/). It covers Linux, macOS, Windows, Android/Termux, Docker, OpenWrt, SBCs, and homelabs.
+Pick your platform and run one command. The installer detects your CPU automatically.
 
-For a quick install, use the platform installer shown in the guide. OpenWrt users should install the matching `.apk` or `.ipk` package.
+**Linux, macOS, Android/Termux**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+```
+
+**Windows PowerShell**
+
+```powershell
+irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.ps1 | iex
+```
+
+**OpenWrt**
+
+```sh
+wget -qO- https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/rust/scripts/install.sh | sh
+```
+
+For Docker and step-by-step setup, see the [simple installation guide](https://wpfyorg.github.io/better-jiotv-go/).
 
 See the [configuration reference](https://wpfyorg.github.io/better-jiotv-go/config.html) for `JIOTV_*` options.

@@ -10,14 +10,10 @@ use rust_embed::RustEmbed;
 #[folder = "web/ui/dist/"]
 struct Assets;
 
-/// The player libraries the UI loads as plain `<script>` tags rather than
-/// bundling (`Watch.svelte`/`VodPlayer.svelte` both `loadScript` these on
-/// demand, only once DASH or HLS is actually needed): Shaka Player (DASH +
-/// Widevine) and hls.js 1.7.3 (HLS, including the HEVC support newer
-/// hls.js versions dropped). Kept as a second, separate embed at
-/// `/static/external/...` — the same path the Go version served them at —
-/// rather than folded into the Vite build, so updating either library never
-/// needs a `npm run build`.
+/// Shaka Player and its controls stylesheet are loaded on demand by the web UI
+/// for HLS, DASH and Widevine playback. They stay as a separate embed at
+/// `/static/external/...` — the same path the Go version served them at — so
+/// updating the player does not require bundling it into the Vite app.
 #[derive(RustEmbed)]
 #[folder = "web/static/"]
 struct StaticAssets;

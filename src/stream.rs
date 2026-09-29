@@ -52,7 +52,10 @@ impl RenderCaches {
         if token.is_empty() {
             return;
         }
-        self.hdnea.write().unwrap().insert(key.to_string(), (token.to_string(), Instant::now()));
+        self.hdnea
+            .write()
+            .unwrap()
+            .insert(key.to_string(), (token.to_string(), Instant::now()));
     }
 
     pub fn clear_hdnea(&self, key: &str) {
@@ -71,20 +74,35 @@ impl RenderCaches {
 
     pub fn mark_dead(&self, channel_id: &str) {
         if !channel_id.is_empty() {
-            self.dead.write().unwrap().insert(channel_id.to_string(), Instant::now());
+            self.dead
+                .write()
+                .unwrap()
+                .insert(channel_id.to_string(), Instant::now());
         }
     }
 
     pub fn clear_dead(&self, channel_id: &str) {
         self.dead.write().unwrap().remove(channel_id);
     }
+
+    pub fn clear(&self) {
+        self.hdnea.write().unwrap().clear();
+        self.dead.write().unwrap().clear();
+    }
 }
 
 fn extract_hdnea_from_url(u: &str) -> Option<String> {
     let query = u.split('?').nth(1)?;
     for pair in query.split('&') {
-        if let Some(v) = pair.strip_prefix("__hdnea__=").or_else(|| pair.strip_prefix("hdnea=")) {
-            return Some(urlencoding::decode(v).map(|s| s.into_owned()).unwrap_or_else(|_| v.to_string()));
+        if let Some(v) = pair
+            .strip_prefix("__hdnea__=")
+            .or_else(|| pair.strip_prefix("hdnea="))
+        {
+            return Some(
+                urlencoding::decode(v)
+                    .map(|s| s.into_owned())
+                    .unwrap_or_else(|_| v.to_string()),
+            );
         }
     }
     None
@@ -138,7 +156,11 @@ pub(crate) fn absolute_base_from_live(live: &LiveUrlOutput) -> Option<String> {
         let lower = c.to_lowercase();
         if lower.starts_with("http://") || lower.starts_with("https://") {
             if let Ok(parsed) = url::Url::parse(c) {
-                return Some(format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or("")));
+                return Some(format!(
+                    "{}://{}",
+                    parsed.scheme(),
+                    parsed.host_str().unwrap_or("")
+                ));
             }
         }
     }
@@ -150,10 +172,18 @@ pub(crate) fn absolute_base_from_live(live: &LiveUrlOutput) -> Option<String> {
 /// token refresh is skipped on a extras route (extras manages its own tokens).
 /// JioTV calls have no singleflight dedup (see module docs); the extras path
 /// does, via `ExtrasState::live`.
-pub(crate) async fn fetch_live(state: &AppState, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
+pub(crate) async fn fetch_live(
+    state: &AppState,
+    channel_id: &str,
+) -> anyhow::Result<LiveUrlOutput> {
+    if !state.channel_allowed(channel_id).await {
+        anyhow::bail!("channel {channel_id} is not available for the active account");
+    }
     let is_custom = state.custom_channels.contains(channel_id);
-    state.extras.refresh_catalogue_if_needed(&state.tv).await;
-    if let Some(content_id) = state.extras.route(channel_id, state.tv.logged_in(), is_custom) {
+    if let Some(content_id) = state
+        .extras
+        .route(channel_id, state.tv.logged_in(), is_custom)
+    {
         return state.extras.live(&content_id, &state.store).await;
     }
     crate::token_refresh::ensure_fresh(state).await;
@@ -165,7 +195,10 @@ pub(crate) async fn fetch_live(state: &AppState, channel_id: &str) -> anyhow::Re
 /// attempts for the same channel behind a per-channel lock, with a "is it
 /// still dead" re-check inside the lock — mirrors `refreshChannelToken`'s
 /// `singleflight.Group.Do("channelID", ...)`.
-async fn refresh_channel_token(state: &AppState, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
+async fn refresh_channel_token(
+    state: &AppState,
+    channel_id: &str,
+) -> anyhow::Result<LiveUrlOutput> {
     if channel_id.is_empty() {
         anyhow::bail!("empty channel ID");
     }
@@ -192,11 +225,27 @@ pub async fn live_quality_handler(
 ) -> Response {
     let id = channel_and_quality(&id);
     // Channels 1349/1322 output audio-only m3u8 when a quality is forced.
-    let quality = if id == "1349" || id == "1322" { "auto".to_string() } else { quality };
+    let quality = if id == "1349" || id == "1322" {
+        "auto".to_string()
+    } else {
+        quality
+    };
     live_impl(&state, &id, &quality, &prefix).await
 }
 
-async fn live_impl(state: &Arc<AppState>, id: &str, quality: &str, prefix: &Option<axum::Extension<crate::api::KeyPrefix>>) -> Response {
+async fn live_impl(
+    state: &Arc<AppState>,
+    id: &str,
+    quality: &str,
+    prefix: &Option<axum::Extension<crate::api::KeyPrefix>>,
+) -> Response {
+    if !state.channel_allowed(id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("Channel {id} is not available for the active account"),
+        )
+            .into_response();
+    }
     if let Some(ch) = state.custom_channels.get(id) {
         return Redirect::to(&ch.url).into_response();
     }
@@ -210,12 +259,19 @@ async fn live_impl(state: &Arc<AppState>, id: &str, quality: &str, prefix: &Opti
     if live_url.is_empty() {
         // A extras channel with only DASH: send the player to the MPD route.
         let is_custom = state.custom_channels.contains(id);
-        let via_extras = state.extras.route(id, state.tv.logged_in(), is_custom).is_some();
+        let via_extras = state
+            .extras
+            .route(id, state.tv.logged_in(), is_custom)
+            .is_some();
         if via_extras && television::has_dash(&live) {
             let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
-            return Redirect::to(&format!("{prefix_str}/live/mpd/{id}?q={quality}")).into_response();
+            return Redirect::to(&format!("{prefix_str}/live/mpd/{id}?q={quality}"))
+                .into_response();
         }
-        let message = format!("No stream found for channel id: {id}Status: {}", live.message);
+        let message = format!(
+            "No stream found for channel id: {id}Status: {}",
+            live.message
+        );
         return (StatusCode::NOT_FOUND, message).into_response();
     }
     live_url = to_absolute_stream_url(&live_url, absolute_base_from_live(&live).as_deref());
@@ -225,8 +281,15 @@ async fn live_impl(state: &Arc<AppState>, id: &str, quality: &str, prefix: &Opti
 
     let encrypted = state.secure.encrypt(&live_url);
     let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
-    let q = if quality == "auto" { String::new() } else { format!("&q={quality}") };
-    Redirect::to(&format!("{prefix_str}/render.m3u8?auth={encrypted}&channel_key_id={id}{q}")).into_response()
+    let q = if quality == "auto" {
+        String::new()
+    } else {
+        format!("&q={quality}")
+    };
+    Redirect::to(&format!(
+        "{prefix_str}/render.m3u8?auth={encrypted}&channel_key_id={id}{q}"
+    ))
+    .into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -239,7 +302,14 @@ pub struct RenderQuery {
 /// Rewrites a fetched HLS manifest so every media/key URI routes back
 /// through this server, mirroring `RenderHandler`'s two regex passes (done
 /// here as plain line/substring scanning — see module docs).
-fn rewrite_m3u8(body: &str, base_url: &str, params: &str, channel_id: &str, quality: &str, disable_ts_handler: bool) -> String {
+fn rewrite_m3u8(
+    body: &str,
+    base_url: &str,
+    params: &str,
+    channel_id: &str,
+    quality: &str,
+    disable_ts_handler: bool,
+) -> String {
     let mut out = String::with_capacity(body.len());
     for line in body.split_inclusive('\n') {
         let (content, newline) = match line.strip_suffix('\n') {
@@ -247,7 +317,11 @@ fn rewrite_m3u8(body: &str, base_url: &str, params: &str, channel_id: &str, qual
             None => (line, ""),
         };
         let trimmed = content.trim_end_matches('\r');
-        let cr = if trimmed.len() != content.len() { "\r" } else { "" };
+        let cr = if trimmed.len() != content.len() {
+            "\r"
+        } else {
+            ""
+        };
 
         if let Some(rewritten) = rewrite_key_attr_line(trimmed, params, channel_id) {
             out.push_str(&rewritten);
@@ -264,7 +338,11 @@ fn rewrite_m3u8(body: &str, base_url: &str, params: &str, channel_id: &str, qual
         }
 
         let full_url = resolve_media_url(trimmed, base_url, params);
-        let path_only = full_url.split('?').next().unwrap_or(&full_url).to_lowercase();
+        let path_only = full_url
+            .split('?')
+            .next()
+            .unwrap_or(&full_url)
+            .to_lowercase();
         let endpoint = if path_only.ends_with(".m3u8") {
             Some(("/render.m3u8", true))
         } else if path_only.ends_with(".ts") || path_only.ends_with(".aac") {
@@ -278,7 +356,12 @@ fn rewrite_m3u8(body: &str, base_url: &str, params: &str, channel_id: &str, qual
                 if !is_manifest && disable_ts_handler {
                     out.push_str(&full_url);
                 } else {
-                    out.push_str(&build_encrypted_link(endpoint, &full_url, channel_id, if is_manifest { quality } else { "" }));
+                    out.push_str(&build_encrypted_link(
+                        endpoint,
+                        &full_url,
+                        channel_id,
+                        if is_manifest { quality } else { "" },
+                    ));
                 }
             }
             None => out.push_str(trimmed),
@@ -330,13 +413,32 @@ fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<S
     }
     let replacement = build_encrypted_link("/render.key", key_url, channel_id, "");
     let _ = params;
-    Some(format!("{}{}{}", &line[..uri_start], replacement, &line[uri_start + uri_end..]))
+    Some(format!(
+        "{}{}{}",
+        &line[..uri_start],
+        replacement,
+        &line[uri_start + uri_end..]
+    ))
 }
 
 /// Runs `rewrite_m3u8` and then actually encrypts every `endpoint||url||id||q`
 /// placeholder it produced (see `build_encrypted_link`).
-fn render_replace(state: &AppState, body: &str, base_url: &str, params: &str, channel_id: &str, quality: &str) -> String {
-    let placeholder = rewrite_m3u8(body, base_url, params, channel_id, quality, state.config.disable_ts_handler);
+fn render_replace(
+    state: &AppState,
+    body: &str,
+    base_url: &str,
+    params: &str,
+    channel_id: &str,
+    quality: &str,
+) -> String {
+    let placeholder = rewrite_m3u8(
+        body,
+        base_url,
+        params,
+        channel_id,
+        quality,
+        state.config.disable_ts_handler,
+    );
     let mut out = String::with_capacity(placeholder.len());
     let mut rest = placeholder.as_str();
     while let Some(start) = rest.find("/render.") {
@@ -375,10 +477,27 @@ fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
     Some(out)
 }
 
-pub async fn render_m3u8_handler(State(state): State<Arc<AppState>>, Query(q): Query<RenderQuery>) -> Response {
+pub async fn render_m3u8_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RenderQuery>,
+) -> Response {
     let (Some(auth), Some(channel_id)) = (q.auth, q.channel_key_id) else {
-        return (StatusCode::BAD_REQUEST, "auth and channel_key_id are required").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "auth and channel_key_id are required",
+        )
+            .into_response();
     };
+    if channel_id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
+    }
+    if !state.channel_allowed(&channel_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            "channel is not available for the active account",
+        )
+            .into_response();
+    }
     let decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
@@ -427,7 +546,10 @@ pub async fn render_m3u8_handler(State(state): State<Arc<AppState>>, Query(q): Q
                     tried.insert(render_url.clone());
                     for cq in candidates {
                         let candidate = television::select_best_live_hls_url(&refreshed, cq);
-                        let candidate = to_absolute_stream_url(&candidate, absolute_base_from_live(&refreshed).as_deref());
+                        let candidate = to_absolute_stream_url(
+                            &candidate,
+                            absolute_base_from_live(&refreshed).as_deref(),
+                        );
                         if candidate.is_empty() || tried.contains(&candidate) {
                             continue;
                         }
@@ -456,9 +578,16 @@ pub async fn render_m3u8_handler(State(state): State<Arc<AppState>>, Query(q): Q
         }
     }
 
-    let base_string_url = render_url.split('?').next().unwrap_or(&render_url).to_string();
+    let base_string_url = render_url
+        .split('?')
+        .next()
+        .unwrap_or(&render_url)
+        .to_string();
     let base_url = strip_trailing_filename(&base_string_url);
-    let mut params = render_url.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+    let mut params = render_url
+        .split_once('?')
+        .map(|(_, q)| q.to_string())
+        .unwrap_or_default();
     params = drop_hdnea_params(&params);
     if !token.is_empty() {
         if params.is_empty() {
@@ -481,7 +610,9 @@ pub async fn render_m3u8_handler(State(state): State<Arc<AppState>>, Query(q): Q
 
 fn strip_trailing_filename(base: &str) -> String {
     match base.rfind('/') {
-        Some(idx) if base[idx + 1..].to_lowercase().ends_with(".m3u8") => base[..idx + 1].to_string(),
+        Some(idx) if base[idx + 1..].to_lowercase().ends_with(".m3u8") => {
+            base[..idx + 1].to_string()
+        }
         _ => base.to_string(),
     }
 }
@@ -501,18 +632,33 @@ pub struct SegmentQuery {
     hdnea: Option<String>,
 }
 
-pub async fn render_ts_handler(State(state): State<Arc<AppState>>, Query(q): Query<SegmentQuery>) -> Response {
+pub async fn render_ts_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SegmentQuery>,
+) -> Response {
     let Some(auth) = q.auth else {
         return (StatusCode::BAD_REQUEST, "auth is required").into_response();
     };
-    let channel_id = q.channel_key_id.unwrap_or_default();
+    let Some(channel_id) = q.channel_key_id.filter(|id| !id.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
+    };
+    if !state.channel_allowed(&channel_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            "channel is not available for the active account",
+        )
+            .into_response();
+    }
     let mut decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
 
     let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded);
-    let mut token = q.hdnea.clone().or_else(|| state.render_caches.get_hdnea(&hdnea_key));
+    let mut token = q
+        .hdnea
+        .clone()
+        .or_else(|| state.render_caches.get_hdnea(&hdnea_key));
     if token.is_some() {
         decoded = strip_hdnea_from_url(&decoded);
     } else {
@@ -540,14 +686,19 @@ pub async fn render_ts_handler(State(state): State<Arc<AppState>>, Query(q): Que
         headers = h;
     }
 
-    let mut builder = Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY));
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY));
     if let Some(ct) = headers {
         builder = builder.header(header::CONTENT_TYPE, ct);
     }
     builder.body(Body::from(body)).unwrap()
 }
 
-async fn proxy_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16, Vec<u8>, Option<String>) {
+async fn proxy_segment(
+    state: &AppState,
+    url: &str,
+    hdnea: Option<&str>,
+) -> (u16, Vec<u8>, Option<String>) {
     let ua = url::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(|h| state.extras.player_user_agent_for(h)))
@@ -559,7 +710,11 @@ async fn proxy_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16
     match req.send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            let ct = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
             (status, body, ct)
         }
@@ -570,23 +725,41 @@ async fn proxy_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16
 /// `/render.key` — an AES-128 HLS key request. Mirrors `RenderKeyHandler`:
 /// a extras-routed channel gets the extras app's key headers
 /// (`extrasKeyHeaders`); otherwise it gets the usual JioTV ones.
-pub async fn render_key_handler(State(state): State<Arc<AppState>>, Query(q): Query<SegmentQuery>) -> Response {
+pub async fn render_key_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SegmentQuery>,
+) -> Response {
     let Some(auth) = q.auth else {
         return (StatusCode::BAD_REQUEST, "auth is required").into_response();
     };
+    let Some(channel_id) = q.channel_key_id.clone().filter(|id| !id.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
+    };
+    if !state.channel_allowed(&channel_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            "channel is not available for the active account",
+        )
+            .into_response();
+    }
     let decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
     let hdnea = q.hdnea.clone().or_else(|| extract_hdnea_from_url(&decoded));
-    let channel_id = q.channel_key_id.clone().unwrap_or_default();
     let is_custom = state.custom_channels.contains(&channel_id);
 
-    let mut req = state.http.get(&decoded).header(header::USER_AGENT, television::PLAYER_USER_AGENT);
+    let mut req = state
+        .http
+        .get(&decoded)
+        .header(header::USER_AGENT, television::PLAYER_USER_AGENT);
     if let Some(t) = &hdnea {
         req = req.header(header::COOKIE, format!("__hdnea__={t}"));
     }
-    if let Some(content_id) = state.extras.route(&channel_id, state.tv.logged_in(), is_custom) {
+    if let Some(content_id) = state
+        .extras
+        .route(&channel_id, state.tv.logged_in(), is_custom)
+    {
         for (k, v) in state.extras.key_headers(&content_id) {
             req = req.header(k, v);
         }
@@ -603,7 +776,8 @@ pub async fn render_key_handler(State(state): State<Arc<AppState>>, Query(q): Qu
 
     match req.send().await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
             let bytes = resp.bytes().await.unwrap_or_default();
             let mut builder = Response::builder().status(status);
@@ -622,12 +796,18 @@ mod tests {
 
     #[test]
     fn absolute_url_is_passed_through() {
-        assert_eq!(to_absolute_stream_url("https://a.b/c.m3u8", None), "https://a.b/c.m3u8");
+        assert_eq!(
+            to_absolute_stream_url("https://a.b/c.m3u8", None),
+            "https://a.b/c.m3u8"
+        );
     }
 
     #[test]
     fn protocol_relative_url_gets_https() {
-        assert_eq!(to_absolute_stream_url("//a.b/c.m3u8", None), "https://a.b/c.m3u8");
+        assert_eq!(
+            to_absolute_stream_url("//a.b/c.m3u8", None),
+            "https://a.b/c.m3u8"
+        );
     }
 
     #[test]
@@ -640,33 +820,57 @@ mod tests {
 
     #[test]
     fn strips_hdnea_query_param() {
-        assert_eq!(strip_hdnea_from_url("https://a.b/c.ts?hdnea=xyz&x=1"), "https://a.b/c.ts?x=1");
-        assert_eq!(strip_hdnea_from_url("https://a.b/c.ts?__hdnea__=xyz"), "https://a.b/c.ts");
+        assert_eq!(
+            strip_hdnea_from_url("https://a.b/c.ts?hdnea=xyz&x=1"),
+            "https://a.b/c.ts?x=1"
+        );
+        assert_eq!(
+            strip_hdnea_from_url("https://a.b/c.ts?__hdnea__=xyz"),
+            "https://a.b/c.ts"
+        );
     }
 
     #[test]
     fn extracts_hdnea_from_query() {
-        assert_eq!(extract_hdnea_from_url("https://a.b/c.ts?hdnea=abc123"), Some("abc123".to_string()));
+        assert_eq!(
+            extract_hdnea_from_url("https://a.b/c.ts?hdnea=abc123"),
+            Some("abc123".to_string())
+        );
         assert_eq!(extract_hdnea_from_url("https://a.b/c.ts?x=1"), None);
     }
 
     #[test]
     fn strip_trailing_filename_keeps_directory() {
-        assert_eq!(strip_trailing_filename("https://a.b/path/master.m3u8"), "https://a.b/path/");
-        assert_eq!(strip_trailing_filename("https://a.b/path/"), "https://a.b/path/");
+        assert_eq!(
+            strip_trailing_filename("https://a.b/path/master.m3u8"),
+            "https://a.b/path/"
+        );
+        assert_eq!(
+            strip_trailing_filename("https://a.b/path/"),
+            "https://a.b/path/"
+        );
     }
 
     #[test]
     fn rewrites_master_playlist_variant_lines() {
         let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nchunk_1.m3u8?hdnea=old\n";
         let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "auto", false);
-        assert!(rewritten.contains("/render.m3u8||https://a.b/live/chunk_1.m3u8?hdnea=old||154||auto"));
+        assert!(
+            rewritten.contains("/render.m3u8||https://a.b/live/chunk_1.m3u8?hdnea=old||154||auto")
+        );
     }
 
     #[test]
     fn rewrites_ts_segment_lines() {
         let body = "#EXTM3U\nseg1.ts\n";
-        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "__hdnea__=fresh", "154", "auto", false);
+        let rewritten = rewrite_m3u8(
+            body,
+            "https://a.b/live/",
+            "__hdnea__=fresh",
+            "154",
+            "auto",
+            false,
+        );
         assert!(rewritten.contains("/render.ts||https://a.b/live/seg1.ts?__hdnea__=fresh||154||"));
     }
 
@@ -679,7 +883,8 @@ mod tests {
 
     #[test]
     fn rewrites_key_uri_in_ext_x_key_line() {
-        let body = "#EXT-X-KEY:METHOD=AES-128,URI=\"https://tv.media.jio.com/key.pkey\",IV=0x1\nseg1.ts\n";
+        let body =
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"https://tv.media.jio.com/key.pkey\",IV=0x1\nseg1.ts\n";
         let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "auto", false);
         assert!(rewritten.starts_with("#EXT-X-KEY:METHOD=AES-128,URI=\"/render.key||https://tv.media.jio.com/key.pkey||154||\""));
         assert!(rewritten.contains(",IV=0x1"));
@@ -688,7 +893,8 @@ mod tests {
     #[test]
     fn full_render_replace_encrypts_placeholders() {
         let dir = tempfile::tempdir().unwrap();
-        let store = std::sync::Arc::new(crate::store::Store::open(dir.path().to_str().unwrap()).unwrap());
+        let store =
+            std::sync::Arc::new(crate::store::Store::open(dir.path().to_str().unwrap()).unwrap());
         let secure = crate::secureurl::SecureUrl::new(false);
         let state = AppState {
             config: crate::config::Config::default(),
@@ -702,7 +908,8 @@ mod tests {
             custom_channels: std::sync::Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
-            extras: Arc::new(crate::extras_state::ExtrasState::new(false, false)),
+            epg_state: Default::default(),
+            extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),

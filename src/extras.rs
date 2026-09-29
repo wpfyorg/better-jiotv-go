@@ -108,7 +108,9 @@ impl Credentials {
             payload.push('=');
         }
         use base64::Engine;
-        let decoded = base64::engine::general_purpose::URL_SAFE.decode(&payload).ok()?;
+        let decoded = base64::engine::general_purpose::URL_SAFE
+            .decode(&payload)
+            .ok()?;
         let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
         let exp = claims.get("exp")?.as_u64()?;
         Some(UNIX_EPOCH + Duration::from_secs(exp))
@@ -205,6 +207,20 @@ pub enum ExtrasError {
     Http(#[from] reqwest::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ActiveSubscriptionsData {
+    #[serde(default)]
+    pub subscriptions: Option<std::collections::HashMap<String, bool>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ActiveSubscriptions {
+    #[serde(default)]
+    pub code: Option<i64>,
+    #[serde(default)]
+    pub data: Option<ActiveSubscriptionsData>,
 }
 
 fn normalize_number(number: &str) -> Result<String, ExtrasError> {
@@ -339,20 +355,34 @@ impl Client {
         ]
     }
 
-    pub async fn send_otp(&self, number: &str, identifier_id: &str) -> Result<SendOtpResponse, ExtrasError> {
+    pub async fn send_otp(
+        &self,
+        number: &str,
+        identifier_id: &str,
+    ) -> Result<SendOtpResponse, ExtrasError> {
         let n = normalize_number(number)?;
         let e = self.endpoints();
-        let mut req = self.http.post(format!("{}/{}", e.auth, e.send_otp)).header(reqwest::header::USER_AGENT, CLIENT_USER_AGENT);
+        let mut req = self
+            .http
+            .post(format!("{}/{}", e.auth, e.send_otp))
+            .header(reqwest::header::USER_AGENT, CLIENT_USER_AGENT);
         for (k, v) in self.login_headers() {
             req = req.header(&k, v);
         }
-        req = req.header("number", n).header("identifierid", identifier_id);
+        req = req
+            .header("number", n)
+            .header("identifierid", identifier_id);
         let resp = req.send().await?;
         check_status(&resp, "sendotp")?;
         Ok(resp.json().await?)
     }
 
-    pub async fn verify_otp(&self, number: &str, identifier: &str, otp: &str) -> Result<Credentials, ExtrasError> {
+    pub async fn verify_otp(
+        &self,
+        number: &str,
+        identifier: &str,
+        otp: &str,
+    ) -> Result<Credentials, ExtrasError> {
         let n = normalize_number(number)?;
         #[derive(Serialize)]
         struct PlatformInfo {
@@ -388,7 +418,9 @@ impl Client {
                 consumption_device_name: self.device.model.clone(),
                 info: Info {
                     android_id: self.device.android_id.clone(),
-                    platform: PlatformInfo { name: self.device.model.clone() },
+                    platform: PlatformInfo {
+                        name: self.device.model.clone(),
+                    },
                     kind: "android".to_string(),
                 },
             },
@@ -418,7 +450,10 @@ impl Client {
         }
 
         let e = self.endpoints();
-        let mut req = self.http.post(format!("{}/{}", e.auth, e.verify_otp)).header(reqwest::header::USER_AGENT, CLIENT_USER_AGENT);
+        let mut req = self
+            .http
+            .post(format!("{}/{}", e.auth, e.verify_otp))
+            .header(reqwest::header::USER_AGENT, CLIENT_USER_AGENT);
         for (k, v) in self.login_headers() {
             req = req.header(&k, v);
         }
@@ -426,7 +461,10 @@ impl Client {
         check_status(&resp, "verifyotp")?;
         let v: VerifyOtpResponse = resp.json().await?;
         if v.sso_token.is_empty() {
-            return Err(ExtrasError::Api("verifyotp returned no ssoToken".to_string(), 200));
+            return Err(ExtrasError::Api(
+                "verifyotp returned no ssoToken".to_string(),
+                200,
+            ));
         }
         let mut cr = Credentials {
             number: n,
@@ -455,7 +493,8 @@ impl Client {
             return Err(ExtrasError::NotLoggedIn);
         }
         use base64::Engine;
-        let number_b64 = base64::engine::general_purpose::STANDARD.encode(format!("+91{}", cr.number));
+        let number_b64 =
+            base64::engine::general_purpose::STANDARD.encode(format!("+91{}", cr.number));
         #[derive(Serialize)]
         struct Body {
             number: String,
@@ -489,7 +528,10 @@ impl Client {
         check_status(&resp, "exchangetoken")?;
         let x: Resp = resp.json().await?;
         if x.auth_token.is_empty() {
-            return Err(ExtrasError::Api("exchangetoken returned no authToken".to_string(), 200));
+            return Err(ExtrasError::Api(
+                "exchangetoken returned no authToken".to_string(),
+                200,
+            ));
         }
         cr.auth_token = x.auth_token;
         cr.refresh_token = x.refresh_token;
@@ -540,7 +582,10 @@ impl Client {
         check_status(&resp, "refreshtoken")?;
         let out: Resp = resp.json().await?;
         if out.auth_token.is_empty() {
-            return Err(ExtrasError::Api("refreshtoken returned no authToken".to_string(), 200));
+            return Err(ExtrasError::Api(
+                "refreshtoken returned no authToken".to_string(),
+                200,
+            ));
         }
         cr.auth_token = out.auth_token;
         if !out.refresh_token.is_empty() {
@@ -557,7 +602,9 @@ impl Client {
             data: std::collections::HashMap<String, LiveChannel>,
         }
         let e = self.endpoints();
-        let mut req = self.http.get(format!("{}/metadata/v2/livechannels", e.content));
+        let mut req = self
+            .http
+            .get(format!("{}/metadata/v2/livechannels", e.content));
         for (k, v) in common_headers() {
             req = req.header(k, v);
         }
@@ -575,8 +622,47 @@ impl Client {
                 ch
             })
             .collect();
-        out.sort_by(|a, b| a.channel_number.cmp(&b.channel_number).then_with(|| a.content_id.cmp(&b.content_id)));
+        out.sort_by(|a, b| {
+            a.channel_number
+                .cmp(&b.channel_number)
+                .then_with(|| a.content_id.cmp(&b.content_id))
+        });
         Ok(out)
+    }
+
+    /// Returns the provider-level subscription map used by the official
+    /// TV+ client to decide whether a live item is available to this account.
+    /// Missing maps are represented as `None`; callers must not invent a tier.
+    pub async fn subscriptions(
+        &self,
+    ) -> Result<Option<std::collections::HashMap<String, bool>>, ExtrasError> {
+        let cr = self.credentials().ok_or(ExtrasError::NotLoggedIn)?;
+        if cr.auth_token.is_empty() {
+            return Err(ExtrasError::NotLoggedIn);
+        }
+        let e = self.endpoints();
+        let mut req = self
+            .http
+            .get(format!("{}/user/v2/subscription", e.user_api));
+        for (k, v) in common_headers() {
+            req = req.header(k, v);
+        }
+        let resp = req
+            .header("ssotoken", &cr.sso_token)
+            .header("subId", &cr.subscriber_id)
+            .header("uniqueid", &cr.user_id)
+            .header("x-accesstoken", &cr.auth_token)
+            .header("x-page", "LiveTv")
+            .send()
+            .await?;
+        check_status(&resp, "subscription")?;
+        let out: ActiveSubscriptions = resp.json().await?;
+        if let Some(code) = out.code {
+            if code != 200 {
+                return Err(ExtrasError::Api("subscription".to_string(), code as u16));
+            }
+        }
+        Ok(out.data.and_then(|d| d.subscriptions))
     }
 
     pub async fn playback(&self, content_id: &str) -> Result<PlaybackResponse, ExtrasError> {
@@ -586,7 +672,11 @@ impl Client {
         }
         let cid = content_id::content_id(content_id).unwrap_or(content_id);
         let e = self.endpoints();
-        let mut req = self.http.post(format!("{}/playback/v2/{}", e.user_api, urlencoding::encode(cid)));
+        let mut req = self.http.post(format!(
+            "{}/playback/v2/{}",
+            e.user_api,
+            urlencoding::encode(cid)
+        ));
         for (k, v) in common_headers() {
             req = req.header(k, v);
         }
@@ -635,13 +725,21 @@ impl Client {
         Ok(r)
     }
 
-    pub async fn epg(&self, content_ids: &[String], offsets: &[i64]) -> Result<std::collections::HashMap<String, Vec<Programme>>, ExtrasError> {
+    pub async fn epg(
+        &self,
+        content_ids: &[String],
+        offsets: &[i64],
+    ) -> Result<std::collections::HashMap<String, Vec<Programme>>, ExtrasError> {
         let mut out = std::collections::HashMap::new();
         if content_ids.is_empty() {
             return Ok(out);
         }
         let e = self.endpoints();
-        let offs = offsets.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+        let offs = offsets
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         #[derive(Deserialize)]
         struct Resp {
             #[serde(default)]
@@ -649,10 +747,10 @@ impl Client {
         }
         for chunk in content_ids.chunks(100) {
             let ids_json = serde_json::to_string(chunk)?;
-            let mut req = self.http.get(format!("{}/metadata/v2/livechannels/epg", e.content)).query(&[
-                ("contentIds", ids_json),
-                ("offsets", format!("[{offs}]")),
-            ]);
+            let mut req = self
+                .http
+                .get(format!("{}/metadata/v2/livechannels/epg", e.content))
+                .query(&[("contentIds", ids_json), ("offsets", format!("[{offs}]"))]);
             for (k, v) in common_headers() {
                 req = req.header(k, v);
             }
@@ -744,6 +842,11 @@ pub struct LiveChannel {
     #[allow(dead_code)]
     #[serde(default)]
     pub provider: String,
+    #[serde(rename = "subProvider", default)]
+    pub sub_provider: String,
+    #[allow(dead_code)]
+    #[serde(rename = "isPremium", default)]
+    pub is_premium: bool,
     #[serde(rename = "playbackType", default)]
     pub playback_type: String,
     #[serde(rename = "channelNumber", default)]
@@ -759,8 +862,29 @@ impl LiveChannel {
         self.name.to_lowercase().contains("test")
     }
 
+    /// Mirrors the official TV+ item's subscription check: prefer an
+    /// explicit `<subProvider>-Premium` entry, then `<subProvider>`, and
+    /// treat an absent key as unknown/allowed rather than fabricating a tier.
+    pub fn allowed_by_subscriptions(
+        &self,
+        subscriptions: &std::collections::HashMap<String, bool>,
+    ) -> bool {
+        if self.sub_provider.is_empty() {
+            return true;
+        }
+        subscriptions
+            .get(&format!("{}-Premium", self.sub_provider))
+            .or_else(|| subscriptions.get(&self.sub_provider))
+            .copied()
+            .unwrap_or(true)
+    }
+
     pub fn to_channel(&self) -> crate::television::Channel {
-        let logo = if !self.logo_url.is_empty() { self.logo_url.clone() } else { self.thumbnail.clone() };
+        let logo = if !self.logo_url.is_empty() {
+            self.logo_url.clone()
+        } else {
+            self.thumbnail.clone()
+        };
         crate::television::Channel {
             id: channel_id(&self.content_id),
             name: self.name.clone(),
@@ -791,7 +915,9 @@ fn lookup(map: &[(i64, &str)], name: &str) -> Option<i64> {
     if name.is_empty() {
         return None;
     }
-    map.iter().find(|(id, v)| *id != 0 && v.eq_ignore_ascii_case(name)).map(|(id, _)| *id)
+    map.iter()
+        .find(|(id, v)| *id != 0 && v.eq_ignore_ascii_case(name))
+        .map(|(id, _)| *id)
 }
 
 /// Lowercases and strips everything but letters/digits, reading "&" as
@@ -805,23 +931,12 @@ pub fn normalize_name(s: &str) -> String {
         .collect()
 }
 
-/// The extra-source channels not already carried (no matching `extId` or
-/// normalized name), mapped onto this server's own channel type.
-pub fn exclusive(extra: &[LiveChannel], existing: &[crate::television::Channel]) -> Vec<crate::television::Channel> {
-    let ids: std::collections::HashSet<&str> = existing.iter().map(|c| c.id.as_str()).collect();
-    let names: std::collections::HashSet<String> = existing.iter().map(|c| normalize_name(&c.name)).collect();
-    extra
-        .iter()
-        .filter(|ch| !ch.is_test_channel() && ch.playback_type != "deeplink")
-        .filter(|ch| ch.ext_id.is_empty() || !ids.contains(ch.ext_id.as_str()))
-        .filter(|ch| !names.contains(&normalize_name(&ch.name)))
-        .map(|ch| ch.to_channel())
-        .collect()
-}
-
 /// Maps each existing channel ID that the extra source also carries to
 /// its own content ID.
-pub fn mirrors(extra: &[LiveChannel], existing: &[crate::television::Channel]) -> std::collections::HashMap<String, String> {
+pub fn mirrors(
+    extra: &[LiveChannel],
+    existing: &[crate::television::Channel],
+) -> std::collections::HashMap<String, String> {
     let mut by_ext_id = std::collections::HashMap::new();
     let mut by_name = std::collections::HashMap::new();
     for ch in extra {
@@ -961,7 +1076,11 @@ impl PlaybackResponse {
 fn hdnea_from(stream: &str) -> String {
     url::Url::parse(stream)
         .ok()
-        .and_then(|u| u.query_pairs().find(|(k, _)| k == "__hdnea__").map(|(_, v)| v.into_owned()))
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "__hdnea__")
+                .map(|(_, v)| v.into_owned())
+        })
         .unwrap_or_default()
 }
 
@@ -1014,7 +1133,10 @@ impl VodItem {
         if !is_supported_provider(&self.provider) || self.playback_type != "playback" {
             return false;
         }
-        matches!(self.content_type.as_str(), "Movie" | "Show" | "Episode" | "Video")
+        matches!(
+            self.content_type.as_str(),
+            "Movie" | "Show" | "Episode" | "Video"
+        )
     }
 }
 
@@ -1064,7 +1186,10 @@ fn keep_playable(rails: Vec<Rail>) -> Vec<Rail> {
             if items.is_empty() {
                 None
             } else {
-                Some(Rail { title: r.title, items })
+                Some(Rail {
+                    title: r.title,
+                    items,
+                })
             }
         })
         .collect()
@@ -1073,7 +1198,10 @@ fn keep_playable(rails: Vec<Rail>) -> Vec<Rail> {
 impl Client {
     pub async fn search(&self, query: &str) -> Result<Vec<Rail>, ExtrasError> {
         let e = self.endpoints();
-        let mut req = self.http.get(format!("{}/search/v1/search", e.content)).query(&[("q", query), ("isKids", "false")]);
+        let mut req = self
+            .http
+            .get(format!("{}/search/v1/search", e.content))
+            .query(&[("q", query), ("isKids", "false")]);
         for (k, v) in content_headers("Search") {
             req = req.header(k, v);
         }
@@ -1086,12 +1214,19 @@ impl Client {
     /// One page (five rails) of a catalogue screen (1 = home, 100021 =
     /// movies, 100023 = shows, 100025 = kids, 100097 = TV shows). `more` is
     /// false on the last page.
-    pub async fn screen(&self, screen_id: &str, page: i64) -> Result<(Vec<Rail>, bool), ExtrasError> {
+    pub async fn screen(
+        &self,
+        screen_id: &str,
+        page: i64,
+    ) -> Result<(Vec<Rail>, bool), ExtrasError> {
         let e = self.endpoints();
         let mut req = self
             .http
             .get(format!("{}/screen/v2/{screen_id}", e.content))
-            .query(&[("pageNo", page.to_string()), ("isKids", "false".to_string())]);
+            .query(&[
+                ("pageNo", page.to_string()),
+                ("isKids", "false".to_string()),
+            ]);
         for (k, v) in content_headers("Home") {
             req = req.header(k, v);
         }
@@ -1105,7 +1240,11 @@ impl Client {
     /// A show's episodes; `season <= 0` means the default season.
     pub async fn episodes(&self, show_id: &str, season: i64) -> Result<Vec<VodItem>, ExtrasError> {
         let e = self.endpoints();
-        let mut url = format!("{}/metadata/v2/metadata/Show/{}", e.content, urlencoding::encode(show_id));
+        let mut url = format!(
+            "{}/metadata/v2/metadata/Show/{}",
+            e.content,
+            urlencoding::encode(show_id)
+        );
         if season > 0 {
             url.push_str(&format!("?season={season}"));
         }
@@ -1120,7 +1259,11 @@ impl Client {
         let resp = req.send().await?;
         check_status(&resp, "episodes")?;
         let r: Resp = resp.json().await?;
-        Ok(r.data.items.into_iter().filter(|it| it.content_type == "Episode" && it.playable()).collect())
+        Ok(r.data
+            .items
+            .into_iter()
+            .filter(|it| it.content_type == "Episode" && it.playable())
+            .collect())
     }
 
     /// Headers for a Widevine license request for on-demand content
@@ -1175,11 +1318,19 @@ pub struct Programme {
     pub thumbnail: String,
 }
 
-pub fn to_xmltv(content_id: &str, category: &str, progs: &[Programme]) -> Vec<crate::epg::XmlProgramme> {
+pub fn to_xmltv(
+    content_id: &str,
+    category: &str,
+    progs: &[Programme],
+) -> Vec<crate::epg::XmlProgramme> {
     progs
         .iter()
         .map(|p| {
-            let icon = if p.thumbnail.ends_with('/') { String::new() } else { p.thumbnail.clone() };
+            let icon = if p.thumbnail.ends_with('/') {
+                String::new()
+            } else {
+                p.thumbnail.clone()
+            };
             crate::epg::XmlProgramme {
                 channel: channel_id(content_id),
                 start: crate::epg::format_xmltv_time(p.start_epoch),
@@ -1217,28 +1368,82 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_drops_duplicates_by_ext_id_and_name() {
+    fn mirrors_maps_jiotv_id_to_content_id() {
         let jiotv = vec![crate::television::Channel {
-            id: "154".to_string(),
-            name: "Star Plus".to_string(),
+            id: "154".into(),
+            name: "Star Plus".into(),
             ..Default::default()
         }];
-        let extra = vec![
-            LiveChannel { content_id: "1".into(), ext_id: "154".into(), name: "Star Plus".into(), ..Default::default() },
-            LiveChannel { content_id: "2".into(), name: "Extra Only".into(), ..Default::default() },
-            LiveChannel { content_id: "3".into(), name: "Test Channel".into(), ..Default::default() },
-        ];
-        let ex = exclusive(&extra, &jiotv);
-        assert_eq!(ex.len(), 1);
-        assert_eq!(ex[0].id, "ex_2");
+        let extra = vec![LiveChannel {
+            content_id: "1".into(),
+            ext_id: "154".into(),
+            name: "Star Plus".into(),
+            ..Default::default()
+        }];
+        let m = mirrors(&extra, &jiotv);
+        assert_eq!(m.get("154"), Some(&"1".to_string()));
     }
 
     #[test]
-    fn mirrors_maps_jiotv_id_to_content_id() {
-        let jiotv = vec![crate::television::Channel { id: "154".into(), name: "Star Plus".into(), ..Default::default() }];
-        let extra = vec![LiveChannel { content_id: "1".into(), ext_id: "154".into(), name: "Star Plus".into(), ..Default::default() }];
-        let m = mirrors(&extra, &jiotv);
-        assert_eq!(m.get("154"), Some(&"1".to_string()));
+    fn subscription_map_follows_official_provider_precedence() {
+        let channel = LiveChannel {
+            sub_provider: "SonyLIV".into(),
+            ..Default::default()
+        };
+        let mut subscriptions = std::collections::HashMap::new();
+        subscriptions.insert("SonyLIV".into(), true);
+        subscriptions.insert("SonyLIV-Premium".into(), false);
+        assert!(!channel.allowed_by_subscriptions(&subscriptions));
+
+        subscriptions.remove("SonyLIV-Premium");
+        assert!(channel.allowed_by_subscriptions(&subscriptions));
+
+        subscriptions.clear();
+        assert!(channel.allowed_by_subscriptions(&subscriptions));
+    }
+
+    #[tokio::test]
+    async fn subscriptions_use_account_endpoint_and_return_provider_map() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/v2/subscription"))
+            .and(header("ssotoken", "redacted-sso"))
+            .and(header("subId", "redacted-sub"))
+            .and(header("uniqueid", "redacted-user"))
+            .and(header("x-accesstoken", "redacted-access"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200,
+                "message": "success",
+                "data": {
+                    "subscriptions": {
+                        "SonyLIV-Premium": false,
+                        "JioCinema-Premium": true
+                    },
+                    "devicelimit": 1
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let client = Client::new(reqwest::Client::new(), Device::new());
+        client.set_endpoints(Endpoints {
+            user_api: server.uri(),
+            ..Default::default()
+        });
+        client.set_credentials(Some(Credentials {
+            sso_token: "redacted-sso".into(),
+            subscriber_id: "redacted-sub".into(),
+            user_id: "redacted-user".into(),
+            auth_token: "redacted-access".into(),
+            ..Default::default()
+        }));
+
+        let subscriptions = client.subscriptions().await.unwrap().unwrap();
+        assert_eq!(subscriptions.get("SonyLIV-Premium"), Some(&false));
+        assert_eq!(subscriptions.get("JioCinema-Premium"), Some(&true));
     }
 
     #[test]
@@ -1260,7 +1465,9 @@ mod tests {
             manufacturer: "mfr".into(),
             os_version: "1".into(),
         };
-        store.set(STORE_KEY_DEVICE_OLD, &serde_json::to_string(&old).unwrap()).unwrap();
+        store
+            .set(STORE_KEY_DEVICE_OLD, &serde_json::to_string(&old).unwrap())
+            .unwrap();
 
         let loaded = Device::load_or_create(&store).unwrap();
         assert_eq!(loaded.android_id, "old-android-id");
@@ -1272,8 +1479,18 @@ mod tests {
     fn credentials_migrate_from_old_store_key() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
-        let cr = Credentials { number: "9876543210".into(), sso_token: "sso".into(), auth_token: "at".into(), ..Default::default() };
-        store.set(STORE_KEY_CREDENTIALS_OLD, &serde_json::to_string(&cr).unwrap()).unwrap();
+        let cr = Credentials {
+            number: "9876543210".into(),
+            sso_token: "sso".into(),
+            auth_token: "at".into(),
+            ..Default::default()
+        };
+        store
+            .set(
+                STORE_KEY_CREDENTIALS_OLD,
+                &serde_json::to_string(&cr).unwrap(),
+            )
+            .unwrap();
 
         let loaded = Credentials::load(&store).expect("migrated credentials");
         assert_eq!(loaded.auth_token, "at");
@@ -1284,10 +1501,25 @@ mod tests {
     fn credentials_prefer_new_key_over_old() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
-        let old = Credentials { sso_token: "sso".into(), auth_token: "old".into(), ..Default::default() };
-        let new = Credentials { sso_token: "sso".into(), auth_token: "new".into(), ..Default::default() };
-        store.set(STORE_KEY_CREDENTIALS_OLD, &serde_json::to_string(&old).unwrap()).unwrap();
-        store.set(STORE_KEY_CREDENTIALS, &serde_json::to_string(&new).unwrap()).unwrap();
+        let old = Credentials {
+            sso_token: "sso".into(),
+            auth_token: "old".into(),
+            ..Default::default()
+        };
+        let new = Credentials {
+            sso_token: "sso".into(),
+            auth_token: "new".into(),
+            ..Default::default()
+        };
+        store
+            .set(
+                STORE_KEY_CREDENTIALS_OLD,
+                &serde_json::to_string(&old).unwrap(),
+            )
+            .unwrap();
+        store
+            .set(STORE_KEY_CREDENTIALS, &serde_json::to_string(&new).unwrap())
+            .unwrap();
 
         let loaded = Credentials::load(&store).expect("credentials");
         assert_eq!(loaded.auth_token, "new");
@@ -1305,14 +1537,23 @@ mod tests {
             refresh_token: "rt".into(),
         };
         let json = serde_json::to_string(&cr).unwrap();
-        for key in ["ssoToken", "subscriberId", "userId", "authToken", "refreshToken"] {
+        for key in [
+            "ssoToken",
+            "subscriberId",
+            "userId",
+            "authToken",
+            "refreshToken",
+        ] {
             assert!(json.contains(key), "missing {key} in {json}");
         }
     }
 
     #[test]
     fn credentials_needs_refresh_when_no_exp_claim() {
-        let cr = Credentials { auth_token: "not-a-jwt".into(), ..Default::default() };
+        let cr = Credentials {
+            auth_token: "not-a-jwt".into(),
+            ..Default::default()
+        };
         assert!(cr.needs_refresh(SystemTime::now(), Duration::from_secs(3600)));
     }
 
@@ -1362,7 +1603,10 @@ mod tests {
         let sent = client.send_otp("9876543210", "").await.unwrap();
         assert_eq!(sent.identifier, "redacted-identifier");
 
-        let creds = client.verify_otp("9876543210", &sent.identifier, "0000").await.unwrap();
+        let creds = client
+            .verify_otp("9876543210", &sent.identifier, "0000")
+            .await
+            .unwrap();
         assert_eq!(creds.sso_token, "redacted-sso");
         assert_eq!(creds.auth_token, "redacted-at");
         assert_eq!(creds.refresh_token, "redacted-rt");

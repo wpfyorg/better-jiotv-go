@@ -5,19 +5,25 @@
 //! tests exercise this module against a local mock server).
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 pub const JIOTV_API_DOMAIN: &str = "jiotvapi.media.jio.com";
 pub const CHANNELS_API_URL: &str = "https://jiotvapi.cdn.jio.com/apis/v3.1/getMobileChannelList/get/?langId=6&os=android&devicetype=phone&usertype=JIO&version=315&langId=6";
-pub const REFRESH_TOKEN_URL: &str = "https://auth.media.jio.com/tokenservice/apis/v1/refreshtoken?langId=6";
+pub const ACTIVE_PLANS_API_URL: &str = "https://jiotvapi.media.jio.com/userservice/apis/v1/plans";
+pub const REFRESH_TOKEN_URL: &str =
+    "https://auth.media.jio.com/tokenservice/apis/v1/refreshtoken?langId=6";
 /// The SSO-token fallback-TTL refresh path is not ported (see README); only
 /// the JWT-`exp`-based access-token refresh in `token_refresh.rs` is.
 #[allow(dead_code)]
-pub const REFRESH_SSO_TOKEN_URL: &str = "https://tv.media.jio.com/apis/v2.0/loginotp/refresh?langId=6";
+pub const REFRESH_SSO_TOKEN_URL: &str =
+    "https://tv.media.jio.com/apis/v2.0/loginotp/refresh?langId=6";
 pub const PLAYBACK_API_PATH: &str = "/playback/apis/v1.1/geturl?langId=6";
 pub const LOGIN_SEND_OTP_PATH: &str = "/userservice/apis/v1/loginotp/send";
 pub const LOGIN_VERIFY_OTP_PATH: &str = "/userservice/apis/v1/loginotp/verify";
+const CHANNELS_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const PLAN_SUMMARY_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 
 pub const CATEGORY_MAP: &[(i64, &str)] = &[
     (0, "All Categories"),
@@ -58,11 +64,19 @@ pub const LANGUAGE_MAP: &[(i64, &str)] = &[
 ];
 
 pub fn category_name(id: i64) -> &'static str {
-    CATEGORY_MAP.iter().find(|(k, _)| *k == id).map(|(_, v)| *v).unwrap_or("")
+    CATEGORY_MAP
+        .iter()
+        .find(|(k, _)| *k == id)
+        .map(|(_, v)| *v)
+        .unwrap_or("")
 }
 
 pub fn language_name(id: i64) -> &'static str {
-    LANGUAGE_MAP.iter().find(|(k, _)| *k == id).map(|(_, v)| *v).unwrap_or("")
+    LANGUAGE_MAP
+        .iter()
+        .find(|(k, _)| *k == id)
+        .map(|(_, v)| *v)
+        .unwrap_or("")
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -87,6 +101,22 @@ pub struct Channel {
     pub is_catchup_available: bool,
     #[serde(rename = "business_type", default)]
     pub business_type: String,
+    #[serde(rename = "plan_type", default)]
+    pub plan_type: String,
+    #[serde(
+        rename = "packageIds",
+        default,
+        deserialize_with = "ids_from_int_or_string_vec"
+    )]
+    pub package_ids: Vec<String>,
+    #[serde(
+        rename = "playbackRightIds",
+        default,
+        deserialize_with = "ids_from_int_or_string_vec"
+    )]
+    pub playback_right_ids: Vec<String>,
+    #[serde(rename = "is_premium", default)]
+    pub is_premium: bool,
 }
 
 impl Channel {
@@ -115,6 +145,25 @@ where
     })
 }
 
+fn ids_from_int_or_string_vec<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IdOrStr {
+        Int(i64),
+        Str(String),
+    }
+    Ok(Vec::<IdOrStr>::deserialize(d)?
+        .into_iter()
+        .map(|v| match v {
+            IdOrStr::Int(i) => i.to_string(),
+            IdOrStr::Str(s) => s,
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ChannelsResponse {
     // Present on the wire (and kept for parity with the Go struct); callers
@@ -127,6 +176,110 @@ pub struct ChannelsResponse {
     pub message: String,
     #[serde(default)]
     pub result: Vec<Channel>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct TvPlanSummary {
+    pub active_plan_count: usize,
+    pub provider_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ActivePlansResponse {
+    #[serde(rename = "PackageInfo", default)]
+    package_info: Vec<ActiveSubscriptionPlan>,
+    #[serde(default)]
+    result: ActivePlansResult,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ActiveSubscriptionPlan {
+    #[serde(default)]
+    isactive: Option<bool>,
+    #[serde(rename = "packageDetail", default)]
+    package_detail: ActiveSubscriptionPack,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ActiveSubscriptionPack {
+    #[serde(default)]
+    providers: Vec<PlanProvider>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ActivePlansResult {
+    #[serde(default)]
+    plans: Vec<ActiveSubscriptionPack>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct PlanProvider {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    provider: String,
+    #[serde(rename = "providerId", default)]
+    provider_id: String,
+    #[serde(rename = "providerName", default)]
+    provider_name: String,
+}
+
+impl ActivePlansResponse {
+    fn summary(&self) -> TvPlanSummary {
+        let any_explicitly_active = self
+            .package_info
+            .iter()
+            .any(|plan| plan.isactive == Some(true));
+        let selected: Vec<&ActiveSubscriptionPlan> = self
+            .package_info
+            .iter()
+            .filter(|plan| !any_explicitly_active || plan.isactive == Some(true))
+            .collect();
+
+        let mut providers = HashSet::new();
+        if !selected.is_empty() {
+            for plan in &selected {
+                for provider in &plan.package_detail.providers {
+                    if let Some(key) = provider.key() {
+                        providers.insert(key);
+                    }
+                }
+            }
+            return TvPlanSummary {
+                active_plan_count: selected.len(),
+                provider_count: providers.len(),
+            };
+        }
+
+        for plan in &self.result.plans {
+            for provider in &plan.providers {
+                if let Some(key) = provider.key() {
+                    providers.insert(key);
+                }
+            }
+        }
+        TvPlanSummary {
+            active_plan_count: self.result.plans.len(),
+            provider_count: providers.len(),
+        }
+    }
+}
+
+impl PlanProvider {
+    fn key(&self) -> Option<String> {
+        [
+            &self.id,
+            &self.provider_id,
+            &self.provider,
+            &self.name,
+            &self.provider_name,
+        ]
+        .into_iter()
+        .find(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_ascii_lowercase())
+    }
 }
 
 /// Holds JioTV credentials in memory. Persisted to the store by the caller
@@ -245,7 +398,13 @@ impl LiveUrlOutput {
 }
 
 /// Picks a bitrate by name, mirroring `internalUtils.SelectQuality`.
-pub fn select_quality<'a>(quality: &str, auto: &'a str, high: &'a str, medium: &'a str, low: &'a str) -> &'a str {
+pub fn select_quality<'a>(
+    quality: &str,
+    auto: &'a str,
+    high: &'a str,
+    medium: &'a str,
+    low: &'a str,
+) -> &'a str {
     match quality {
         "high" | "h" => high,
         "medium" | "med" | "m" => medium,
@@ -273,6 +432,8 @@ pub struct Television {
     pub creds: RwLock<Option<Credentials>>,
     pub client: reqwest::Client,
     pub device_id: String,
+    channels_cache: RwLock<Option<(ChannelsResponse, Instant)>>,
+    plan_summary_cache: RwLock<Option<(TvPlanSummary, Instant)>>,
     /// Serialises token refreshes so concurrent requests share one.
     pub refresh_lock: tokio::sync::Mutex<()>,
 }
@@ -288,6 +449,8 @@ impl Television {
             creds: RwLock::new(None),
             client,
             device_id,
+            channels_cache: RwLock::new(None),
+            plan_summary_cache: RwLock::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -298,10 +461,31 @@ impl Television {
 
     pub fn set_credentials(&self, c: Credentials) {
         *self.creds.write().unwrap() = Some(c);
+        *self.channels_cache.write().unwrap() = None;
+        *self.plan_summary_cache.write().unwrap() = None;
     }
 
     pub fn clear_credentials(&self) {
         *self.creds.write().unwrap() = None;
+        *self.channels_cache.write().unwrap() = None;
+        *self.plan_summary_cache.write().unwrap() = None;
+    }
+
+    /// Stable, non-secret digest used to bind account-sensitive caches to
+    /// the active TV account without persisting raw account identifiers.
+    pub fn account_fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"tv-account-v1\0");
+        match self.creds.read().unwrap().as_ref() {
+            Some(creds) => {
+                hasher.update(creds.crm.as_bytes());
+                hasher.update(b"\0");
+                hasher.update(creds.unique_id.as_bytes());
+            }
+            None => hasher.update(b"anonymous"),
+        }
+        hex::encode(hasher.finalize())
     }
 
     fn auth_headers(&self) -> HashMap<String, String> {
@@ -318,7 +502,26 @@ impl Television {
     /// Fetches the full channel list. Works with or without a login (the
     /// list itself needs no auth in the Go version either).
     pub async fn channels(&self) -> anyhow::Result<ChannelsResponse> {
-        self.channels_from(CHANNELS_API_URL).await
+        if let Some((channels, fetched_at)) = self.channels_cache.read().unwrap().as_ref() {
+            if fetched_at.elapsed() < CHANNELS_CACHE_TTL {
+                return Ok(channels.clone());
+            }
+        }
+        let channels = self.channels_from(CHANNELS_API_URL).await?;
+        *self.channels_cache.write().unwrap() = Some((channels.clone(), Instant::now()));
+        Ok(channels)
+    }
+
+    #[cfg(test)]
+    pub fn set_channels_for_test(&self, channels: Vec<Channel>) {
+        *self.channels_cache.write().unwrap() = Some((
+            ChannelsResponse {
+                code: 200,
+                message: "test".into(),
+                result: channels,
+            },
+            Instant::now(),
+        ));
     }
 
     pub async fn channels_from(&self, url: &str) -> anyhow::Result<ChannelsResponse> {
@@ -328,6 +531,55 @@ impl Television {
         }
         let resp = req.send().await?.error_for_status()?;
         Ok(resp.json::<ChannelsResponse>().await?)
+    }
+
+    /// Returns a sanitized summary of the account plans API. This proves
+    /// whether account-level plan data exists, but intentionally does not
+    /// claim that its provider/plan IDs authorize any particular linear TV
+    /// channel: no verified mapping to Channel::package_ids exists yet.
+    pub async fn plan_summary(&self) -> Option<TvPlanSummary> {
+        if !self.logged_in() {
+            return None;
+        }
+        if let Some((summary, fetched_at)) = self.plan_summary_cache.read().unwrap().as_ref() {
+            if fetched_at.elapsed() < PLAN_SUMMARY_CACHE_TTL {
+                return Some(summary.clone());
+            }
+        }
+        let summary = self.plan_summary_from(ACTIVE_PLANS_API_URL).await.ok()?;
+        *self.plan_summary_cache.write().unwrap() = Some((summary.clone(), Instant::now()));
+        Some(summary)
+    }
+
+    async fn plan_summary_from(&self, url: &str) -> anyhow::Result<TvPlanSummary> {
+        let creds = self
+            .creds
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not logged in"))?;
+        let mut req = self
+            .client
+            .get(url)
+            .header(reqwest::header::USER_AGENT, "okhttp/4.12.0")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header("devicetype", "phone")
+            .header("os", "android")
+            .header("versionCode", "422")
+            .header("Connection", "close");
+        if !creds.access_token.is_empty() {
+            req = req.header("accesstoken", &creds.access_token);
+        }
+        if !creds.unique_id.is_empty() {
+            req = req.header("uniqueId", &creds.unique_id);
+        }
+        let response = req
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<ActivePlansResponse>()
+            .await?;
+        Ok(response.summary())
     }
 
     /// The form headers `Television::New` builds in the Go version, sent on
@@ -358,7 +610,12 @@ impl Television {
     }
 
     fn access_token(&self) -> String {
-        self.creds.read().unwrap().as_ref().map(|c| c.access_token.clone()).unwrap_or_default()
+        self.creds
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|c| c.access_token.clone())
+            .unwrap_or_default()
     }
 
     /// Requests a playback URL for a live channel (`POST
@@ -367,8 +624,11 @@ impl Television {
     /// extraction/propagation across every URL field in the response (the
     /// API does not set it via `Set-Cookie` on this call).
     pub async fn live(&self, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
-        self.live_at(&format!("https://{JIOTV_API_DOMAIN}{PLAYBACK_API_PATH}"), channel_id)
-            .await
+        self.live_at(
+            &format!("https://{JIOTV_API_DOMAIN}{PLAYBACK_API_PATH}"),
+            channel_id,
+        )
+        .await
     }
 
     pub async fn live_at(&self, url: &str, channel_id: &str) -> anyhow::Result<LiveUrlOutput> {
@@ -378,7 +638,10 @@ impl Television {
             ("begin", chrono_like_now("%Y%m%dT%H%M%S")),
             ("srno", chrono_like_now("%Y%m%d")),
         ];
-        let mut req = self.client.post(url).header("accessToken", self.access_token());
+        let mut req = self
+            .client
+            .post(url)
+            .header("accessToken", self.access_token());
         for (k, v) in self.playback_headers() {
             req = req.header(k, v);
         }
@@ -389,12 +652,31 @@ impl Television {
     }
 
     /// Requests a catchup playback URL, mirroring `Television.GetCatchupURL`.
-    pub async fn catchup_url(&self, channel_id: &str, srno: &str, start: &str, end: &str) -> anyhow::Result<LiveUrlOutput> {
-        self.catchup_url_at(&format!("https://{JIOTV_API_DOMAIN}{PLAYBACK_API_PATH}"), channel_id, srno, start, end)
-            .await
+    pub async fn catchup_url(
+        &self,
+        channel_id: &str,
+        srno: &str,
+        start: &str,
+        end: &str,
+    ) -> anyhow::Result<LiveUrlOutput> {
+        self.catchup_url_at(
+            &format!("https://{JIOTV_API_DOMAIN}{PLAYBACK_API_PATH}"),
+            channel_id,
+            srno,
+            start,
+            end,
+        )
+        .await
     }
 
-    pub async fn catchup_url_at(&self, url: &str, channel_id: &str, srno: &str, start: &str, end: &str) -> anyhow::Result<LiveUrlOutput> {
+    pub async fn catchup_url_at(
+        &self,
+        url: &str,
+        channel_id: &str,
+        srno: &str,
+        start: &str,
+        end: &str,
+    ) -> anyhow::Result<LiveUrlOutput> {
         let form = [
             ("stream_type", "Catchup".to_string()),
             ("channel_id", channel_id.to_string()),
@@ -404,7 +686,10 @@ impl Television {
             ("begin", start.to_string()),
             ("end", end.to_string()),
         ];
-        let mut req = self.client.post(url).header("accessToken", self.access_token());
+        let mut req = self
+            .client
+            .post(url)
+            .header("accessToken", self.access_token());
         for (k, v) in self.playback_headers() {
             req = req.header(k, v);
         }
@@ -442,7 +727,10 @@ impl Television {
             .iter()
             .filter_map(|v| v.to_str().ok())
             .find_map(|sc| {
-                sc.split(';').map(str::trim).find_map(|part| part.strip_prefix("__hdnea__=")).map(str::to_string)
+                sc.split(';')
+                    .map(str::trim)
+                    .find_map(|part| part.strip_prefix("__hdnea__="))
+                    .map(str::to_string)
             })
             .unwrap_or_default();
         let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
@@ -456,7 +744,9 @@ use axum::http::header;
 
 fn chrono_like_now(fmt: &str) -> String {
     // Avoids pulling in the `chrono` crate for two UTC timestamp formats.
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
     let (y, m, d, hh, mm, ss) = civil_from_unix(now.as_secs());
     match fmt {
         "%Y%m%d" => format!("{y:04}{m:02}{d:02}"),
@@ -532,7 +822,11 @@ pub fn select_best_live_hls_url(live: &LiveUrlOutput, quality: &str) -> String {
 /// in the Go tree (used for extras channels that fall back between HLS/DASH).
 pub fn has_dash(r: &LiveUrlOutput) -> bool {
     let b = r.mpd.resolved_bitrates();
-    !b.auto.is_empty() || !b.high.is_empty() || !b.medium.is_empty() || !b.low.is_empty() || !r.mpd.result.is_empty()
+    !b.auto.is_empty()
+        || !b.high.is_empty()
+        || !b.medium.is_empty()
+        || !b.low.is_empty()
+        || !r.mpd.result.is_empty()
 }
 
 /// Mirrors `selectBestLiveMPDURL`.
@@ -575,8 +869,16 @@ pub fn generate_m3u_playlist(
     out.push_str("/epg.xml.gz\"\n");
     let logo_url = format!("{}/jtvimage", opts.host_url);
 
-    let langs: Vec<&str> = opts.languages.split(',').filter(|s| !s.is_empty()).collect();
-    let skip_genres: Vec<&str> = opts.skip_genres.split(',').filter(|s| !s.is_empty()).collect();
+    let langs: Vec<&str> = opts
+        .languages
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let skip_genres: Vec<&str> = opts
+        .skip_genres
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .collect();
 
     for ch in channels {
         if !is_playable(&ch.id) {
@@ -619,14 +921,19 @@ pub fn generate_m3u_playlist(
             (url, String::new())
         };
 
-        let channel_logo_url = if ch.logo_url.starts_with("http://") || ch.logo_url.starts_with("https://") {
-            ch.logo_url.clone()
-        } else {
-            format!("{}/{}", logo_url, ch.logo_url)
-        };
+        let channel_logo_url =
+            if ch.logo_url.starts_with("http://") || ch.logo_url.starts_with("https://") {
+                ch.logo_url.clone()
+            } else {
+                format!("{}/{}", logo_url, ch.logo_url)
+            };
 
         let group_title = match opts.split_category {
-            "split" => format!("{} - {}", category_name(ch.category), language_name(ch.language)),
+            "split" => format!(
+                "{} - {}",
+                category_name(ch.category),
+                language_name(ch.language)
+            ),
             "language" => language_name(ch.language).to_string(),
             _ => category_name(ch.category).to_string(),
         };
@@ -660,6 +967,69 @@ mod tests {
         let json = r#"{"channel_id": 154, "channel_name": "Test", "logoUrl": "x.png"}"#;
         let ch: Channel = serde_json::from_str(json).unwrap();
         assert_eq!(ch.id, "154");
+    }
+
+    #[test]
+    fn parses_upstream_entitlement_metadata() {
+        let json = r#"{
+            "channel_id":154,
+            "channel_name":"Sony SAB",
+            "business_type":"premium",
+            "plan_type":"premium",
+            "packageIds":["1",6,"7",23],
+            "playbackRightIds":["1",4],
+            "is_premium":true
+        }"#;
+        let ch: Channel = serde_json::from_str(json).unwrap();
+        assert_eq!(ch.plan_type, "premium");
+        assert_eq!(ch.package_ids, vec!["1", "6", "7", "23"]);
+        assert_eq!(ch.playback_right_ids, vec!["1", "4"]);
+        assert!(ch.is_premium);
+    }
+
+    #[tokio::test]
+    async fn active_plans_summary_uses_authenticated_account_endpoint_shape() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/plans"))
+            .and(header("accesstoken", "redacted-access"))
+            .and(header("uniqueId", "redacted-unique"))
+            .and(header("devicetype", "phone"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "PackageInfo": [
+                    {
+                        "isactive": false,
+                        "packageDetail": {"providers": [{"id": "inactive-provider"}]}
+                    },
+                    {
+                        "isactive": true,
+                        "packageDetail": {
+                            "providers": [
+                                {"id": "provider-a", "name": "Provider A"},
+                                {"providerId": "provider-b", "providerName": "Provider B"}
+                            ]
+                        }
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let tv = Television::new(reqwest::Client::new());
+        tv.set_credentials(Credentials {
+            access_token: "redacted-access".into(),
+            unique_id: "redacted-unique".into(),
+            ..Default::default()
+        });
+        let summary = tv
+            .plan_summary_from(&format!("{}/plans", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(summary.active_plan_count, 1);
+        assert_eq!(summary.provider_count, 2);
     }
 
     #[test]
@@ -706,7 +1076,10 @@ mod tests {
 
     #[test]
     fn language_filter_excludes_other_languages() {
-        let channels = vec![channel("1", "Hindi Ch", 5, 1), channel("2", "English Ch", 5, 6)];
+        let channels = vec![
+            channel("1", "Hindi Ch", 5, 1),
+            channel("2", "English Ch", 5, 6),
+        ];
         let opts = PlaylistOptions {
             host_url: "http://h",
             quality: "",

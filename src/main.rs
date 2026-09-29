@@ -8,6 +8,8 @@ mod custom_channels;
 mod dash;
 mod drm_channels;
 mod epg;
+mod extras;
+mod extras_state;
 mod keyed_locks;
 mod login;
 mod secureurl;
@@ -18,8 +20,6 @@ mod stream;
 mod television;
 mod token_refresh;
 mod tunnel;
-mod extras;
-mod extras_state;
 mod unlock;
 mod update;
 mod vod;
@@ -44,13 +44,14 @@ fn main() -> anyhow::Result<()> {
     let cfg = config::Config::load(args.config.as_deref())?;
     init_logging(&cfg);
 
-
     let path_prefix = resolve_path_prefix(&cfg)?;
     let store = Arc::new(store::Store::open(&path_prefix)?);
     let access = Arc::new(access::Access::new(store.clone()));
     let secure = Arc::new(secureurl::SecureUrl::new(cfg.disable_url_encryption));
     if cfg.disable_url_encryption {
-        eprintln!("Warning! URL encryption is disabled. Anyone can pass modified URLs to your server.");
+        eprintln!(
+            "Warning! URL encryption is disabled. Anyone can pass modified URLs to your server."
+        );
     }
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -71,48 +72,28 @@ fn main() -> anyhow::Result<()> {
         cli::Command::AdminPassword => admin_password(&access),
         cli::Command::KeyShow => show_key(&access),
         cli::Command::KeyRotate => rotate_key(&access),
-        cli::Command::EpgGenerate => runtime.block_on(epg_generate(&path_prefix)),
+        cli::Command::EpgGenerate => {
+            runtime.block_on(epg_generate(&cfg, &path_prefix, store, access, secure))
+        }
         cli::Command::EpgDelete => epg_delete(&path_prefix),
         cli::Command::BackgroundStart { args } => background_start(&args, &path_prefix),
         cli::Command::BackgroundStop => background_stop(&path_prefix),
         cli::Command::Update { version } => runtime.block_on(update::run(version.as_deref())),
-        cli::Command::Autostart { args: serve_args } => autostart::install(&serve_args, args.config.as_deref(), &path_prefix),
+        cli::Command::Autostart { args: serve_args } => {
+            autostart::install(&serve_args, args.config.as_deref(), &path_prefix)
+        }
         cli::Command::AutostartRemove => autostart::remove(),
         cli::Command::Help => unreachable!(),
     }
 }
 
-/// Regenerates `epg.xml.gz` once if it's missing or more than a day old,
-/// then keeps regenerating roughly once every 24h (jittered by up to an
-/// hour either way, off-peak-ish like the Go version's random schedule)
-/// for as long as the server runs. Mirrors `epg.Init`'s startup check plus
-/// its "schedule the next run" loop, without reproducing its exact
-/// day+1-at-a-random-hour arithmetic.
-async fn epg_task_loop(state: Arc<state::AppState>, http: reqwest::Client, epg_path: String) {
+/// Keeps the active context's XMLTV cache fresh. Identity validation happens
+/// before the age check, so a young cache from another account or mode is
+/// never reused.
+async fn epg_task_loop(state: Arc<state::AppState>) {
     loop {
-        let needs_generation = match std::fs::metadata(&epg_path) {
-            Ok(meta) => meta
-                .modified()
-                .ok()
-                .and_then(|m| m.elapsed().ok())
-                .map(|age| age > std::time::Duration::from_secs(24 * 60 * 60))
-                .unwrap_or(true),
-            Err(_) => true,
-        };
-        if needs_generation {
-            println!("Generating EPG file in the background (JIOTV_EPG=true)...");
-            let (extra_channels, extra_programmes) = if state.extras.enabled() {
-                state.extras.epg_source(&state.tv).await.unwrap_or_else(|e| {
-                    tracing::warn!("extras EPG source skipped: {e}");
-                    (Vec::new(), Vec::new())
-                })
-            } else {
-                (Vec::new(), Vec::new())
-            };
-            match epg::generate_xml_gz_with(&http, &epg_path, extra_channels, extra_programmes).await {
-                Ok(()) => println!("EPG file generated at {epg_path}"),
-                Err(e) => tracing::warn!("EPG generation failed: {e}"),
-            }
+        if let Err(e) = epg::ensure_current_cache(&state).await {
+            tracing::warn!("EPG generation failed: {e}");
         }
 
         let jitter_secs: i64 = {
@@ -125,13 +106,19 @@ async fn epg_task_loop(state: Arc<state::AppState>, http: reqwest::Client, epg_p
     }
 }
 
-async fn epg_generate(path_prefix: &str) -> anyhow::Result<()> {
+async fn epg_generate(
+    cfg: &config::Config,
+    path_prefix: &str,
+    store: Arc<store::Store>,
+    access: Arc<access::Access>,
+    secure: Arc<secureurl::SecureUrl>,
+) -> anyhow::Result<()> {
     let path = format!("{path_prefix}epg.xml.gz");
     println!("Deleting existing EPG file if exists");
-    let _ = std::fs::remove_file(&path);
+    epg_delete_files(&path)?;
     println!("Generating new EPG file... this can take a few minutes.");
-    let client = reqwest::Client::new();
-    epg::generate_xml_gz(&client, &path).await?;
+    let state = build_app_state(cfg, path_prefix, store, access, secure)?;
+    epg::regenerate_for_state(&state).await?;
     println!("EPG file generated successfully at {path}");
     Ok(())
 }
@@ -174,8 +161,12 @@ fn background_start(args: &str, path_prefix: &str) -> anyhow::Result<()> {
 fn background_stop(path_prefix: &str) -> anyhow::Result<()> {
     println!("Stopping jiotv server running in background...");
     let pid_path = format!("{path_prefix}{PID_FILE_NAME}");
-    let pid_str = std::fs::read_to_string(&pid_path).map_err(|e| anyhow::anyhow!("failed to read PID file: {e}"))?;
-    let pid: u32 = pid_str.trim().parse().map_err(|_| anyhow::anyhow!("failed to parse PID file"))?;
+    let pid_str = std::fs::read_to_string(&pid_path)
+        .map_err(|e| anyhow::anyhow!("failed to read PID file: {e}"))?;
+    let pid: u32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("failed to parse PID file"))?;
 
     #[cfg(unix)]
     {
@@ -209,10 +200,26 @@ extern "C" {
 fn epg_delete(path_prefix: &str) -> anyhow::Result<()> {
     let path = format!("{path_prefix}epg.xml.gz");
     println!("Deleting existing EPG file if exists");
-    match std::fs::remove_file(&path) {
-        Ok(()) => println!("EPG file deleted"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("EPG file does not exist"),
-        Err(e) => return Err(e.into()),
+    let existed = std::path::Path::new(&path).exists();
+    epg_delete_files(&path)?;
+    println!(
+        "{}",
+        if existed {
+            "EPG file deleted"
+        } else {
+            "EPG file does not exist"
+        }
+    );
+    Ok(())
+}
+
+fn epg_delete_files(path: &str) -> anyhow::Result<()> {
+    for candidate in [path.to_string(), format!("{path}.context.json")] {
+        match std::fs::remove_file(candidate) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
     }
     Ok(())
 }
@@ -237,11 +244,16 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     let prefix = if !cfg.path_prefix.is_empty() {
         cfg.path_prefix.clone()
     } else {
-        let home = home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve the user profile directory"))?;
+        let home = home_dir()
+            .ok_or_else(|| anyhow::anyhow!("cannot resolve the user profile directory"))?;
         format!("{home}/.jiotv_go")
     };
     std::fs::create_dir_all(&prefix)?;
-    Ok(if prefix.ends_with('/') { prefix } else { format!("{prefix}/") })
+    Ok(if prefix.ends_with('/') {
+        prefix
+    } else {
+        format!("{prefix}/")
+    })
 }
 
 fn home_dir() -> Option<String> {
@@ -282,56 +294,36 @@ async fn serve(
     secure: Arc<secureurl::SecureUrl>,
     args: cli::ServeArgs,
 ) -> anyhow::Result<()> {
-    let http = reqwest::Client::builder().build()?;
-    let device_id = device_id(&store)?;
-    let tv = Arc::new(television::Television::with_device_id(http.clone(), device_id));
-    if let Some(creds) = login::load(&store) {
-        tv.set_credentials(creds);
+    let state = build_app_state(&cfg, &path_prefix, store, access.clone(), secure)?;
+    if state.extras.enabled() {
+        println!(
+            "extras enabled{}",
+            if state.extras.connected() {
+                " (logged in)"
+            } else {
+                " (run `jiotv extras login`)"
+            }
+        );
     }
 
-    let custom_channels = Arc::new(custom_channels::CustomChannels::new());
-    if !cfg.custom_channels_file.is_empty() {
-        match custom_channels.load(&cfg.custom_channels_file) {
-            Ok(n) => println!("Loaded {n} custom channels from {}", cfg.custom_channels_file),
-            Err(e) => eprintln!("Warning: could not load custom channels from {}: {e}", cfg.custom_channels_file),
+    let epg_path = format!("{path_prefix}epg.xml.gz");
+    if cfg.epg || std::path::Path::new(&epg_path).exists() {
+        if let Err(e) = epg::prepare_cache_for_state(&state).await {
+            state.epg_state.invalidate();
+            tracing::warn!("cannot validate the EPG cache for the active account: {e}");
         }
     }
-
-    let stored_unlocked = store.get_opt(unlock::STORE_KEY_UNLOCKED).as_deref() == Some("true");
-    let extras_state = Arc::new(extras_state::ExtrasState::new(cfg.extras, stored_unlocked));
-    extras_state.init(&http, &store);
-    if cfg.extras || stored_unlocked {
-        println!("extras enabled{}", if extras_state.connected() { " (logged in)" } else { " (run `jiotv extras login`)" });
-    }
-    let public_ip = Arc::new(unlock::PublicIp::new(http.clone()));
-    let unlock_limiter = Arc::new(unlock::AttemptLimiter::default());
-
-    let state = Arc::new(state::AppState {
-        config: cfg.clone(),
-        path_prefix: path_prefix.clone(),
-        access: access.clone(),
-        store,
-        tv,
-        secure,
-        http: http.clone(),
-        drm_channels: Default::default(),
-        custom_channels,
-        render_caches: Default::default(),
-        dash_state: Default::default(),
-        extras: extras_state,
-        vod_state: Default::default(),
-        public_ip,
-        unlock_limiter,
-    });
-
     if cfg.epg {
-        let epg_path = format!("{path_prefix}epg.xml.gz");
-        tokio::spawn(epg_task_loop(state.clone(), http, epg_path));
+        tokio::spawn(epg_task_loop(state.clone()));
     }
 
     if !cfg.disable_auth {
         let playlist = access.playlist_path()?;
-        println!("Playlist: http://{}:{}{playlist}", display_host(&args.host), args.port);
+        println!(
+            "Playlist: http://{}:{}{playlist}",
+            display_host(&args.host),
+            args.port
+        );
         #[cfg(feature = "full")]
         if !access.has_password() {
             let setup = playlist.trim_end_matches("playlist.m3u").to_string();
@@ -350,7 +342,8 @@ async fn serve(
 
     let mut tunnel_handle = None;
     if args.tunnel {
-        let data_dir = std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".jiotv_go"))?;
+        let data_dir =
+            std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".jiotv_go"))?;
         let cloudflared = tunnel::ensure_cloudflared(&data_dir).await?;
         if let Some(token) = &args.tunnel_token {
             let t = tunnel::Tunnel::spawn_named(&cloudflared, token).await?;
@@ -360,7 +353,9 @@ async fn serve(
             let port: u16 = args.port.parse().unwrap_or(5001);
             let (t, url) = tunnel::Tunnel::spawn_quick(&cloudflared, port).await?;
             tunnel_handle = Some(t);
-            let key_playlist = access.playlist_path().unwrap_or_else(|_| "/playlist.m3u".to_string());
+            let key_playlist = access
+                .playlist_path()
+                .unwrap_or_else(|_| "/playlist.m3u".to_string());
             println!("Public playlist: {url}{key_playlist}");
         }
     }
@@ -374,6 +369,65 @@ async fn serve(
         t.kill().await;
     }
     serve_result.map_err(Into::into)
+}
+
+fn build_app_state(
+    cfg: &config::Config,
+    path_prefix: &str,
+    store: Arc<store::Store>,
+    access: Arc<access::Access>,
+    secure: Arc<secureurl::SecureUrl>,
+) -> anyhow::Result<Arc<state::AppState>> {
+    let http = reqwest::Client::builder().build()?;
+    let device_id = device_id(&store)?;
+    let tv = Arc::new(television::Television::with_device_id(
+        http.clone(),
+        device_id,
+    ));
+    if let Some(creds) = login::load(&store) {
+        tv.set_credentials(creds);
+    }
+
+    let custom_channels = Arc::new(custom_channels::CustomChannels::new());
+    if !cfg.custom_channels_file.is_empty() {
+        match custom_channels.load(&cfg.custom_channels_file) {
+            Ok(n) => println!(
+                "Loaded {n} custom channels from {}",
+                cfg.custom_channels_file
+            ),
+            Err(e) => eprintln!(
+                "Warning: could not load custom channels from {}: {e}",
+                cfg.custom_channels_file
+            ),
+        }
+    }
+
+    let stored_override = match store.get_opt(unlock::STORE_KEY_UNLOCKED).as_deref() {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    };
+    let extras_state = Arc::new(extras_state::ExtrasState::new(cfg.extras, stored_override));
+    extras_state.init(&http, &store);
+
+    Ok(Arc::new(state::AppState {
+        config: cfg.clone(),
+        path_prefix: path_prefix.to_string(),
+        access,
+        store,
+        tv,
+        secure,
+        http: http.clone(),
+        drm_channels: Default::default(),
+        custom_channels,
+        render_caches: Default::default(),
+        dash_state: Default::default(),
+        epg_state: Default::default(),
+        extras: extras_state,
+        vod_state: Default::default(),
+        public_ip: Arc::new(unlock::PublicIp::new(http)),
+        unlock_limiter: Arc::new(unlock::AttemptLimiter::default()),
+    }))
 }
 
 async fn shutdown_signal() {
@@ -427,23 +481,41 @@ async fn extras_login_cli(store: &store::Store) -> anyhow::Result<()> {
     std::io::stdin().read_line(&mut number)?;
     let number = number.trim().to_string();
 
-    let mut resp = client.send_otp(&number, "").await.map_err(|e| anyhow::anyhow!("could not send the OTP: {e}"))?;
+    let mut resp = client
+        .send_otp(&number, "")
+        .await
+        .map_err(|e| anyhow::anyhow!("could not send the OTP: {e}"))?;
     let conns = resp.connections();
     if !conns.is_empty() {
         println!("Connections on this number:");
         for (i, c) in conns.iter().enumerate() {
-            let tail = if c.identifier.len() > 4 { &c.identifier[c.identifier.len() - 4..] } else { &c.identifier };
-            println!("  {}. {}, {}, line ending {tail}", i + 1, c.name, c.product_name);
+            let tail = if c.identifier.len() > 4 {
+                &c.identifier[c.identifier.len() - 4..]
+            } else {
+                &c.identifier
+            };
+            println!(
+                "  {}. {}, {}, line ending {tail}",
+                i + 1,
+                c.name,
+                c.product_name
+            );
         }
         print!("Choose a connection: ");
         std::io::stdout().flush()?;
         let mut pick = String::new();
         std::io::stdin().read_line(&mut pick)?;
-        let pick: usize = pick.trim().parse().map_err(|_| anyhow::anyhow!("no such connection"))?;
+        let pick: usize = pick
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("no such connection"))?;
         if pick < 1 || pick > conns.len() {
             anyhow::bail!("no such connection");
         }
-        resp = client.send_otp(&number, &conns[pick - 1].identifier).await.map_err(|e| anyhow::anyhow!("could not send the OTP: {e}"))?;
+        resp = client
+            .send_otp(&number, &conns[pick - 1].identifier)
+            .await
+            .map_err(|e| anyhow::anyhow!("could not send the OTP: {e}"))?;
     }
     if resp.identifier.is_empty() {
         anyhow::bail!("extras did not send an OTP");
@@ -454,7 +526,9 @@ async fn extras_login_cli(store: &store::Store) -> anyhow::Result<()> {
     let mut otp = String::new();
     std::io::stdin().read_line(&mut otp)?;
 
-    let result = client.verify_otp(&number, &resp.identifier, otp.trim()).await;
+    let result = client
+        .verify_otp(&number, &resp.identifier, otp.trim())
+        .await;
     if let Some(cr) = client.credentials() {
         cr.save(store)?;
     }

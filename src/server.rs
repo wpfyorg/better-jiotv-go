@@ -42,10 +42,19 @@ fn content_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/jtvimage/:file", get(jtvimage))
         .route("/jtvposter/:date/:file", get(crate::epg::poster_handler))
         .route("/live/:id", get(crate::stream::live_handler))
-        .route("/live/:quality/:id", get(crate::stream::live_quality_handler))
+        .route(
+            "/live/:quality/:id",
+            get(crate::stream::live_quality_handler),
+        )
         .route("/live/mpd/:channelId", get(crate::dash::live_mpd_handler))
-        .route("/live/key/:channelId", axum::routing::any(crate::dash::live_key_handler))
-        .route("/catchup/stream/:id", get(crate::catchup::catchup_stream_handler))
+        .route(
+            "/live/key/:channelId",
+            axum::routing::any(crate::dash::live_key_handler),
+        )
+        .route(
+            "/catchup/stream/:id",
+            get(crate::catchup::catchup_stream_handler),
+        )
         .route("/epg.xml.gz", get(crate::epg::epg_handler))
         .route("/epg/:channelId/:offset", get(crate::epg::web_epg_handler))
         .with_state(state)
@@ -65,9 +74,18 @@ fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/login/sendOTP", post(crate::api::jiotv_send_otp))
         .route("/login/verifyOTP", post(crate::api::jiotv_verify_otp))
         .route("/extras/login/sendOTP", post(crate::api::extras_send_otp))
-        .route("/extras/login/verifyOTP", post(crate::api::extras_verify_otp))
-        .route("/api/extras/login/sendOTP", post(crate::api::extras_send_otp))
-        .route("/api/extras/login/verifyOTP", post(crate::api::extras_verify_otp))
+        .route(
+            "/extras/login/verifyOTP",
+            post(crate::api::extras_verify_otp),
+        )
+        .route(
+            "/api/extras/login/sendOTP",
+            post(crate::api::extras_send_otp),
+        )
+        .route(
+            "/api/extras/login/verifyOTP",
+            post(crate::api::extras_verify_otp),
+        )
         .route("/api/extras/logout", post(crate::api::extras_logout))
         .route("/api/extras/unlock", post(crate::api::extras_unlock))
         .route("/api/extras/lock", post(crate::api::extras_lock))
@@ -198,7 +216,10 @@ where
 
     fn call(&mut self, target: axum::serve::IncomingStream<'a>) -> Self::Future {
         let addr = target.remote_addr();
-        std::future::ready(Ok(ConnectInfoService { inner: self.inner.clone(), addr }))
+        std::future::ready(Ok(ConnectInfoService {
+            inner: self.inner.clone(),
+            addr,
+        }))
     }
 }
 
@@ -221,7 +242,8 @@ where
     }
 
     fn call(&mut self, mut req: Request) -> Self::Future {
-        req.extensions_mut().insert(axum::extract::ConnectInfo(self.addr));
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(self.addr));
         self.inner.call(req)
     }
 }
@@ -238,7 +260,10 @@ async fn route_request(state: Arc<AppState>, router: &mut Router, mut req: Reque
         let (given, tail) = rest.split_once('/').unwrap_or((rest, ""));
         let want = match state.access.key() {
             Ok(k) => k,
-            Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "access key unavailable").into_response(),
+            Err(_) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "access key unavailable")
+                    .into_response()
+            }
         };
         use subtle::ConstantTimeEq;
         if given.as_bytes().ct_eq(want.as_bytes()).unwrap_u8() != 1 {
@@ -306,16 +331,13 @@ async fn channels_or_playlist(
     prefix: Option<axum::Extension<KeyPrefix>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let mut list = match state.tv.channels().await {
+    let channels = match state.effective_channels().await {
         Ok(l) => l,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    state.extras.refresh_catalogue_if_needed(&state.tv).await;
-    list.result.extend(state.extras.exclusive_channels(&list.result));
-    list.result.extend(state.custom_channels.all());
 
     if q.get("type").map(String::as_str) != Some("m3u") {
-        return axum::Json(list.result).into_response();
+        return axum::Json(channels).into_response();
     }
 
     let host_url = base_url(&state, &prefix, &headers);
@@ -329,7 +351,7 @@ async fn channels_or_playlist(
         sub_filter: q.get("sub").unwrap_or(&empty),
     };
     let m3u = crate::television::generate_m3u_playlist(
-        &list.result,
+        &channels,
         &opts,
         |id| state.is_drm_channel(id),
         |id| state.is_playable(id),
@@ -337,12 +359,19 @@ async fn channels_or_playlist(
 
     Response::builder()
         .header(header::CONTENT_TYPE, "application/vnd.apple.mpegurl")
-        .header(header::CONTENT_DISPOSITION, "attachment; filename=jiotv_playlist.m3u")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=jiotv_playlist.m3u",
+        )
         .body(Body::from(m3u))
         .unwrap()
 }
 
-fn base_url(state: &AppState, prefix: &Option<axum::Extension<KeyPrefix>>, headers: &axum::http::HeaderMap) -> String {
+fn base_url(
+    state: &AppState,
+    prefix: &Option<axum::Extension<KeyPrefix>>,
+    headers: &axum::http::HeaderMap,
+) -> String {
     // TLS termination is handled by the `--tls` flag on `serve`, not by
     // config; this always renders http:// because the gate and playlist
     // links are meant to be followed from the same connection they came in
@@ -363,15 +392,22 @@ struct FileParam {
     file: String,
 }
 
-async fn jtvimage(axum::extract::Path(p): axum::extract::Path<FileParam>, State(state): State<Arc<AppState>>) -> Response {
-    let url = format!("https://jiotv.catchup.cdn.jio.com/dare_images/images/{}", p.file);
+async fn jtvimage(
+    axum::extract::Path(p): axum::extract::Path<FileParam>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
+    let url = format!(
+        "https://jiotv.catchup.cdn.jio.com/dare_images/images/{}",
+        p.file
+    );
     proxy_get(&state.http, &url).await
 }
 
 async fn proxy_get(client: &reqwest::Client, url: &str) -> Response {
     match client.get(url).send().await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let content_type = resp
                 .headers()
                 .get(header::CONTENT_TYPE)
@@ -393,7 +429,9 @@ async fn proxy_get(client: &reqwest::Client, url: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{access::Access, config::Config, secureurl::SecureUrl, store::Store, television::Television};
+    use crate::{
+        access::Access, config::Config, secureurl::SecureUrl, store::Store, television::Television,
+    };
     use tower::ServiceExt;
 
     /// A client that can never reach the real internet: every one of Jio's
@@ -433,14 +471,18 @@ mod tests {
             path_prefix: String::new(),
             access: Arc::new(Access::new(store.clone())),
             store,
-            tv: Arc::new(Television::with_device_id(http.clone(), "test-device".to_string())),
+            tv: Arc::new(Television::with_device_id(
+                http.clone(),
+                "test-device".to_string(),
+            )),
             secure: Arc::new(SecureUrl::new(false)),
             http,
             drm_channels: Default::default(),
             custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
-            extras: Arc::new(crate::extras_state::ExtrasState::new(false, false)),
+            epg_state: Default::default(),
+            extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
@@ -455,8 +497,46 @@ mod tests {
     }
 
     async fn body_text(resp: Response) -> String {
-        let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    fn prime_tv_channel(state: &AppState, id: &str) {
+        state.tv.set_credentials(crate::television::Credentials {
+            sso_token: "test-sso".into(),
+            crm: "test-crm".into(),
+            unique_id: "test-user".into(),
+            access_token: "test-access".into(),
+            refresh_token: "test-refresh".into(),
+        });
+        state
+            .tv
+            .set_channels_for_test(vec![crate::television::Channel {
+                id: id.into(),
+                name: "Test".into(),
+                ..Default::default()
+            }]);
+    }
+
+    #[tokio::test]
+    async fn rotated_epoch_preserves_stale_manifest_and_license_rejections() {
+        let state = test_state();
+        prime_tv_channel(&state, "154");
+        let stale_manifest = state.secure.encrypt("https://example.invalid/live.m3u8");
+        let stale_license = state.secure.encrypt("https://example.invalid/license");
+        state.invalidate_context();
+
+        let manifest = send(
+            state.clone(),
+            &format!("/render.m3u8?auth={stale_manifest}&channel_key_id=154"),
+        )
+        .await;
+        assert_eq!(manifest.status(), StatusCode::BAD_REQUEST);
+
+        let license = send(state, &format!("/drm?auth={stale_license}&channel_id=154")).await;
+        assert_eq!(license.status(), StatusCode::FORBIDDEN);
     }
 
     /// Never again: a request rewritten to strip `/k/<key>` must reach the
@@ -467,7 +547,12 @@ mod tests {
     /// handler under the prefix with a 500 "Wrong number of path arguments").
     const PATH_EXTRACTION_FAILURE: &str = "Wrong number of path arguments";
 
-    async fn assert_reaches_handler(state: Arc<AppState>, key: &str, session_cookie: Option<&str>, path: &str) {
+    async fn assert_reaches_handler(
+        state: Arc<AppState>,
+        key: &str,
+        session_cookie: Option<&str>,
+        path: &str,
+    ) {
         // Keyed form.
         let resp = send(state.clone(), &format!("/k/{key}{path}")).await;
         let status = resp.status();
@@ -476,7 +561,11 @@ mod tests {
             !body.contains(PATH_EXTRACTION_FAILURE),
             "keyed {path} hit the path-extraction bug: {body}"
         );
-        assert_ne!(status, StatusCode::NOT_FOUND, "keyed {path} didn't match any route");
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "keyed {path} didn't match any route"
+        );
 
         // Unkeyed form, with an admin session standing in for the browser UI.
         let mut svc = GatedService::new(state.clone());
@@ -492,7 +581,11 @@ mod tests {
             !body.contains(PATH_EXTRACTION_FAILURE),
             "unkeyed {path} hit the path-extraction bug: {body}"
         );
-        assert_ne!(status, StatusCode::NOT_FOUND, "unkeyed {path} didn't match any route");
+        assert_ne!(
+            status,
+            StatusCode::NOT_FOUND,
+            "unkeyed {path} didn't match any route"
+        );
     }
 
     #[tokio::test]
@@ -520,27 +613,34 @@ mod tests {
         let state = test_state();
         let key = state.access.key().unwrap();
         state.access.set_password("hunter22hunter").unwrap();
-        let session = state.access.new_session(std::time::SystemTime::now()).unwrap();
+        let session = state
+            .access
+            .new_session(std::time::SystemTime::now())
+            .unwrap();
         let cookie = format!("{}={session}", crate::access::SESSION_COOKIE);
 
         // Custom channels short-circuit before any network call, so they
         // exercise real extraction+handler logic with zero upstream I/O.
-        let custom_json = r#"{"channels":[{"id":"custom1","name":"Custom","url":"https://example.com/x.m3u8"}]}"#;
+        let custom_json =
+            r#"{"channels":[{"id":"custom1","name":"Custom","url":"https://example.com/x.m3u8"}]}"#;
         let dir = tempfile::tempdir().unwrap();
         let custom_path = dir.path().join("custom.json");
         std::fs::write(&custom_path, custom_json).unwrap();
-        state.custom_channels.load(custom_path.to_str().unwrap()).unwrap();
+        state
+            .custom_channels
+            .load(custom_path.to_str().unwrap())
+            .unwrap();
 
         let paths = [
             "/live/custom1",
             "/live/high/custom1",
             "/live/mpd/custom1",
-            // Not custom-channel-shortcut routes: these run far enough to
-            // attempt a real upstream call, which the blackholed client
-            // turns into a fast connection error rather than a live request.
-            "/live/key/999999",
-            "/catchup/stream/999999?start=1700000000000&end=1700000100000",
-            "/epg/999999/0",
+            // These do not all have a custom-channel fast path, but using a
+            // known local ID gets them past the catalogue authorization gate
+            // before their own handler validation/upstream work.
+            "/live/key/custom1",
+            "/catchup/stream/custom1?start=1700000000000&end=1700000100000",
+            "/epg/custom1/0",
             "/jtvimage/does-not-exist.png",
             "/jtvposter/2024-01-01/does-not-exist.png",
             // extras is off in this test state, so these resolve at
@@ -568,10 +668,19 @@ mod tests {
         let mock_addr = mock.uri().trim_start_matches("http://").to_string();
 
         let state = test_state();
+        let custom_json =
+            r#"{"channels":[{"id":"custom1","name":"Custom","url":"https://example.com/x.m3u8"}]}"#;
+        let dir = tempfile::tempdir().unwrap();
+        let custom_path = dir.path().join("custom.json");
+        std::fs::write(&custom_path, custom_json).unwrap();
+        state
+            .custom_channels
+            .load(custom_path.to_str().unwrap())
+            .unwrap();
         let key = state.access.key().unwrap();
         let enc_host = state.secure.encrypt_deterministic(&mock_addr);
         let enc_path = state.secure.encrypt_deterministic("/seg/");
-        let path = format!("/render.dash/host/{enc_host}/path/{enc_path}/init.mp4");
+        let path = format!("/render.dash/channel/custom1/host/{enc_host}/path/{enc_path}/init.mp4");
 
         // /render.dash is an open path (no key needed), but it's still a
         // parameterised route, so confirm it also works fine reached
@@ -586,7 +695,30 @@ mod tests {
         let status = resp.status();
         let body = body_text(resp).await;
         assert!(!body.contains(PATH_EXTRACTION_FAILURE));
-        assert_eq!(status, StatusCode::BAD_GATEWAY, "expected a failed https connection to the plain-http mock: {body}");
+        assert_eq!(
+            status,
+            StatusCode::BAD_GATEWAY,
+            "expected a failed https connection to the plain-http mock: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn render_proxies_require_channel_identity() {
+        let state = test_state();
+        for path in [
+            "/render.m3u8?auth=x",
+            "/render.ts?auth=x",
+            "/render.key?auth=x",
+            "/render.mpd?auth=x",
+            "/drm?auth=x",
+        ] {
+            let resp = send(state.clone(), path).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "{path} must not proxy without a channel id"
+            );
+        }
     }
 
     #[tokio::test]

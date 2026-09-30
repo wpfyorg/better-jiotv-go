@@ -8,8 +8,8 @@
 //! server, an explicitly owner-approved exception to "only proxy this
 //! app's own hosts".
 
-use crate::state::AppState;
 use crate::extras::{PlaybackData, Rail, VodItem};
+use crate::state::AppState;
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, Method, StatusCode};
@@ -43,20 +43,35 @@ impl VodState {
         map.retain(|_, (_, at)| at.elapsed() <= PLAYBACK_TTL);
         map.insert(id.to_string(), (data, Instant::now()));
     }
+
+    pub fn clear(&self) {
+        self.playback.lock().unwrap().clear();
+        *self.playlist.lock().unwrap() = None;
+    }
 }
 
 fn valid_content_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-async fn vod_playback(state: &AppState, content_id: &str, fresh: bool) -> anyhow::Result<PlaybackData> {
+async fn vod_playback(
+    state: &AppState,
+    content_id: &str,
+    fresh: bool,
+) -> anyhow::Result<PlaybackData> {
     if let Some(cached) = state.vod_state.get_playback(content_id, fresh) {
         return Ok(cached);
     }
     if let Err(e) = state.extras.ensure_token(false, &state.store).await {
         tracing::warn!("extras: token refresh failed: {e}");
     }
-    let client = state.extras.client_for_vod().ok_or_else(|| anyhow::anyhow!("connect the extra source in Settings to watch on-demand titles"))?;
+    let client = state.extras.client_for_vod().ok_or_else(|| {
+        anyhow::anyhow!("connect the extra source in Settings to watch on-demand titles")
+    })?;
     let resp = client.playback(content_id).await?;
     state.vod_state.set_playback(content_id, resp.data.clone());
     Ok(resp.data)
@@ -67,10 +82,12 @@ fn err(status: StatusCode, message: impl Into<String>) -> Response {
 }
 
 fn require_client(state: &AppState) -> Result<Arc<crate::extras::Client>, Box<Response>> {
-    state
-        .extras
-        .client_for_vod()
-        .ok_or_else(|| Box::new(err(StatusCode::SERVICE_UNAVAILABLE, "connect the extra source in Settings to watch on-demand titles")))
+    state.extras.client_for_vod().ok_or_else(|| {
+        Box::new(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "connect the extra source in Settings to watch on-demand titles",
+        ))
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -79,7 +96,10 @@ pub struct SearchQuery {
 }
 
 /// `GET /api/ott/search?q=`
-pub async fn api_ott_search(State(state): State<Arc<AppState>>, Query(q): Query<SearchQuery>) -> Response {
+pub async fn api_ott_search(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SearchQuery>,
+) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
         Err(r) => return *r,
@@ -103,7 +123,11 @@ pub struct PageQuery {
 }
 
 /// `GET /api/ott/screen/:id?page=`
-pub async fn api_ott_screen(Path(id): Path<String>, Query(q): Query<PageQuery>, State(state): State<Arc<AppState>>) -> Response {
+pub async fn api_ott_screen(
+    Path(id): Path<String>,
+    Query(q): Query<PageQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
         Err(r) => return *r,
@@ -124,7 +148,11 @@ pub struct SeasonQuery {
 }
 
 /// `GET /api/ott/show/:id?season=`
-pub async fn api_ott_episodes(Path(id): Path<String>, Query(q): Query<SeasonQuery>, State(state): State<Arc<AppState>>) -> Response {
+pub async fn api_ott_episodes(
+    Path(id): Path<String>,
+    Query(q): Query<SeasonQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
         Err(r) => return *r,
@@ -136,7 +164,10 @@ pub async fn api_ott_episodes(Path(id): Path<String>, Query(q): Query<SeasonQuer
         Ok(episodes) => axum::Json(json!({"episodes": episodes})).into_response(),
         Err(e) => {
             tracing::warn!("extras episodes: {e}");
-            err(StatusCode::INTERNAL_SERVER_ERROR, "cannot load the episodes")
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "cannot load the episodes",
+            )
         }
     }
 }
@@ -144,7 +175,10 @@ pub async fn api_ott_episodes(Path(id): Path<String>, Query(q): Query<SeasonQuer
 /// `GET /api/ott/play/:id`
 pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> Response {
     if require_client(&state).is_err() {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "connect the extra source in Settings to watch on-demand titles");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "connect the extra source in Settings to watch on-demand titles",
+        );
     }
     if !valid_content_id(&id) {
         return err(StatusCode::BAD_REQUEST, "invalid id");
@@ -153,7 +187,10 @@ pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppSta
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("extras on-demand playback {id}: {e}");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "this title cannot be played");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "this title cannot be played",
+            );
         }
     };
     if !crate::extras::is_supported_provider(&d.provider) {
@@ -163,7 +200,11 @@ pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppSta
     if stream.is_empty() {
         return err(StatusCode::NOT_FOUND, "no stream for this title");
     }
-    let license = if !d.key_url.is_empty() { format!("/api/ott/license/{id}") } else { String::new() };
+    let license = if !d.key_url.is_empty() {
+        format!("/api/ott/license/{id}")
+    } else {
+        String::new()
+    };
     axum::Json(json!({
         "name": d.name,
         "provider": d.provider,
@@ -178,7 +219,12 @@ pub async fn api_ott_play(Path(id): Path<String>, State(state): State<Arc<AppSta
 /// `POST /api/ott/license/:id` and (IPTV players) `POST /vod/license/:id`.
 /// Forwards a Widevine license request to the title's own license server
 /// (which provider hosts it varies) with the extra source app's headers.
-pub async fn ott_license(Path(id): Path<String>, State(state): State<Arc<AppState>>, method: Method, body: Bytes) -> Response {
+pub async fn ott_license(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+    method: Method,
+    body: Bytes,
+) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
         Err(r) => return *r,
@@ -206,7 +252,8 @@ pub async fn ott_license(Path(id): Path<String>, State(state): State<Arc<AppStat
 
     match req.send().await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
             let bytes = resp.bytes().await.unwrap_or_default();
             let mut builder = Response::builder().status(status);
@@ -221,9 +268,15 @@ pub async fn ott_license(Path(id): Path<String>, State(state): State<Arc<AppStat
 
 /// `GET /vod/:id` (`.mpd`/`.m3u8` suffix optional) — sends an IPTV player
 /// straight to a fresh stream URL.
-pub async fn vod_stream_handler(Path(id): Path<String>, State(state): State<Arc<AppState>>) -> Response {
+pub async fn vod_stream_handler(
+    Path(id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> Response {
     if require_client(&state).is_err() {
-        return err(StatusCode::SERVICE_UNAVAILABLE, "connect the extra source in Settings to watch on-demand titles");
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "connect the extra source in Settings to watch on-demand titles",
+        );
     }
     let id = id.trim_end_matches(".mpd").trim_end_matches(".m3u8");
     if !valid_content_id(id) {
@@ -233,7 +286,10 @@ pub async fn vod_stream_handler(Path(id): Path<String>, State(state): State<Arc<
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("extras on-demand playback {id}: {e}");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "this title cannot be played");
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "this title cannot be played",
+            );
         }
     };
     if !crate::extras::is_supported_provider(&d.provider) {
@@ -246,7 +302,13 @@ pub async fn vod_stream_handler(Path(id): Path<String>, State(state): State<Arc<
     Redirect::to(&stream).into_response()
 }
 
-const VOD_PLAYLIST_SCREENS: &[(&str, i64)] = &[("1", 4), ("100021", 6), ("100023", 6), ("100025", 4), ("100097", 4)];
+const VOD_PLAYLIST_SCREENS: &[(&str, i64)] = &[
+    ("1", 4),
+    ("100021", 6),
+    ("100023", 6),
+    ("100025", 4),
+    ("100097", 4),
+];
 const MAX_PLAYLIST_SHOWS: usize = 40;
 
 async fn build_vod_playlist(client: &crate::extras::Client) -> Vec<(VodItem, String)> {
@@ -278,7 +340,9 @@ async fn build_vod_playlist(client: &crate::extras::Client) -> Vec<(VodItem, Str
                     }
                     seen.insert(it.content_id.clone());
                     shows += 1;
-                    let Ok(episodes) = client.episodes(&it.content_id, 0).await else { continue };
+                    let Ok(episodes) = client.episodes(&it.content_id, 0).await else {
+                        continue;
+                    };
                     for mut ep in episodes {
                         if ep.show_name.is_empty() {
                             ep.show_name = it.name.clone();
@@ -297,7 +361,10 @@ async fn build_vod_playlist(client: &crate::extras::Client) -> Vec<(VodItem, Str
 }
 
 /// `GET /vod.m3u` — on-demand titles as an M3U playlist, cached 6h.
-pub async fn vod_playlist_handler(State(state): State<Arc<AppState>>, headers: axum::http::HeaderMap) -> Response {
+pub async fn vod_playlist_handler(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     let client = match require_client(&state) {
         Ok(c) => c,
         Err(r) => return *r,
@@ -308,7 +375,11 @@ pub async fn vod_playlist_handler(State(state): State<Arc<AppState>>, headers: a
         Some((xml, at)) if at.elapsed() <= PLAYLIST_TTL => xml,
         _ => {
             let entries = build_vod_playlist(&client).await;
-            let base = headers.get(header::HOST).and_then(|v| v.to_str().ok()).map(|h| format!("http://{h}")).unwrap_or_default();
+            let base = headers
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(|h| format!("http://{h}"))
+                .unwrap_or_default();
             let xml = render_vod_playlist(&entries, &base);
             if !entries.is_empty() {
                 *state.vod_state.playlist.lock().unwrap() = Some((xml.clone(), Instant::now()));
@@ -329,11 +400,21 @@ fn render_vod_playlist(entries: &[(VodItem, String)], base: &str) -> String {
     for (it, group) in entries {
         let mut name = it.name.clone();
         if it.content_type == "Episode" && !it.show_name.is_empty() {
-            name = format!("{} S{:02}E{:02} {}", it.show_name, it.season.max(1), it.episode_no, it.name);
+            name = format!(
+                "{} S{:02}E{:02} {}",
+                it.show_name,
+                it.season.max(1),
+                it.episode_no,
+                it.name
+            );
         }
         let name = name.replace(['\n', ','], " ");
         let group = group.replace('"', "'");
-        let duration = if it.total_duration > 0 { it.total_duration } else { -1 };
+        let duration = if it.total_duration > 0 {
+            it.total_duration
+        } else {
+            -1
+        };
         out.push_str(&format!(
             "#EXTINF:{duration} tvg-id=\"vod_{}\" tvg-logo=\"{}\" group-title=\"{group}\",{name}\n",
             it.content_id, it.thumbnail
@@ -345,7 +426,10 @@ fn render_vod_playlist(entries: &[(VodItem, String)], base: &str) -> String {
         out.push_str("#KODIPROP:inputstream=inputstream.adaptive\n");
         out.push_str("#KODIPROP:inputstream.adaptive.manifest_type=mpd\n");
         out.push_str("#KODIPROP:inputstream.adaptive.license_type=com.widevine.alpha\n");
-        out.push_str(&format!("#KODIPROP:inputstream.adaptive.license_key={base}/vod/license/{}\n", it.content_id));
+        out.push_str(&format!(
+            "#KODIPROP:inputstream.adaptive.license_key={base}/vod/license/{}\n",
+            it.content_id
+        ));
         out.push_str(&format!("{base}/vod/{}.mpd\n", it.content_id));
     }
     out
@@ -365,7 +449,12 @@ mod tests {
 
     #[test]
     fn playable_item_requires_known_provider_and_playback_type() {
-        let mut it = VodItem { provider: "JioCinema".into(), playback_type: "playback".into(), content_type: "Movie".into(), ..Default::default() };
+        let mut it = VodItem {
+            provider: "JioCinema".into(),
+            playback_type: "playback".into(),
+            content_type: "Movie".into(),
+            ..Default::default()
+        };
         assert!(it.playable());
         it.playback_type = "deeplink".into();
         assert!(!it.playable());
@@ -376,9 +465,24 @@ mod tests {
 
     #[test]
     fn playlist_render_uses_mx_player_hls_and_others_mpd() {
-        let mx = VodItem { content_id: "1".into(), name: "MX Movie".into(), provider: "MXPlayer".into(), content_type: "Movie".into(), ..Default::default() };
-        let jc = VodItem { content_id: "2".into(), name: "JC Movie".into(), provider: "JioCinema".into(), content_type: "Movie".into(), ..Default::default() };
-        let entries = vec![(mx, "MX Player · Movies".to_string()), (jc, "JioCinema · Movies".to_string())];
+        let mx = VodItem {
+            content_id: "1".into(),
+            name: "MX Movie".into(),
+            provider: "MXPlayer".into(),
+            content_type: "Movie".into(),
+            ..Default::default()
+        };
+        let jc = VodItem {
+            content_id: "2".into(),
+            name: "JC Movie".into(),
+            provider: "JioCinema".into(),
+            content_type: "Movie".into(),
+            ..Default::default()
+        };
+        let entries = vec![
+            (mx, "MX Player · Movies".to_string()),
+            (jc, "JioCinema · Movies".to_string()),
+        ];
         let out = render_vod_playlist(&entries, "http://host");
         assert!(out.contains("http://host/vod/1.m3u8"));
         assert!(out.contains("http://host/vod/2.mpd"));

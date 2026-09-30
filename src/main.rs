@@ -244,9 +244,7 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     let prefix = if !cfg.path_prefix.is_empty() {
         cfg.path_prefix.clone()
     } else {
-        let home = home_dir()
-            .ok_or_else(|| anyhow::anyhow!("cannot resolve the user profile directory"))?;
-        format!("{home}/.jiotv_go")
+        default_path_prefix()?
     };
     std::fs::create_dir_all(&prefix)?;
     Ok(if prefix.ends_with('/') {
@@ -254,6 +252,27 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     } else {
         format!("{prefix}/")
     })
+}
+
+fn default_path_prefix() -> anyhow::Result<String> {
+    if is_openwrt() {
+        return Ok("/etc/jiotv".to_string());
+    }
+
+    let home =
+        home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve the user profile directory"))?;
+    Ok(format!("{home}/.jiotv_go"))
+}
+
+fn is_openwrt() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/etc/openwrt_release").is_file()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 fn home_dir() -> Option<String> {
@@ -555,8 +574,27 @@ fn login_reset(store: &store::Store) -> anyhow::Result<()> {
 fn admin_password(access: &access::Access) -> anyhow::Result<()> {
     let password = rpassword_prompt("New admin password: ")?;
     access.set_password(&password)?;
-    println!("Admin password set.");
+    if restart_openwrt_service()? {
+        println!("Admin password set. JioTV service restarted.");
+    } else {
+        println!("Admin password set.");
+    }
     Ok(())
+}
+
+fn restart_openwrt_service() -> anyhow::Result<bool> {
+    if !is_openwrt() {
+        return Ok(false);
+    }
+    let init = std::path::Path::new("/etc/init.d/jiotv");
+    if !init.exists() {
+        return Ok(false);
+    }
+    let status = std::process::Command::new(init).arg("restart").status()?;
+    if !status.success() {
+        anyhow::bail!("admin password was saved, but restarting the JioTV service failed: {status}");
+    }
+    Ok(true)
 }
 
 fn rpassword_prompt(prompt: &str) -> anyhow::Result<String> {

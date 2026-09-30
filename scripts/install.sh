@@ -47,17 +47,25 @@ if [ "$openwrt" = true ]; then
   if command -v apk >/dev/null 2>&1; then
     package_manager=apk
     package_ext=apk
-    package_arch=$(apk --print-arch 2>/dev/null || true)
   elif command -v opkg >/dev/null 2>&1; then
     package_manager=opkg
     package_ext=ipk
-    package_arch=$(opkg print-architecture 2>/dev/null | awk '$1 == "arch" && $2 != "all" && ($3 + 0) >= best { best = $3 + 0; arch = $2 } END { print arch }')
   else
     echo "OpenWrt package manager not found (expected apk or opkg)" >&2
     exit 1
   fi
 
+  package_arch=$(sed -n "s/^DISTRIB_ARCH='\([^']*\)'/\1/p" /etc/openwrt_release 2>/dev/null | head -n 1 || true)
+  if [ -z "$package_arch" ]; then
+    if [ "$package_manager" = apk ]; then
+      package_arch=$(apk --print-arch 2>/dev/null || true)
+    else
+      package_arch=$(opkg print-architecture 2>/dev/null | awk '$1 == "arch" && $2 != "all" && ($3 + 0) >= best { best = $3 + 0; arch = $2 } END { print arch }')
+    fi
+  fi
+
   case "$package_arch" in
+    aarch64|arm64) package_arch=aarch64_cortex-a53 ;;
     x86_64|aarch64_cortex-a53|arm_cortex-a7_neon-vfpv4) ;;
     *) echo "unsupported OpenWrt package architecture: ${package_arch:-unknown}" >&2; exit 1 ;;
   esac

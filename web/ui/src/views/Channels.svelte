@@ -97,6 +97,7 @@
           <span class="tags">
             {#if c.hd}<span class="badge">HD</span>{/if}
             {#if c.extras}<span class="badge extras">Extra</span>{/if}
+            {#if c.requiresSubscription}<span class="badge subscription">Subscription required</span>{/if}
           </span>
         </a>
       </li>
@@ -138,4 +139,5 @@
   .logo img { max-width: 80%; max-height: 80%; object-fit: contain; }
   .name { font-size: 13px; font-weight: 600; line-height: 1.3; }
   .tags { display: flex; gap: 4px; margin-top: auto; }
+  .badge.subscription { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
 </style>

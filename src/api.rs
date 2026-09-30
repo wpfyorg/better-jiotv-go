@@ -226,6 +226,8 @@ struct ApiChannel {
     hd: bool,
     extras: bool,
     catchup: bool,
+    #[serde(rename = "requiresSubscription")]
+    requires_subscription: bool,
     playable: bool,
 }
 
@@ -253,6 +255,7 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
                 hd: ch.is_hd,
                 extras: ch.id.starts_with(crate::extras::ID_PREFIX),
                 catchup: ch.is_catchup_available,
+                requires_subscription: ch.requires_subscription(),
                 playable: state.is_playable(&ch.id),
             }
         })
@@ -620,5 +623,34 @@ mod tests {
         assert_eq!(json["catalogue"]["extrasEntitlementStatus"], "unknown");
         assert_eq!(json["catalogue"]["extrasEntitlementsAvailable"], false);
         assert_eq!(json["catalogue"]["extrasEntitlementsApplied"], false);
+    }
+
+    #[tokio::test]
+    async fn channels_marks_premium_business_type_as_subscription_required() {
+        let s = state();
+        s.tv.set_channels_for_test(vec![
+            crate::television::Channel {
+                id: "154".into(),
+                name: "Premium".into(),
+                business_type: "premium".into(),
+                ..Default::default()
+            },
+            crate::television::Channel {
+                id: "1148".into(),
+                name: "Free".into(),
+                business_type: "free".into(),
+                ..Default::default()
+            },
+        ]);
+
+        let response = channels(State(s)).await;
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let channels = json["channels"].as_array().unwrap();
+
+        let premium = channels.iter().find(|row| row["id"] == "154").unwrap();
+        let free = channels.iter().find(|row| row["id"] == "1148").unwrap();
+        assert_eq!(premium["requiresSubscription"], true);
+        assert_eq!(free["requiresSubscription"], false);
     }
 }

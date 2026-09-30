@@ -39,6 +39,8 @@ html, body {
   background: var(--bg);
   color: var(--text);
   font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 a { color: inherit; }
@@ -101,4 +103,96 @@ button, input, select {
 
 .sr-only {
   position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+/* Shaka is the single playback UI for live and on-demand video. */
+.shaka-video-container {
+  overflow: hidden;
+  background: #000;
+}
+
+.shaka-video-container .shaka-controls-container {
+  background: linear-gradient(to top, rgba(0, 0, 0, .82) 0%, rgba(0, 0, 0, .34) 24%, transparent 58%);
+}
+
+.shaka-video-container .shaka-bottom-controls {
+  width: calc(100% - 32px);
+  padding: 0 0 14px;
+}
+
+.shaka-video-container .shaka-controls-button-panel {
+  min-height: 42px;
+  gap: 2px;
+}
+
+.shaka-video-container .shaka-controls-button-panel > * {
+  min-width: 36px;
+  height: 36px;
+  padding: 0 6px;
+  border-radius: 10px;
+}
+
+.shaka-video-container .shaka-controls-button-panel > button:hover,
+.shaka-video-container .shaka-controls-button-panel > button:focus-visible {
+  background: rgba(255, 255, 255, .13);
+}
+
+.shaka-video-container .material-icons-round {
+  font-size: 22px;
+}
+
+.shaka-video-container .shaka-range-container {
+  height: 3px;
+  margin-top: 3px;
+  margin-bottom: 10px;
+}
+
+.shaka-video-container .shaka-seek-bar-container:hover .shaka-range-container {
+  height: 5px;
+}
+
+.shaka-video-container .shaka-current-time {
+  min-width: auto;
+  padding-inline: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.shaka-video-container .shaka-overflow-menu,
+.shaka-video-container .shaka-settings-menu {
+  background: rgba(20, 24, 33, .96);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: 14px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .35);
+}
+
+.shaka-video-container .shaka-overflow-menu button,
+.shaka-video-container .shaka-settings-menu button {
+  color: #fff;
+}
+
+.shaka-video-container .shaka-overflow-menu button:hover,
+.shaka-video-container .shaka-settings-menu button:hover {
+  background: rgba(255, 255, 255, .1);
+}
+
+@media (max-width: 640px) {
+  .shaka-video-container .shaka-bottom-controls {
+    width: calc(100% - 18px);
+    padding-bottom: 8px;
+  }
+
+  .shaka-video-container .shaka-controls-button-panel {
+    min-height: 36px;
+  }
+
+  .shaka-video-container .shaka-controls-button-panel > * {
+    min-width: 32px;
+    height: 32px;
+    padding-inline: 4px;
+  }
+
+  .shaka-video-container .material-icons-round {
+    font-size: 20px;
+  }
 }

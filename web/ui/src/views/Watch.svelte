@@ -138,6 +138,7 @@
         <p class="muted">
           {[channel?.category, channel?.language].filter(Boolean).join(" · ")}
           {#if channel?.extras}<span class="badge extras">Extra</span>{/if}
+          {#if channel?.requiresSubscription}<span class="badge premium">Premium</span>{/if}
         </p>
         {#if channel?.requiresSubscription}<p class="subscription-notice" role="note">A subscription may be required to play this channel.</p>{/if}
       </div>
@@ -256,6 +257,7 @@
   .channel-card img { width: 58px; height: 42px; flex: 0 0 auto; object-fit: contain; background: var(--surface-2); border-radius: 10px; padding: 6px; }
   .channel-copy { min-width: 0; }
   h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; line-height: 1.2; letter-spacing: -.02em; }
+  .badge.premium { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
   .subscription-notice { margin: 8px 0 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); border-radius: 8px; color: var(--danger); font-size: 13px; }
   h1 + p { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; font-size: 12px; }
   .section-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; font-weight: 750; letter-spacing: .035em; }

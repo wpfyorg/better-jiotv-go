@@ -297,6 +297,7 @@ pub struct RenderQuery {
     auth: Option<String>,
     channel_key_id: Option<String>,
     q: Option<String>,
+    nested: Option<bool>,
 }
 
 /// Rewrites a fetched HLS manifest so every media/key URI routes back
@@ -361,6 +362,7 @@ fn rewrite_m3u8(
                         &full_url,
                         channel_id,
                         if is_manifest { quality } else { "" },
+                        is_manifest,
                     ));
                 }
             }
@@ -380,6 +382,10 @@ fn resolve_media_url(uri: &str, base_url: &str, params: &str) -> String {
     let lower = uri.to_lowercase();
     let mut full = if lower.starts_with("http://") || lower.starts_with("https://") {
         uri.to_string()
+    } else if let Ok(base) = url::Url::parse(base_url) {
+        base.join(uri)
+            .map(|url| url.to_string())
+            .unwrap_or_else(|_| format!("{base_url}{uri}"))
     } else {
         format!("{base_url}{uri}")
     };
@@ -391,12 +397,21 @@ fn resolve_media_url(uri: &str, base_url: &str, params: &str) -> String {
     full
 }
 
-fn build_encrypted_link(endpoint: &str, full_url: &str, channel_id: &str, quality: &str) -> String {
+fn build_encrypted_link(
+    endpoint: &str,
+    full_url: &str,
+    channel_id: &str,
+    quality: &str,
+    nested: bool,
+) -> String {
     // Encryption happens in the caller (needs access to AppState::secure);
     // this function is only reached through `render_replace`, which does
     // the encryption inline. Kept separate for the unit tests below, which
     // exercise URL resolution without needing a real SecureUrl.
-    format!("{endpoint}||{full_url}||{channel_id}||{quality}")
+    format!(
+        "{endpoint}||{full_url}||{channel_id}||{quality}||{}",
+        if nested { "1" } else { "" }
+    )
 }
 
 fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<String> {
@@ -411,7 +426,7 @@ fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<S
     if !(key_url.starts_with("http://") || key_url.starts_with("https://")) {
         return None;
     }
-    let replacement = build_encrypted_link("/render.key", key_url, channel_id, "");
+    let replacement = build_encrypted_link("/render.key", key_url, channel_id, "", false);
     let _ = params;
     Some(format!(
         "{}{}{}",
@@ -421,7 +436,8 @@ fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<S
     ))
 }
 
-/// Runs `rewrite_m3u8` and then actually encrypts every `endpoint||url||id||q`
+/// Runs `rewrite_m3u8` and then actually encrypts every
+/// `endpoint||url||id||q||nested`
 /// placeholder it produced (see `build_encrypted_link`).
 fn render_replace(
     state: &AppState,
@@ -444,7 +460,7 @@ fn render_replace(
     while let Some(start) = rest.find("/render.") {
         out.push_str(&rest[..start]);
         let tail = &rest[start..];
-        // Find the end of our placeholder: endpoint||url||id||q, terminated
+        // Find the end of our placeholder: endpoint||url||id||q||nested, terminated
         // by end-of-line/string since these never legitimately contain '\n'.
         let line_end = tail.find('\n').unwrap_or(tail.len());
         let placeholder_str = &tail[..line_end];
@@ -461,11 +477,12 @@ fn render_replace(
 }
 
 fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
-    let mut parts = s.splitn(4, "||");
+    let mut parts = s.splitn(5, "||");
     let endpoint = parts.next()?;
     let url = parts.next()?;
     let channel_id = parts.next()?;
     let quality = parts.next()?;
+    let nested = parts.next().unwrap_or_default() == "1";
     let encrypted = state.secure.encrypt(url);
     let mut out = format!("{endpoint}?auth={encrypted}");
     if !channel_id.is_empty() {
@@ -473,6 +490,9 @@ fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
     }
     if !quality.is_empty() {
         out.push_str(&format!("&q={quality}"));
+    }
+    if nested {
+        out.push_str("&nested=true");
     }
     Some(out)
 }
@@ -504,6 +524,7 @@ pub async fn render_m3u8_handler(
     };
     let decoded = to_absolute_stream_url(&decoded, None);
     let quality = q.q.unwrap_or_default();
+    let nested = q.nested.unwrap_or(false);
 
     let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded);
     let cached = state.render_caches.get_hdnea(&hdnea_key);
@@ -539,7 +560,7 @@ pub async fn render_m3u8_handler(
                     token = h;
                 }
 
-                if status == 404 {
+                if status == 404 && !nested {
                     let retry_quality = if quality.is_empty() { "auto" } else { &quality };
                     let candidates = [retry_quality, "auto", "high", "medium", "low"];
                     let mut tried = std::collections::HashSet::new();
@@ -861,6 +882,26 @@ mod tests {
     }
 
     #[test]
+    fn resolves_root_relative_manifest_uri_against_origin() {
+        assert_eq!(
+            resolve_media_url(
+                "/bpk-tv/channel/variant.m3u8",
+                "https://a.b/live/channel/",
+                ""
+            ),
+            "https://a.b/bpk-tv/channel/variant.m3u8"
+        );
+    }
+
+    #[test]
+    fn resolves_parent_relative_manifest_uri() {
+        assert_eq!(
+            resolve_media_url("../variant.m3u8", "https://a.b/live/channel/", ""),
+            "https://a.b/live/variant.m3u8"
+        );
+    }
+
+    #[test]
     fn rewrites_ts_segment_lines() {
         let body = "#EXTM3U\nseg1.ts\n";
         let rewritten = rewrite_m3u8(
@@ -886,7 +927,7 @@ mod tests {
         let body =
             "#EXT-X-KEY:METHOD=AES-128,URI=\"https://tv.media.jio.com/key.pkey\",IV=0x1\nseg1.ts\n";
         let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "auto", false);
-        assert!(rewritten.starts_with("#EXT-X-KEY:METHOD=AES-128,URI=\"/render.key||https://tv.media.jio.com/key.pkey||154||\""));
+        assert!(rewritten.starts_with("#EXT-X-KEY:METHOD=AES-128,URI=\"/render.key||https://tv.media.jio.com/key.pkey||154||||\""));
         assert!(rewritten.contains(",IV=0x1"));
     }
 
@@ -919,5 +960,35 @@ mod tests {
         assert!(out.contains("/render.ts?auth="));
         assert!(out.contains("&channel_key_id=154"));
         assert!(!out.contains("||"));
+    }
+
+    #[test]
+    fn child_manifest_links_are_marked_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(crate::store::Store::open(dir.path().to_str().unwrap()).unwrap());
+        let secure = crate::secureurl::SecureUrl::new(false);
+        let state = AppState {
+            config: crate::config::Config::default(),
+            path_prefix: String::new(),
+            access: std::sync::Arc::new(crate::access::Access::new(store.clone())),
+            store,
+            tv: std::sync::Arc::new(crate::television::Television::new(reqwest::Client::new())),
+            secure: std::sync::Arc::new(secure),
+            http: reqwest::Client::new(),
+            drm_channels: Default::default(),
+            custom_channels: std::sync::Arc::new(crate::custom_channels::CustomChannels::new()),
+            render_caches: Default::default(),
+            dash_state: Default::default(),
+            epg_state: Default::default(),
+            extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
+            vod_state: Default::default(),
+            public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
+            unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+        };
+        let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nchild.m3u8\n";
+        let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");
+        assert!(out.contains("/render.m3u8?auth="));
+        assert!(out.contains("&nested=true"));
     }
 }

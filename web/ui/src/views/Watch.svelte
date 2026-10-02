@@ -1,7 +1,7 @@
 <script>
   import { onDestroy } from "svelte";
   import { api, loadChannels, formatTime } from "../lib/api.js";
-  import { createShakaPlayer, isDrmPlaybackError, playbackErrorMessage, playWithAutoplay, widevineCapability } from "../lib/shakaPlayer.js";
+  import { createShakaPlayer, loadLiveSource, widevineCapability } from "../lib/shakaPlayer.js";
 
   let { id } = $props();
 
@@ -13,6 +13,7 @@
   let video = $state();
   let playerError = $state("");
   let cleanup = null;
+  let playbackGeneration = 0;
 
   function isNow(program) {
     const now = Date.now();
@@ -42,16 +43,24 @@
   });
 
   async function start(channelID, q) {
+    const generation = ++playbackGeneration;
+    const isCurrent = () => generation === playbackGeneration;
     cleanup?.();
     cleanup = null;
     playerError = "";
 
     try {
       const d = await api(`/api/live/play/${encodeURIComponent(channelID)}?q=${q}`);
+      if (!isCurrent()) return;
       const session = await createShakaPlayer(playerContainer, video);
+      if (!isCurrent()) {
+        await session.destroy().catch(() => {});
+        return;
+      }
       const player = session.player;
       cleanup = () => session.destroy().catch(() => {});
       const drmCapability = d.dash && d.license ? await widevineCapability() : null;
+      if (!isCurrent()) return;
 
       if (d.license) {
         player.configure({
@@ -63,46 +72,16 @@
         });
       }
 
-      let fallingBack = null;
-      let usingHls = false;
-      const fallbackToHls = async (preserveError = false) => {
-        if (!d.dash || !d.hls) return false;
-        if (fallingBack) return fallingBack;
-        fallingBack = (async () => {
-          usingHls = true;
-          if (!preserveError) playerError = "";
-          await player.unload();
-          await player.load(d.hls);
-          await playWithAutoplay(video);
-          return true;
-        })();
-        return fallingBack;
-      };
-
-      player.addEventListener("error", (event) => {
-        const detail = event.detail;
-        if (d.dash && d.hls && !usingHls) {
-          const environmentBlocked = drmCapability && !drmCapability.usable;
-          playerError = playbackErrorMessage(detail, drmCapability);
-          fallbackToHls(environmentBlocked && isDrmPlaybackError(detail)).catch((err) => (playerError = err.message || String(err)));
-        } else {
-          playerError = playbackErrorMessage(detail, drmCapability);
-        }
+      await loadLiveSource({
+        player,
+        video,
+        source: d,
+        drmCapability,
+        isCurrent,
+        onTerminalError: (message) => (playerError = message),
       });
-
-      try {
-        await player.load(d.url);
-      } catch (err) {
-        if (d.dash && d.hls && !usingHls) {
-          const environmentBlocked = drmCapability && !drmCapability.usable;
-          playerError = playbackErrorMessage(err, drmCapability);
-          if (await fallbackToHls(environmentBlocked && isDrmPlaybackError(err))) return;
-        }
-        throw err;
-      }
-      await playWithAutoplay(video);
     } catch (err) {
-      playerError = err.message || String(err);
+      if (isCurrent()) playerError = err.message || String(err);
     }
   }
 
@@ -110,7 +89,10 @@
     if (playerContainer && video) start(id, quality);
   });
 
-  onDestroy(() => cleanup?.());
+  onDestroy(() => {
+    playbackGeneration++;
+    cleanup?.();
+  });
 </script>
 
 <div class="layout">

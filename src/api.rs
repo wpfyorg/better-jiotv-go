@@ -525,21 +525,28 @@ pub async fn live_play(
         Ok(l) => l,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    let live_url = crate::television::select_best_live_hls_url(&live, &quality);
+    live_play_response_from_live(&state, &live, &id, &quality)
+}
+
+fn live_play_response_from_live(
+    state: &AppState,
+    live: &crate::television::LiveUrlOutput,
+    id: &str,
+    quality: &str,
+) -> Response {
+    let live_url = crate::television::select_best_live_hls_url(live, quality);
     let hls = if live_url.is_empty() {
         serde_json::Value::Null
     } else {
         let abs = crate::stream::to_absolute_stream_url(
             &live_url,
-            crate::stream::absolute_base_from_live(&live).as_deref(),
+            crate::stream::absolute_base_from_live(live).as_deref(),
         );
         let encrypted = state.secure.encrypt(&abs);
-        serde_json::Value::String(format!(
-            "/render.m3u8?auth={encrypted}&channel_key_id={id}"
-        ))
+        serde_json::Value::String(format!("/render.m3u8?auth={encrypted}&channel_key_id={id}"))
     };
 
-    if let Ok(out) = crate::dash::build_drm_mpd_output(&state, &live, &id, &quality) {
+    if let Ok(out) = crate::dash::build_drm_mpd_output(state, live, id, quality) {
         if !out.play_url.is_empty() {
             let license = if out.license_url.is_empty() {
                 serde_json::Value::Null
@@ -666,5 +673,71 @@ mod tests {
         let free = channels.iter().find(|row| row["id"] == "1148").unwrap();
         assert_eq!(premium["requiresSubscription"], true);
         assert_eq!(free["requiresSubscription"], false);
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_play_response_keeps_mpd_only_source_on_dash() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            mpd: crate::television::Mpd {
+                auto: "https://media.example/live/manifest.mpd".into(),
+                key: "https://license.example/widevine".into(),
+                ..Default::default()
+            },
+            is_drm: true,
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_mpd", "auto")).await;
+        assert_eq!(json["dash"], true);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.mpd?"));
+        assert!(json["license"].as_str().unwrap().starts_with("/drm?"));
+        assert!(json["hls"].is_null());
+    }
+
+    #[tokio::test]
+    async fn live_play_response_exposes_provider_hls_as_dash_alternative() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/master.m3u8".into(),
+                ..Default::default()
+            },
+            mpd: crate::television::Mpd {
+                auto: "https://media.example/live/manifest.mpd".into(),
+                key: "https://license.example/widevine".into(),
+                ..Default::default()
+            },
+            is_drm: true,
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_both", "auto")).await;
+        assert_eq!(json["dash"], true);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.mpd?"));
+        assert!(json["hls"].as_str().unwrap().starts_with("/render.m3u8?"));
+    }
+
+    #[tokio::test]
+    async fn live_play_response_marks_primary_hls_without_alternative() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/master.m3u8".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_hls", "auto")).await;
+        assert_eq!(json["dash"], false);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.m3u8?"));
+        assert!(json["license"].is_null());
+        assert!(json["hls"].is_null());
     }
 }

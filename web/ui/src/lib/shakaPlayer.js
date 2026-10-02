@@ -82,6 +82,78 @@ export function playbackErrorMessage(error, capability = null) {
   return error?.message || String(error || "Playback failed");
 }
 
+export async function loadLiveSource({ player, video, source, drmCapability = null, isCurrent = () => true, onTerminalError = () => {} }) {
+  let fallbackPromise = null;
+  let usingHls = false;
+  let fallbackSettled = false;
+  let terminalReported = false;
+
+  const reportTerminal = (error) => {
+    if (!terminalReported && isCurrent()) {
+      terminalReported = true;
+      onTerminalError(playbackErrorMessage(error, drmCapability));
+    }
+  };
+
+  const fallbackToHls = () => {
+    if (!source.dash || !source.hls) return Promise.resolve(false);
+    if (!isCurrent()) return Promise.resolve(false);
+    if (fallbackPromise) return fallbackPromise;
+
+    fallbackPromise = (async () => {
+      usingHls = true;
+      try {
+        await player.unload();
+        if (!isCurrent()) return false;
+        await player.load(source.hls);
+        if (!isCurrent()) return false;
+        await playWithAutoplay(video);
+        return true;
+      } finally {
+        fallbackSettled = true;
+      }
+    })();
+    return fallbackPromise;
+  };
+
+  player.addEventListener("error", (event) => {
+    const detail = event.detail;
+    if (source.dash && source.hls && !usingHls) {
+      fallbackToHls().catch(reportTerminal);
+      return;
+    }
+    if (usingHls && !fallbackSettled) return;
+    reportTerminal(detail);
+  });
+
+  try {
+    await player.load(source.url);
+  } catch (error) {
+    if (source.dash && source.hls) {
+      try {
+        if (await fallbackToHls()) return;
+        if (!isCurrent()) return;
+      } catch (fallbackError) {
+        reportTerminal(fallbackError);
+        return;
+      }
+    }
+    reportTerminal(error);
+    return;
+  }
+
+  if (fallbackPromise) {
+    try {
+      await fallbackPromise;
+    } catch (error) {
+      reportTerminal(error);
+    }
+    return;
+  }
+
+  if (isCurrent()) await playWithAutoplay(video);
+}
+
 export async function createShakaPlayer(container, video) {
   await Promise.all([
     loadScript("/static/external/shaka-player.ui.js"),

@@ -324,6 +324,15 @@ fn rewrite_m3u8(
             ""
         };
 
+        if let Some(rewritten) =
+            rewrite_media_attr_line(trimmed, base_url, params, channel_id, quality)
+        {
+            out.push_str(&rewritten);
+            out.push_str(cr);
+            out.push_str(newline);
+            continue;
+        }
+
         if let Some(rewritten) = rewrite_key_attr_line(trimmed, params, channel_id) {
             out.push_str(&rewritten);
             out.push_str(cr);
@@ -436,6 +445,28 @@ fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<S
     ))
 }
 
+fn rewrite_media_attr_line(
+    line: &str,
+    base_url: &str,
+    params: &str,
+    channel_id: &str,
+    quality: &str,
+) -> Option<String> {
+    if !line.starts_with("#EXT-X-MEDIA:") {
+        return None;
+    }
+    let uri_start = line.find("URI=\"")? + 5;
+    let uri_end = line[uri_start..].find('"')? + uri_start;
+    let url = resolve_media_url(&line[uri_start..uri_end], base_url, params);
+    let replacement = build_encrypted_link("/render.m3u8", &url, channel_id, quality, true);
+    Some(format!(
+        "{}{}{}",
+        &line[..uri_start],
+        replacement,
+        &line[uri_end..]
+    ))
+}
+
 /// Runs `rewrite_m3u8` and then actually encrypts every
 /// `endpoint||url||id||q||nested`
 /// placeholder it produced (see `build_encrypted_link`).
@@ -460,9 +491,9 @@ fn render_replace(
     while let Some(start) = rest.find("/render.") {
         out.push_str(&rest[..start]);
         let tail = &rest[start..];
-        // Find the end of our placeholder: endpoint||url||id||q||nested, terminated
-        // by end-of-line/string since these never legitimately contain '\n'.
-        let line_end = tail.find('\n').unwrap_or(tail.len());
+        // Quoted URI attributes end before the closing quote. Preserve that
+        // quote and any following attributes when encrypting the placeholder.
+        let line_end = tail.find(['\n', '\r', '"']).unwrap_or(tail.len());
         let placeholder_str = &tail[..line_end];
         if let Some(encoded) = encode_placeholder(state, placeholder_str) {
             out.push_str(&encoded);
@@ -960,6 +991,56 @@ mod tests {
         assert!(out.contains("/render.ts?auth="));
         assert!(out.contains("&channel_key_id=154"));
         assert!(!out.contains("||"));
+
+        for tag in ["EXT-X-KEY", "EXT-X-SESSION-KEY"] {
+            for suffix in ["", ",IV=0x1,KEYFORMAT=\"identity\""] {
+                let body = format!(
+                    "#EXTM3U\n#{tag}:METHOD=AES-128,URI=\"https://a.b/key.pkey\"{suffix}\nseg1.ts\n"
+                );
+                let out = render_replace(&state, &body, "https://a.b/live/", "", "154", "auto");
+                let line = out.lines().nth(1).unwrap();
+                let uri = line.split("URI=\"").nth(1).unwrap();
+                let (uri, remainder) = uri.split_once('"').expect("key URI must close");
+                assert_eq!(remainder, suffix);
+                assert!(uri.starts_with("/render.key?auth="));
+                let url = url::Url::parse(&format!("http://localhost{uri}")).unwrap();
+                let auth = url.query_pairs().find(|(k, _)| k == "auth").unwrap().1;
+                assert_eq!(state.secure.decrypt(&auth).unwrap(), "https://a.b/key.pkey");
+                assert!(out.contains("/render.ts?auth="));
+                assert!(!out.contains("||"));
+            }
+        }
+
+        let muxed = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Hindi\"";
+        for (uri, expected) in [
+            (
+                "audio.m3u8?language=hin",
+                "https://a.b/live/audio.m3u8?language=hin&__hdnea__=fresh",
+            ),
+            ("/audio.m3u8", "https://a.b/audio.m3u8?__hdnea__=fresh"),
+            (
+                "https://c.d/audio.m3u8",
+                "https://c.d/audio.m3u8?__hdnea__=fresh",
+            ),
+        ] {
+            let body = format!("{muxed},URI=\"{uri}\",DEFAULT=YES\r\n{muxed}\r\n");
+            let out = render_replace(
+                &state,
+                &body,
+                "https://a.b/live/",
+                "__hdnea__=fresh",
+                "154",
+                "auto",
+            );
+            let uri = out.lines().next().unwrap().split("URI=\"").nth(1).unwrap();
+            let (uri, suffix) = uri.split_once('"').unwrap();
+            assert_eq!(suffix, ",DEFAULT=YES");
+            let url = url::Url::parse(&format!("http://localhost{uri}")).unwrap();
+            let auth = url.query_pairs().find(|(k, _)| k == "auth").unwrap().1;
+            assert_eq!(state.secure.decrypt(&auth).unwrap(), expected);
+            assert!(uri.contains("&nested=true"));
+            assert!(out.ends_with(&format!("{muxed}\r\n")));
+        }
     }
 
     #[test]

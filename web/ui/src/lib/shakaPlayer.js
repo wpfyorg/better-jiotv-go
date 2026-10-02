@@ -105,7 +105,17 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
       try {
         await player.unload();
         if (!isCurrent()) return false;
-        await player.load(source.hls);
+        try {
+          await player.load(source.hls);
+        } catch (error) {
+          if (error?.code !== 4032 || !player.getConfiguration().drm.servers["com.widevine.alpha"]) throw error;
+          // Shaka applies configured license servers even to HLS without DRM
+          // metadata. Retry without the DASH server so AES HLS can use WebCrypto.
+          await player.unload();
+          if (!isCurrent()) return false;
+          player.configure({ drm: { servers: undefined } });
+          await player.load(source.hls);
+        }
         if (!isCurrent()) return false;
         await playWithAutoplay(video);
         return true;

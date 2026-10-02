@@ -18,6 +18,11 @@ function fakePlayer(loadImpl) {
   return {
     loads: [],
     unloads: 0,
+    config: { drm: { servers: { "com.widevine.alpha": "license" } } },
+    getConfiguration() { return this.config; },
+    configure(config) {
+      if (Object.hasOwn(config.drm, "servers")) this.config.drm.servers = config.drm.servers ?? {};
+    },
     addEventListener(type, handler) {
       if (type === "error") errorHandler = handler;
     },
@@ -35,6 +40,52 @@ function fakePlayer(loadImpl) {
 }
 
 const video = { muted: false, play: async () => {} };
+
+test("retries unsupported HLS without the inherited DASH license server", async () => {
+  const player = fakePlayer((url, p) => {
+    if (url === "dash") return Promise.reject({ code: 6001 });
+    if (p.config.drm.servers["com.widevine.alpha"]) return Promise.reject({ code: 4032 });
+    return Promise.resolve();
+  });
+  const errors = [];
+  await loadLiveSource({ player, video, source: { dash: true, url: "dash", hls: "hls" }, onTerminalError: e => errors.push(e) });
+  assert.deepEqual(player.loads, ["dash", "hls", "hls"]);
+  assert.equal(player.unloads, 2);
+  assert.deepEqual(errors, []);
+});
+
+test("reports failure after the bounded HLS configuration retry", async () => {
+  const player = fakePlayer(() => Promise.reject({ code: 4032 }));
+  const errors = [];
+  await loadLiveSource({ player, video, source: { dash: true, url: "dash", hls: "hls" }, onTerminalError: e => errors.push(e) });
+  assert.deepEqual(player.loads, ["dash", "hls", "hls"]);
+  assert.deepEqual(errors, ["Playback error 4032"]);
+});
+
+test("keeps the license server when provider HLS loads successfully", async () => {
+  const player = fakePlayer(url => url === "dash" ? Promise.reject({ code: 6001 }) : Promise.resolve());
+  await loadLiveSource({ player, video, source: { dash: true, url: "dash", hls: "hls" } });
+  assert.deepEqual(player.loads, ["dash", "hls"]);
+  assert.equal(player.config.drm.servers["com.widevine.alpha"], "license");
+});
+
+test("does not retry unsupported HLS without an inherited license server", async () => {
+  const player = fakePlayer(() => Promise.reject({ code: 4032 }));
+  player.config.drm.servers = {};
+  await loadLiveSource({ player, video, source: { dash: true, url: "dash", hls: "hls" } });
+  assert.deepEqual(player.loads, ["dash", "hls"]);
+});
+
+test("route cancellation prevents the HLS configuration retry", async () => {
+  let current = true;
+  const player = fakePlayer(() => Promise.reject({ code: 4032 }));
+  player.unload = async () => { if (++player.unloads === 2) current = false; };
+  const errors = [];
+  await loadLiveSource({ player, video, source: { dash: true, url: "dash", hls: "hls" }, isCurrent: () => current, onTerminalError: e => errors.push(e) });
+  assert.deepEqual(player.loads, ["dash", "hls"]);
+  assert.equal(player.config.drm.servers["com.widevine.alpha"], "license");
+  assert.deepEqual(errors, []);
+});
 
 test("shares one HLS recovery between Shaka error event and load rejection", async () => {
   const dash = deferred();

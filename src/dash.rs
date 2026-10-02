@@ -120,7 +120,7 @@ pub(crate) async fn get_drm_mpd(
     Ok(out)
 }
 
-fn build_drm_mpd_output(
+pub(crate) fn build_drm_mpd_output(
     state: &AppState,
     live: &LiveUrlOutput,
     channel_id: &str,

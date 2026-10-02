@@ -496,12 +496,13 @@ pub async fn extras_lock(State(state): State<SharedState>) -> Response {
 }
 
 /// `GET /api/live/play/:id?q=` — resolves a live channel to what the
-/// in-app player needs, the same shape `/api/ott/play/:id` gives
-/// `VodPlayer.svelte` (`{dash, url, license}`), so `Watch.svelte` can use
+/// in-app player needs, the same shape `/api/ott/play/:id` gives plus an
+/// optional HLS alternative, so `Watch.svelte` can use
 /// the same Shaka/hls.js logic instead of the old Go-template `/mpd/:id`
-/// iframe. Tries DASH first via the same `get_drm_mpd` the IPTV
-/// `/live/mpd/:id` route uses, falling back to HLS exactly like
-/// `LiveHandler` does when there's no DASH stream.
+/// iframe. DASH remains the preferred source, matching the TV+ app. When the
+/// provider also returned HLS, expose that exact source so the UI can retry it
+/// after a DASH player failure. DASH-only channels therefore never fall into a
+/// fabricated `/live/...m3u8` request.
 pub async fn live_play(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
@@ -520,36 +521,49 @@ pub async fn live_play(
         return Json(json!({"dash": false, "url": ch.url, "license": null})).into_response();
     }
 
-    if let Ok(out) = crate::dash::get_drm_mpd(&state, &id, &quality).await {
+    let live = match crate::stream::fetch_live(&state, &id).await {
+        Ok(l) => l,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let live_url = crate::television::select_best_live_hls_url(&live, &quality);
+    let hls = if live_url.is_empty() {
+        serde_json::Value::Null
+    } else {
+        let abs = crate::stream::to_absolute_stream_url(
+            &live_url,
+            crate::stream::absolute_base_from_live(&live).as_deref(),
+        );
+        let encrypted = state.secure.encrypt(&abs);
+        serde_json::Value::String(format!(
+            "/render.m3u8?auth={encrypted}&channel_key_id={id}"
+        ))
+    };
+
+    if let Ok(out) = crate::dash::build_drm_mpd_output(&state, &live, &id, &quality) {
         if !out.play_url.is_empty() {
             let license = if out.license_url.is_empty() {
                 serde_json::Value::Null
             } else {
                 serde_json::Value::String(out.license_url)
             };
-            return Json(json!({"dash": true, "url": out.play_url, "license": license}))
-                .into_response();
+            return Json(json!({
+                "dash": true,
+                "url": out.play_url,
+                "license": license,
+                "hls": hls
+            }))
+            .into_response();
         }
     }
 
-    let live = match crate::stream::fetch_live(&state, &id).await {
-        Ok(l) => l,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-    let live_url = crate::television::select_best_live_hls_url(&live, &quality);
     if live_url.is_empty() {
         return err(
             StatusCode::NOT_FOUND,
             format!("No stream found for channel id: {id}"),
         );
     }
-    let abs = crate::stream::to_absolute_stream_url(
-        &live_url,
-        crate::stream::absolute_base_from_live(&live).as_deref(),
-    );
-    let encrypted = state.secure.encrypt(&abs);
-    let url = format!("/render.m3u8?auth={encrypted}&channel_key_id={id}");
-    Json(json!({"dash": false, "url": url, "license": null})).into_response()
+    let url = hls.as_str().unwrap_or_default();
+    Json(json!({"dash": false, "url": url, "license": null, "hls": null})).into_response()
 }
 
 #[cfg(test)]

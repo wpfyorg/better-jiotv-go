@@ -1,6 +1,6 @@
 <script>
   import { onDestroy } from "svelte";
-  import { api, keyBase, loadChannels, formatTime } from "../lib/api.js";
+  import { api, loadChannels, formatTime } from "../lib/api.js";
   import { createShakaPlayer, isDrmPlaybackError, playbackErrorMessage, playWithAutoplay, widevineCapability } from "../lib/shakaPlayer.js";
 
   let { id } = $props();
@@ -13,14 +13,6 @@
   let video = $state();
   let playerError = $state("");
   let cleanup = null;
-
-  function gated(path) {
-    return keyBase ? keyBase + path.replace(/^\//, "") : path;
-  }
-
-  function hlsFallback(channelID, q) {
-    return gated(`/live/${encodeURIComponent(q)}/${encodeURIComponent(channelID)}.m3u8`);
-  }
 
   function isNow(program) {
     const now = Date.now();
@@ -71,22 +63,28 @@
         });
       }
 
-      let fallingBack = false;
+      let fallingBack = null;
+      let usingHls = false;
       const fallbackToHls = async (preserveError = false) => {
-        if (fallingBack) return;
-        fallingBack = true;
-        if (!preserveError) playerError = "";
-        await player.unload();
-        await player.load(hlsFallback(channelID, q));
-        await playWithAutoplay(video);
+        if (!d.dash || !d.hls) return false;
+        if (fallingBack) return fallingBack;
+        fallingBack = (async () => {
+          usingHls = true;
+          if (!preserveError) playerError = "";
+          await player.unload();
+          await player.load(d.hls);
+          await playWithAutoplay(video);
+          return true;
+        })();
+        return fallingBack;
       };
 
       player.addEventListener("error", (event) => {
         const detail = event.detail;
-        if (d.dash && d.license && isDrmPlaybackError(detail)) {
+        if (d.dash && d.hls && !usingHls) {
           const environmentBlocked = drmCapability && !drmCapability.usable;
           playerError = playbackErrorMessage(detail, drmCapability);
-          fallbackToHls(environmentBlocked).catch((err) => (playerError = err.message || String(err)));
+          fallbackToHls(environmentBlocked && isDrmPlaybackError(detail)).catch((err) => (playerError = err.message || String(err)));
         } else {
           playerError = playbackErrorMessage(detail, drmCapability);
         }
@@ -95,11 +93,10 @@
       try {
         await player.load(d.url);
       } catch (err) {
-        if (d.dash && d.license && isDrmPlaybackError(err)) {
+        if (d.dash && d.hls && !usingHls) {
           const environmentBlocked = drmCapability && !drmCapability.usable;
           playerError = playbackErrorMessage(err, drmCapability);
-          await fallbackToHls(environmentBlocked);
-          return;
+          if (await fallbackToHls(environmentBlocked && isDrmPlaybackError(err))) return;
         }
         throw err;
       }

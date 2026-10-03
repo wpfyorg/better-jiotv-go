@@ -30,6 +30,7 @@ const FAILURE_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub const OPEN_PATHS: &[&str] = &[
     "/render.m3u8",
     "/render.ts",
+    "/render.aac",
     "/render.key",
     "/render.mpd",
     "/render.dash/",
@@ -304,6 +305,7 @@ mod tests {
     fn open_paths_match_prefixes() {
         assert!(is_open("/"));
         assert!(is_open("/render.m3u8"));
+        assert!(is_open("/render.aac"));
         assert!(is_open("/jtvimage/foo.png"));
         assert!(!is_open("/playlist.m3u"));
         assert!(!is_open("/api/channels"));

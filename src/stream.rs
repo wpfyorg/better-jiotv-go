@@ -355,8 +355,12 @@ fn rewrite_m3u8(
             .to_lowercase();
         let endpoint = if path_only.ends_with(".m3u8") {
             Some(("/render.m3u8", true))
-        } else if path_only.ends_with(".ts") || path_only.ends_with(".aac") {
+        } else if path_only.ends_with(".ts") {
             Some(("/render.ts", false))
+        } else if path_only.ends_with(".aac") {
+            // Players pick the HLS segment container from the URI extension;
+            // packed audio behind a `.ts` path is parsed as MPEG-TS and dropped.
+            Some(("/render.aac", false))
         } else {
             None
         };
@@ -944,6 +948,14 @@ mod tests {
             false,
         );
         assert!(rewritten.contains("/render.ts||https://a.b/live/seg1.ts?__hdnea__=fresh||154||"));
+    }
+
+    #[test]
+    fn rewrites_packed_audio_segments_to_aac_route() {
+        let body = "#EXTM3U\n#EXTINF:4,\naudio_1.aac?x=1\n#EXTINF:4,\nvideo_1.ts\n";
+        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "ex_1", "auto", false);
+        assert!(rewritten.contains("\n/render.aac||https://a.b/live/audio_1.aac?x=1||ex_1||"));
+        assert!(rewritten.contains("\n/render.ts||https://a.b/live/video_1.ts||ex_1||"));
     }
 
     #[test]

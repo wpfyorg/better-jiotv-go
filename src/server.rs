@@ -119,6 +119,7 @@ fn open_stream_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/render.m3u8", get(crate::stream::render_m3u8_handler))
         .route("/render.ts", get(crate::stream::render_ts_handler))
+        .route("/render.aac", get(crate::stream::render_ts_handler))
         .route("/render.key", get(crate::stream::render_key_handler))
         .route("/render.mpd", get(crate::dash::render_mpd_handler))
         .route("/render.dash/*rest", get(crate::dash::render_dash_handler))
@@ -708,6 +709,7 @@ mod tests {
         for path in [
             "/render.m3u8?auth=x",
             "/render.ts?auth=x",
+            "/render.aac?auth=x",
             "/render.key?auth=x",
             "/render.mpd?auth=x",
             "/drm?auth=x",

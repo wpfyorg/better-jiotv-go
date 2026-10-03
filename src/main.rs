@@ -19,6 +19,7 @@ mod store;
 mod stream;
 mod television;
 mod token_refresh;
+mod tls;
 mod tunnel;
 mod unlock;
 mod update;
@@ -378,6 +379,30 @@ async fn serve(
     }
 
     let service = server::GatedService::new(state);
+
+    let tls = if args.tls {
+        if args.tls_port == args.port {
+            anyhow::bail!("--tls-port must differ from --port");
+        }
+        let material =
+            tls::load_or_create(&args.tls_cert, &args.tls_key, &path_prefix, &args.host)?;
+        let tls_listener =
+            tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.tls_port)).await?;
+        let host = display_host(&args.host);
+        let origin = format!("https://{host}:{}", args.tls_port);
+        if material.generated {
+            println!("Generated a self-signed TLS certificate in {path_prefix}tls/");
+        }
+        println!("HTTPS: {origin}/ (browser UI; IPTV clients should keep using plain HTTP)");
+        println!("TLS certificate SHA-256: {}", material.fingerprint);
+        Some((tls_listener, material.config))
+    } else {
+        if !args.tls_cert.is_empty() || !args.tls_key.is_empty() {
+            eprintln!("Warning: --tls-cert/--tls-key are ignored without --tls");
+        }
+        None
+    };
+
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port)).await?;
 
     let mut tunnel_handle = None;
@@ -401,9 +426,31 @@ async fn serve(
     }
 
     tracing::info!("listening");
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let signal_tx = stop_tx.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = signal_tx.send(true);
+    });
+    let tls_task = tls.map(|(tls_listener, config)| {
+        let svc = service.clone();
+        tokio::spawn(tls::serve(
+            tls_listener,
+            config,
+            move |peer| server::connection_service(svc.clone(), peer, true),
+            stop_rx.clone(),
+        ))
+    });
+    let mut http_stop = stop_rx;
     let serve_result = axum::serve(listener, server::WithConnectInfo::new(service))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            let _ = http_stop.wait_for(|s| *s).await;
+        })
         .await;
+    let _ = stop_tx.send(true);
+    if let Some(task) = tls_task {
+        let _ = task.await;
+    }
 
     if let Some(t) = tunnel_handle {
         t.kill().await;
@@ -682,7 +729,12 @@ fn print_help() {
         "jiotv - Stream JioTV on any device\n\n\
          USAGE:\n  jiotv [--config PATH] [--skip-update-check] <command>\n\n\
          COMMANDS:\n  \
-         serve [--host H] [--port P] [--public] [--tls] [--tls-cert] [--tls-key] [--tunnel] [--tunnel-token T]\n  \
+         serve [--host H] [--port P] [--public] [--tls [--tls-port P] [--tls-cert F --tls-key F]] [--tunnel] [--tunnel-token T]\n  \
+         \x20 --tls            also serve HTTPS (default port 5443) next to plain HTTP; browsers need\n  \
+         \x20                  HTTPS for DRM/encrypted-HLS playback, IPTV apps can keep using HTTP\n  \
+         \x20 --tls-port P     HTTPS port (default 5443)\n  \
+         \x20 --tls-cert/--tls-key  PEM files to use (both or neither); without them a self-signed\n  \
+         \x20                  certificate is created in <data dir>/tls/ on first start and reused\n  \
          login otp | login reset\n  \
          extras login | extras logout   (off by default; needs extras = true / JIOTV_EXTRAS=true)\n  \
          epg generate | epg delete\n  \

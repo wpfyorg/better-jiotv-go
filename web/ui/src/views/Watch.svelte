@@ -119,7 +119,7 @@
         <h2>Needs a secure connection</h2>
         <p>
           Browsers only allow protected and encrypted streams on HTTPS or localhost, and this page was opened over plain HTTP.
-          Open the app through your HTTPS address (for example a tunnel or reverse proxy), or use the M3U playlist in an IPTV app.
+          Open the app over HTTPS instead (the server's HTTPS port, 5443 by default, or your tunnel address), or use the M3U playlist in an IPTV app.
         </p>
         <a class="overlay-action" href="#/settings">Open Settings</a>
         <small>{playerError}</small>

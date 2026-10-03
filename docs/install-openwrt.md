@@ -25,11 +25,13 @@ jiotv admin password
 /etc/init.d/jiotv start
 ```
 
-Enter the OTP yourself when prompted. Then open:
+Enter the OTP yourself when prompted. Then open the web UI over HTTPS:
 
 ```text
-http://<router-ip>:5001/
+https://<router-ip>:5443/
 ```
+
+The package enables HTTPS with a self-signed certificate (created on first start under `/etc/jiotv/tls/`). Browsers require HTTPS for protected playback, so accept the one-time certificate warning. IPTV apps should keep using the plain `http://<router-ip>:5001/` playlist. See [HTTPS in Usage](usage.md#https).
 
 The normal `full` package includes the web UI. Most people should use it.
 
@@ -65,7 +67,9 @@ Use `jiotv-slim` instead if you installed the slim package. Removal leaves `/etc
 
 OpenWrt service settings live in `/etc/config/jiotv`. The service uses `procd`, restarts automatically after crashes, and stores application data under `/etc/jiotv`.
 
-If port `5001` is blocked between LAN devices, add a firewall rule for the LAN zone only. Do not expose the service directly on WAN.
+HTTPS is controlled by `tls` (default `1`), `tls_port` (default `5443`), and optional `tls_cert` / `tls_key` paths to your own PEM files (both must be set). After editing, run `uci commit jiotv` and `/etc/init.d/jiotv restart`. Set `option tls '0'` to serve plain HTTP only.
+
+If port `5001` or `5443` is blocked between LAN devices, add a firewall rule for the LAN zone only. Do not expose the service directly on WAN.
 
 ## Manual package install
 

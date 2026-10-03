@@ -4,6 +4,9 @@ set -eu
 repo=${JIOTV_REPO:-wpfyorg/better-jiotv-go}
 variant=${JIOTV_VARIANT:-full}
 version=${JIOTV_VERSION:-latest}
+install_tls=${JIOTV_INSTALL_TLS:-1}
+
+case "$install_tls" in 0|1) ;; *) echo "JIOTV_INSTALL_TLS must be 0 or 1" >&2; exit 2 ;; esac
 
 case "$variant" in full|slim) ;; *) echo "JIOTV_VARIANT must be full or slim" >&2; exit 2 ;; esac
 case "$repo" in */*) ;; *) echo "JIOTV_REPO must be owner/repository" >&2; exit 2 ;; esac
@@ -114,6 +117,13 @@ if [ "$openwrt" = true ]; then
   echo "Next: jiotv login otp"
   echo "Then: jiotv admin password"
   echo "Then: /etc/init.d/jiotv start"
+  if [ "$install_tls" = 1 ]; then
+    echo "Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<router-ip>:5443/"
+    echo "IPTV apps (plain HTTP playlist): http://<router-ip>:5001/"
+  else
+    echo "HTTPS is off for this install: set 'option tls 0' in /etc/config/jiotv. Browser UI: http://<router-ip>:5001/"
+    echo "Note: browsers need HTTPS or localhost for DRM and encrypted HLS playback."
+  fi
   exit 0
 fi
 
@@ -163,4 +173,11 @@ else cp "$tmp/$asset" "$install_dir/jiotv" && chmod 0755 "$install_dir/jiotv"
 fi
 echo "Installed jiotv ($variant, $target) to $install_dir/jiotv"
 case ":${PATH:-}:" in *":$install_dir:"*) ;; *) echo "Add $install_dir to PATH to run jiotv directly." ;; esac
-echo "Next: jiotv login otp; jiotv admin password; jiotv serve"
+if [ "$install_tls" = 1 ]; then
+  echo "Next: jiotv login otp; jiotv admin password; jiotv serve --tls"
+  echo "Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<host>:5443/"
+  echo "IPTV apps (plain HTTP playlist): http://<host>:5001/"
+else
+  echo "Next: jiotv login otp; jiotv admin password; jiotv serve"
+  echo "Browser UI: http://<host>:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)"
+fi

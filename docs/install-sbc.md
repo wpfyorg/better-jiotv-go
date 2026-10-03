@@ -63,7 +63,7 @@ The binary can create the service for you. Environment variables beginning with 
 sudo env \
   JIOTV_PATH_PREFIX=/var/lib/jiotv \
   JIOTV_EPG=true \
-  /usr/local/bin/jiotv autostart --args "--host 0.0.0.0 --port 5001"
+  /usr/local/bin/jiotv autostart --args "--host 0.0.0.0 --port 5001 --tls"
 ```
 
 Then check:
@@ -73,7 +73,7 @@ systemctl status jiotv
 journalctl -u jiotv -f
 ```
 
-Open `http://SBC_LAN_IP:5001/` from another device.
+Open `https://SBC_LAN_IP:5443/` from another device and accept the one-time self-signed certificate warning (browsers need HTTPS for protected playback). IPTV apps should use the `http://SBC_LAN_IP:5001/` playlist. See [HTTPS in Usage](usage.md#https).
 
 ## User service instead of root
 

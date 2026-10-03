@@ -114,7 +114,17 @@
         {#if guide[0] && isNow(guide[0])}<small>{guide[0].showname}</small>{/if}
       </div>
     </div>
-    {#if playerError && playerFailure === "browser_unsupported"}
+    {#if playerError && playerFailure === "insecure_context"}
+      <div class="player-error player-overlay" role="alert" data-playback-state="insecure_context">
+        <h2>Needs a secure connection</h2>
+        <p>
+          Browsers only allow protected and encrypted streams on HTTPS or localhost, and this page was opened over plain HTTP.
+          Open the app through your HTTPS address (for example a tunnel or reverse proxy), or use the M3U playlist in an IPTV app.
+        </p>
+        <a class="overlay-action" href="#/settings">Open Settings</a>
+        <small>{playerError}</small>
+      </div>
+    {:else if playerError && playerFailure === "browser_unsupported"}
       <div class="player-error player-overlay" role="alert" data-playback-state="browser_unsupported">
         <h2>Not playable in this browser</h2>
         <p>

@@ -92,7 +92,12 @@ export function playbackHttpStatus(error) {
 // Decide which user-facing explanation fits a terminal live-playback failure:
 // "browser_unsupported" (DRM/key-system capability and no usable HLS),
 // "provider_unavailable" (upstream 404) or "generic" (show the raw error).
-export function classifyPlaybackFailure({ dashError = null, hlsError = null, hadHls = false, capability = null } = {}) {
+export function classifyPlaybackFailure({ dashError = null, hlsError = null, hadHls = false, capability = null, secureContext = true } = {}) {
+  // Browsers expose EME (Widevine) and Web Crypto (AES-128 HLS, Shaka 4042)
+  // only on HTTPS or localhost, so plain-HTTP LAN access fails before any
+  // codec question arises.
+  const needsSecure = (error) => !!error && (isDrmPlaybackError(error) || Number(error.code) === 4042);
+  if (!secureContext && (needsSecure(dashError) || needsSecure(hlsError))) return "insecure_context";
   const drmCause = (error) =>
     !!error && isDrmPlaybackError(error) && (Number(error.code) === 6001 || (!!capability && !capability.usable));
   if (drmCause(dashError) && (!hadHls || hlsError)) return "browser_unsupported";
@@ -109,7 +114,7 @@ export function sourceResolutionFailure(error) {
   return noStream ? "provider_unavailable" : "generic";
 }
 
-export async function loadLiveSource({ player, video, source, drmCapability = null, isCurrent = () => true, onTerminalError = () => {} }) {
+export async function loadLiveSource({ player, video, source, drmCapability = null, secureContext = globalThis.isSecureContext ?? true, isCurrent = () => true, onTerminalError = () => {} }) {
   let fallbackPromise = null;
   let usingHls = false;
   let fallbackSettled = false;
@@ -125,7 +130,7 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
       if (usingHls) hlsError = error;
       else dashError = dashError ?? error;
       const hadHls = !!(source.dash && source.hls);
-      const kind = classifyPlaybackFailure({ dashError, hlsError, hadHls, capability: drmCapability });
+      const kind = classifyPlaybackFailure({ dashError, hlsError, hadHls, capability: drmCapability, secureContext });
       // A browser-unsupported failure is explained by the DASH/DRM cause, not by
       // whatever the HLS alternative then failed with.
       const reported = kind === "browser_unsupported" && dashError ? dashError : error;

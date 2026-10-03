@@ -361,3 +361,10 @@ test("ignores recoverable Shaka errors on HLS-only and fallen-back playback", as
     assert.deepEqual(reports, [], `source ${source.url}`);
   }
 });
+
+test("plain-HTTP failures are classified as insecure_context before codec causes", () => {
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 6001, category: 6 }, hlsError: { code: 4042, category: 4 }, hadHls: true, secureContext: false }), "insecure_context");
+  assert.equal(classifyPlaybackFailure({ hlsError: { code: 4042, category: 4 }, secureContext: false }), "insecure_context");
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 6001, category: 6 }, hadHls: false, secureContext: true }), "browser_unsupported");
+  assert.equal(classifyPlaybackFailure({ hlsError: { code: 1001, data: ["u", 404] }, secureContext: false }), "provider_unavailable");
+});

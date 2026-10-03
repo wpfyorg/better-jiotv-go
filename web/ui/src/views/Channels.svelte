@@ -11,6 +11,8 @@
   })();
 
   let channels = $state([]);
+  // When every listed channel comes from extras the pill tells the viewer nothing.
+  const mixedSources = $derived(channels.some((c) => c.extras) && channels.some((c) => !c.extras));
   let error = $state("");
   let loading = $state(true);
   let query = $state("");
@@ -92,13 +94,17 @@
     {#each visible as c (c.id)}
       <li>
         <a class="tile" class:off={!c.playable} href={"#/watch/" + encodeURIComponent(c.id)} title={c.playable ? c.name : c.name + " (needs a JioTV login)"}>
-          <span class="logo"><img src={c.logo} alt="" loading="lazy" decoding="async" /></span>
-          <span class="name">{c.name}</span>
-          <span class="tags">
-            {#if c.hd}<span class="badge">HD</span>{/if}
-            {#if c.extras}<span class="badge extras">Extra</span>{/if}
-            {#if c.requiresSubscription}<span class="badge premium">Premium</span>{/if}
+          <span class="logo">
+            <img src={c.logo} alt="" loading="lazy" decoding="async" />
+            {#if (mixedSources && c.extras) || c.requiresSubscription}
+              <span class="flags">
+                {#if mixedSources && c.extras}<span class="flag flag-extras">Extra</span>{/if}
+                {#if c.requiresSubscription}<span class="flag flag-premium">Premium</span>{/if}
+              </span>
+            {/if}
           </span>
+          <span class="name">{c.name}</span>
+          <span class="tags">{#if c.hd}<span class="badge">HD</span>{/if}</span>
         </a>
       </li>
     {/each}
@@ -110,7 +116,7 @@
   .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
   .filters .input { width: auto; }
   .search { flex: 1 1 240px; }
-  .toggle { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); padding: 0 6px; }
+  .toggle { display: inline-flex; gap: 6px; align-items: center; min-height: 40px; color: var(--muted); padding: 0 6px; }
   .count { margin: 4px 0 12px; font-size: 13px; }
   .grid {
     list-style: none;
@@ -135,9 +141,25 @@
   .tile:hover, .tile:focus-visible { transform: translateY(-2px); border-color: var(--accent); }
   .tile.off { opacity: 0.45; }
   /* Many logos are white on transparent, so keep the tile dark in both themes. */
-  .logo { aspect-ratio: 16 / 10; display: grid; place-items: center; background: #1d2230; border-radius: 8px; overflow: hidden; }
+  .logo { position: relative; aspect-ratio: 16 / 10; display: grid; place-items: center; background: #1d2230; border-radius: 8px; overflow: hidden; }
   .logo img { max-width: 80%; max-height: 80%; object-fit: contain; }
-  .name { font-size: 13px; font-weight: 600; line-height: 1.3; }
-  .tags { display: flex; gap: 4px; margin-top: auto; }
-  .badge.premium { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+  .name {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.3;
+    min-height: 2.6em; /* reserve two lines so cards align */
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+  .tags { display: flex; gap: 4px; min-height: 20px; margin-top: auto; }
+  /* Extras/Premium pills overlay the logo corner. The logo area is dark in both
+     themes, so these use fixed solid colours with high-contrast text. */
+  .flags { position: absolute; top: 6px; right: 6px; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; max-width: calc(100% - 12px); }
+  .flag { padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; line-height: 1.4; letter-spacing: 0.02em; white-space: nowrap; }
+  .flag-extras { background: #7ea3ff; color: #0b1020; }
+  .flag-premium { background: #f4b740; color: #2a1c00; }
 </style>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadLiveSource } from "./shakaPlayer.js";
+import { classifyPlaybackFailure, loadLiveSource } from "./shakaPlayer.js";
 
 function deferred() {
   let resolve;
@@ -216,4 +216,84 @@ test("stale playback ignores a failing HLS recovery already in flight", async ()
 
   assert.equal(player.unloads, 1);
   assert.deepEqual(errors, []);
+});
+
+const http404 = () => ({ code: 1001, data: ["https://example.invalid/x.m3u8", 404] });
+
+test("classifies DRM key-system failure with no or failed HLS as browser_unsupported", () => {
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 6001 }, hadHls: false }), "browser_unsupported");
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 6001 }, hlsError: http404(), hadHls: true }), "browser_unsupported");
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 6006, category: 6 }, hadHls: false, capability: { usable: false } }), "browser_unsupported");
+});
+
+test("does not call other 6xxx errors unsupported when the CDM is usable", () => {
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 6007, category: 6 }, hadHls: false, capability: { usable: true } }), "generic");
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 6007, category: 6 }, hadHls: false }), "generic");
+});
+
+test("classifies HLS 404 without a DRM cause as provider_unavailable", () => {
+  assert.equal(classifyPlaybackFailure({ dashError: http404(), hadHls: false }), "provider_unavailable");
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 4032 }, hlsError: { code: 1001, httpStatus: 404 }, hadHls: true }), "provider_unavailable");
+  assert.equal(classifyPlaybackFailure({ dashError: { code: 1001, data: ["u", 500] }, hadHls: false }), "generic");
+  assert.equal(classifyPlaybackFailure({}), "generic");
+});
+
+test("reports browser_unsupported when DASH is DRM-blocked and HLS returns 404", async () => {
+  const player = fakePlayer((url) => (url === "dash" ? Promise.reject({ code: 6001 }) : Promise.reject(http404())));
+  const reports = [];
+  await loadLiveSource({
+    player,
+    video,
+    source: { dash: true, url: "dash", hls: "hls" },
+    onTerminalError: (message, info) => reports.push([message, info.kind]),
+  });
+  assert.deepEqual(player.loads, ["dash", "hls"]);
+  assert.deepEqual(reports, [["Playback error 1001", "browser_unsupported"]]);
+});
+
+test("reports browser_unsupported for MPD-only DRM failure", async () => {
+  const player = fakePlayer(() => Promise.reject({ code: 6001 }));
+  const reports = [];
+  await loadLiveSource({ player, video, source: { dash: true, url: "dash", hls: null }, onTerminalError: (m, info) => reports.push(info.kind) });
+  assert.deepEqual(player.loads, ["dash"]);
+  assert.deepEqual(reports, ["browser_unsupported"]);
+});
+
+test("reports provider_unavailable for HLS-only 404 and for HLS-event failures", async () => {
+  const player = fakePlayer(() => Promise.reject(http404()));
+  const reports = [];
+  await loadLiveSource({ player, video, source: { dash: false, url: "hls" }, onTerminalError: (m, info) => reports.push(info.kind) });
+  assert.deepEqual(reports, ["provider_unavailable"]);
+});
+
+test("reports provider_unavailable when non-DRM DASH failure falls back to a 404 HLS", async () => {
+  const player = fakePlayer((url) => (url === "dash" ? Promise.reject({ code: 4032 }) : Promise.reject(http404())));
+  const reports = [];
+  await loadLiveSource({
+    player,
+    video,
+    source: { dash: true, url: "dash", hls: "hls" },
+    onTerminalError: (m, info) => reports.push(info),
+  });
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].kind, "provider_unavailable");
+  assert.equal(reports[0].dashError.code, 4032);
+});
+
+test("keeps generic errors generic and uses capability for other 6xxx codes", async () => {
+  const player = fakePlayer(() => Promise.reject({ code: 7000 }));
+  const reports = [];
+  await loadLiveSource({ player, video, source: { dash: false, url: "x" }, onTerminalError: (m, info) => reports.push(info.kind) });
+  assert.deepEqual(reports, ["generic"]);
+
+  const drm = fakePlayer(() => Promise.reject({ code: 6008, category: 6 }));
+  const drmReports = [];
+  await loadLiveSource({
+    player: drm,
+    video,
+    source: { dash: true, url: "dash", hls: null },
+    drmCapability: { usable: false, message: "no cdm" },
+    onTerminalError: (m, info) => drmReports.push([m, info.kind]),
+  });
+  assert.deepEqual(drmReports, [["DRM_ENVIRONMENT_BLOCKED: no cdm", "browser_unsupported"]]);
 });

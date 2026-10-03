@@ -82,16 +82,42 @@ export function playbackErrorMessage(error, capability = null) {
   return error?.message || String(error || "Playback failed");
 }
 
+// Shaka BAD_HTTP_STATUS (1001) carries [uri, status, ...] in error.data.
+export function playbackHttpStatus(error) {
+  const status = error?.httpStatus ?? error?.data?.httpStatus ?? (Number(error?.code) === 1001 ? error?.data?.[1] : undefined);
+  const n = Number(status);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Decide which user-facing explanation fits a terminal live-playback failure:
+// "browser_unsupported" (DRM/key-system capability and no usable HLS),
+// "provider_unavailable" (upstream 404) or "generic" (show the raw error).
+export function classifyPlaybackFailure({ dashError = null, hlsError = null, hadHls = false, capability = null } = {}) {
+  const drmCause = (error) =>
+    !!error && isDrmPlaybackError(error) && (Number(error.code) === 6001 || (!!capability && !capability.usable));
+  if (drmCause(dashError) && (!hadHls || hlsError)) return "browser_unsupported";
+  if (playbackHttpStatus(hlsError ?? dashError) === 404) return "provider_unavailable";
+  return "generic";
+}
+
 export async function loadLiveSource({ player, video, source, drmCapability = null, isCurrent = () => true, onTerminalError = () => {} }) {
   let fallbackPromise = null;
   let usingHls = false;
   let fallbackSettled = false;
   let terminalReported = false;
+  let dashError = null;
+  let hlsError = null;
 
+  // onTerminalError(message, { kind, dashError, hlsError, hadHls }); the second
+  // argument is optional for callers that only need the message.
   const reportTerminal = (error) => {
     if (!terminalReported && isCurrent()) {
       terminalReported = true;
-      onTerminalError(playbackErrorMessage(error, drmCapability));
+      if (usingHls) hlsError = error;
+      else dashError = dashError ?? error;
+      const hadHls = !!(source.dash && source.hls);
+      const kind = classifyPlaybackFailure({ dashError, hlsError, hadHls, capability: drmCapability });
+      onTerminalError(playbackErrorMessage(error, drmCapability), { kind, dashError, hlsError, hadHls });
     }
   };
 
@@ -128,6 +154,7 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
 
   player.addEventListener("error", (event) => {
     const detail = event.detail;
+    if (!usingHls) dashError = dashError ?? detail;
     if (source.dash && source.hls && !usingHls) {
       fallbackToHls().catch(reportTerminal);
       return;
@@ -139,6 +166,7 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
   try {
     await player.load(source.url);
   } catch (error) {
+    dashError = dashError ?? error;
     if (source.dash && source.hls) {
       try {
         if (await fallbackToHls()) return;

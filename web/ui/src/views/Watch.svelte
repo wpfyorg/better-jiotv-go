@@ -12,6 +12,7 @@
   let playerContainer = $state();
   let video = $state();
   let playerError = $state("");
+  let playerFailure = $state("generic");
   let cleanup = null;
   let playbackGeneration = 0;
 
@@ -48,6 +49,7 @@
     cleanup?.();
     cleanup = null;
     playerError = "";
+    playerFailure = "generic";
 
     try {
       const d = await api(`/api/live/play/${encodeURIComponent(channelID)}?q=${q}`);
@@ -78,7 +80,10 @@
         source: d,
         drmCapability,
         isCurrent,
-        onTerminalError: (message) => (playerError = message),
+        onTerminalError: (message, info) => {
+          playerError = message;
+          playerFailure = info?.kind ?? "generic";
+        },
       });
     } catch (err) {
       if (isCurrent()) playerError = err.message || String(err);
@@ -106,7 +111,30 @@
         {#if guide[0] && isNow(guide[0])}<small>{guide[0].showname}</small>{/if}
       </div>
     </div>
-    {#if playerError}<p class="player-error" role="alert">{playerError}</p>{/if}
+    {#if playerError && playerFailure === "browser_unsupported"}
+      <div class="player-error player-overlay" role="alert" data-playback-state="browser_unsupported">
+        <h2>Not playable in this browser</h2>
+        <p>
+          {#if playerError.startsWith("DRM_ENVIRONMENT_BLOCKED")}
+            This browser has no working Widevine DRM module, which this channel's protected stream needs.
+          {:else}
+            This channel's Widevine-protected stream uses a video format (typically HEVC) that this browser cannot decrypt and play.
+          {/if}
+          It can still play in IPTV apps such as TiviMate on an Android TV device with hardware DRM, using the M3U playlist.
+        </p>
+        <a class="overlay-action" href="#/settings">Get the playlist URL</a>
+        <small>{playerError}</small>
+      </div>
+    {:else if playerError && playerFailure === "provider_unavailable"}
+      <div class="player-error player-overlay" role="alert" data-playback-state="provider_unavailable">
+        <h2>Stream unavailable from provider</h2>
+        <p>The provider is not serving this channel right now. Try again later or pick another channel.</p>
+        <a class="overlay-action" href="#/">All channels</a>
+        <small>{playerError}</small>
+      </div>
+    {:else if playerError}
+      <p class="player-error" role="alert" data-playback-state="generic">{playerError}</p>
+    {/if}
   </div>
 
   <aside>
@@ -223,6 +251,107 @@
     box-shadow: 0 10px 30px rgba(0, 0, 0, .32);
     font-size: 13px;
   }
+  .player-error.player-overlay {
+    inset: 0;
+    z-index: 5;
+    max-width: none;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 24px;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+    text-align: center;
+    /* Always dark like the video stage, so the white text works in both themes. */
+    background: rgba(8, 10, 16, .94);
+    overflow-y: auto;
+  }
+  .player-overlay h2 { margin: 0; font-size: 20px; letter-spacing: -.01em; }
+  .player-overlay p { margin: 0; max-width: 460px; color: rgba(255, 255, 255, .8); font-size: 13.5px; line-height: 1.5; }
+  .player-overlay small { color: rgba(255, 255, 255, .62); font-size: 11px; }
+  .overlay-action {
+    padding: 9px 16px;
+    border-radius: var(--radius);
+    color: var(--accent-text);
+    background: var(--accent);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 650;
+  }
+  .overlay-action:hover { filter: brightness(1.08); }
+  .overlay-action:focus-visible { outline: 0; box-shadow: var(--focus); }
+
+  /* Shaka UI theme: builds on the shared overrides in app.css using app tokens. */
+  .stage { font-family: inherit; }
+  .stage :global(.shaka-controls-container) {
+    background: linear-gradient(to top, rgba(0, 0, 0, .86) 0%, rgba(0, 0, 0, .4) 22%, transparent 55%);
+  }
+  .stage :global(.shaka-controls-button-panel > button) {
+    min-width: 40px;
+    height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: calc(var(--radius) - 2px);
+    transition: background .15s ease, color .15s ease;
+  }
+  .stage :global(.shaka-controls-button-panel > button:hover) { background: rgba(255, 255, 255, .16); }
+  .stage :global(.shaka-controls-button-panel > button:active) { background: rgba(255, 255, 255, .24); }
+  .stage :global(.shaka-controls-container button:focus-visible),
+  .stage :global(.shaka-controls-container input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  .stage :global(.shaka-current-time) { color: rgba(255, 255, 255, .88); font-size: 13px; }
+  .stage :global(.shaka-range-container) { border-radius: 999px; background: rgba(255, 255, 255, .22); }
+  .stage :global(.shaka-range-element::-webkit-slider-thumb) {
+    width: 13px;
+    height: 13px;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .stage :global(.shaka-range-element::-moz-range-thumb) {
+    width: 13px;
+    height: 13px;
+    background: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .stage :global(.shaka-volume-bar-container) { width: 84px; }
+  .stage :global(.shaka-overflow-menu),
+  .stage :global(.shaka-settings-menu) {
+    background: color-mix(in srgb, var(--surface) 96%, transparent);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 4px;
+    backdrop-filter: blur(14px);
+  }
+  .stage :global(.shaka-overflow-menu button),
+  .stage :global(.shaka-settings-menu button) {
+    min-height: 36px;
+    color: var(--text);
+    border-radius: calc(var(--radius) - 4px);
+    font-family: inherit;
+  }
+  .stage :global(.shaka-overflow-menu button:hover),
+  .stage :global(.shaka-settings-menu button:hover),
+  .stage :global(.shaka-overflow-menu button:focus-visible),
+  .stage :global(.shaka-settings-menu button:focus-visible) { background: var(--surface-2); }
+  .stage :global(.shaka-overflow-menu .material-icons-round),
+  .stage :global(.shaka-settings-menu .material-icons-round) { color: var(--muted); }
+  .stage :global(.shaka-settings-menu span[aria-selected="true"]),
+  .stage :global(.shaka-settings-menu button[aria-selected="true"] span) { color: var(--accent); font-weight: 650; }
+  .stage :global(.shaka-spinner-path) { stroke: var(--accent); }
+  .stage :global([class*="shaka-tooltip"]:hover::after),
+  .stage :global([class*="shaka-tooltip"]:focus-visible::after) {
+    background: color-mix(in srgb, var(--surface) 94%, transparent);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
   aside { display: flex; flex-direction: column; gap: 20px; min-width: 0; padding-top: 2px; }
   .channel-card {
     display: flex;
@@ -298,6 +427,14 @@
     aside { width: min(100%, 760px); }
   }
 
+  @media (orientation: landscape) and (max-height: 500px) {
+    /* Leave room for the sticky header so the whole player and its controls stay on screen. */
+    .stage { width: min(100%, calc((100dvh - 100px) * 16 / 9)); margin-inline: auto; }
+  }
+  @media (max-width: 420px) {
+    .stage .player-error.player-overlay { padding: 12px; gap: 6px; }
+    .stage .player-overlay small { display: none; }
+  }
   @media (max-width: 640px) {
     .layout { gap: 14px; }
     .stage { border-radius: 12px; box-shadow: 0 14px 36px rgba(0, 0, 0, .22); }
@@ -306,6 +443,13 @@
     .player-copy strong { font-size: 12px; }
     .player-copy small { display: none; }
     .player-error { right: 10px; bottom: 54px; max-width: calc(100% - 20px); font-size: 11px; }
+    .player-error.player-overlay { inset: 0; max-width: none; padding: 16px; gap: 8px; font-size: 11px; }
+    .player-overlay h2 { font-size: 16px; }
+    .player-overlay p { font-size: 12px; line-height: 1.4; }
+    .stage :global(.shaka-controls-button-panel > button) { min-width: 44px; height: 44px; }
+    .stage :global(.shaka-overflow-menu button),
+    .stage :global(.shaka-settings-menu button) { min-height: 44px; }
+    .stage :global(.shaka-volume-bar-container) { display: none; }
     aside { gap: 16px; padding-top: 0; }
     .channel-card { padding: 8px; }
     .channel-card img { width: 52px; height: 38px; }

@@ -421,9 +421,11 @@ pub async fn extras_verify_otp(
     // would keep serving the previous account's URLs and caches. A rejected OTP
     // never installs anything, so it neither calls this nor rotates, and does
     // not cut off existing viewers.
+    let installed = std::sync::atomic::AtomicBool::new(false);
     let result = state
         .extras
         .verify_otp(&body.number, &body.otp, &state.store, || {
+            installed.store(true, std::sync::atomic::Ordering::SeqCst);
             state.invalidate_context()
         })
         .await;
@@ -432,7 +434,11 @@ pub async fn extras_verify_otp(
     // (it already swapped the account), and discards anything resolved while the
     // exchange was in flight (the Extras and VOD caches are guarded by a
     // generation, and URL-minting handlers re-check the epoch).
-    if state.extras.credentials_marker() != before {
+    // Always finish the cleanup if the install hook ran, even when the final
+    // credentials equal the previous ones (a re-verify of the same account).
+    if installed.load(std::sync::atomic::Ordering::SeqCst)
+        || state.extras.credentials_marker() != before
+    {
         state.invalidate_context();
         crate::epg::trigger_regeneration(&state);
     }
@@ -769,6 +775,32 @@ mod tests {
         );
         let resp = task.await.unwrap();
         assert_eq!(response_json(resp).await["status"], true);
+    }
+
+    #[tokio::test]
+    async fn reverifying_the_same_account_still_finishes_the_cleanup() {
+        // The final credentials equal the ones already installed, so only the
+        // install hook tells the handler the context was rotated and the
+        // post-exchange cleanup is still owed.
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 200, 0).await;
+        s.extras.prime_for_test(
+            crate::extras::Credentials {
+                number: "9876543210".into(),
+                sso_token: "redacted-sso".into(),
+                auth_token: "redacted-at".into(),
+                ..Default::default()
+            },
+            Vec::new(),
+            None,
+        );
+        let before = s.secure.current_epoch();
+        let resp = verify(&s).await;
+        assert_eq!(response_json(resp).await["status"], true);
+        assert_eq!(
+            s.secure.current_epoch(),
+            before + 2,
+            "install and post-exchange rotations were not both performed"
+        );
     }
 
     #[tokio::test]

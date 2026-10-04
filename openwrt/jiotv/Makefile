@@ -42,16 +42,6 @@ define Package/jiotv-slim/conffiles
 /etc/config/jiotv
 endef
 
-define Package/jiotv/postinst
-#!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /etc/uci-defaults/99-jiotv
-endef
-
-define Package/jiotv-slim/postinst
-#!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /etc/uci-defaults/99-jiotv
-endef
-
 define Package/jiotv/install
 	$(INSTALL_DIR) $(1)/usr/bin $(1)/etc/init.d $(1)/etc/config $(1)/etc/uci-defaults
 	$(INSTALL_BIN) $(JIOTV_FULL_BIN) $(1)/usr/bin/jiotv

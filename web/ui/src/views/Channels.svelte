@@ -42,6 +42,10 @@
   let unlockNotice = $state(null);
   $effect(() => {
     const q = query.trim();
+    // A rejected or failed attempt is remembered only while the box still holds
+    // that value, so it is not resent on every edit but can be tried again once
+    // the viewer has cleared or changed it.
+    if (triedCode && q !== triedCode) triedCode = "";
     if (q && q !== triedCode && looksLikeUnlockCode(q)) {
       triedCode = q;
       api("/api/extras/unlock", { method: "POST", body: { code: q } })
@@ -102,7 +106,8 @@
     } catch (err) {
       if (isLatest()) error = err.message;
     } finally {
-      loading = false;
+      // An unlock refresh that started meanwhile owns the loading state.
+      if (isLatest()) loading = false;
     }
   });
 </script>

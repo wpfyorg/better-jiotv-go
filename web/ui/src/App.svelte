@@ -86,7 +86,8 @@
     display: flex;
     min-width: 0;
     align-items: center;
-    justify-content: flex-end;
+    /* flex-end would clip the first links when the row overflows on narrow phones. */
+    justify-content: flex-start;
     gap: 3px;
     overflow-x: auto;
     scrollbar-width: none;
@@ -111,7 +112,12 @@
   @media (max-width: 640px) {
     .bar { gap: 10px; padding: 9px 12px; }
     .brand { font-size: 15px; }
-    nav a, .link { padding: 6px 8px; font-size: 12px; }
+    nav a, .link { display: inline-flex; align-items: center; min-height: 40px; padding: 0 8px; font-size: 12px; }
     main { padding: 14px 10px 40px; }
+  }
+  @media (max-width: 380px) {
+    .bar { gap: 6px; }
+    nav { gap: 0; }
+    nav a, .link { padding: 0 6px; }
   }
 </style>

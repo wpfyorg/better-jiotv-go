@@ -218,18 +218,23 @@ pub async fn live_handler(
     live_impl(&state, &channel_and_quality(&id), "auto", &prefix).await
 }
 
+/// Channels 1349/1322 output audio-only m3u8 when a quality is forced, so every
+/// HLS source selection for them must stay on `auto`.
+pub(crate) fn hls_quality_for_channel<'a>(id: &str, quality: &'a str) -> &'a str {
+    if id == "1349" || id == "1322" {
+        "auto"
+    } else {
+        quality
+    }
+}
+
 pub async fn live_quality_handler(
     axum::extract::Path((quality, id)): axum::extract::Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     prefix: Option<axum::Extension<crate::api::KeyPrefix>>,
 ) -> Response {
     let id = channel_and_quality(&id);
-    // Channels 1349/1322 output audio-only m3u8 when a quality is forced.
-    let quality = if id == "1349" || id == "1322" {
-        "auto".to_string()
-    } else {
-        quality
-    };
+    let quality = hls_quality_for_channel(&id, &quality).to_string();
     live_impl(&state, &id, &quality, &prefix).await
 }
 
@@ -297,6 +302,7 @@ pub struct RenderQuery {
     auth: Option<String>,
     channel_key_id: Option<String>,
     q: Option<String>,
+    nested: Option<bool>,
 }
 
 /// Rewrites a fetched HLS manifest so every media/key URI routes back
@@ -323,6 +329,15 @@ fn rewrite_m3u8(
             ""
         };
 
+        if let Some(rewritten) =
+            rewrite_media_attr_line(trimmed, base_url, params, channel_id, quality)
+        {
+            out.push_str(&rewritten);
+            out.push_str(cr);
+            out.push_str(newline);
+            continue;
+        }
+
         if let Some(rewritten) = rewrite_key_attr_line(trimmed, params, channel_id) {
             out.push_str(&rewritten);
             out.push_str(cr);
@@ -345,8 +360,12 @@ fn rewrite_m3u8(
             .to_lowercase();
         let endpoint = if path_only.ends_with(".m3u8") {
             Some(("/render.m3u8", true))
-        } else if path_only.ends_with(".ts") || path_only.ends_with(".aac") {
+        } else if path_only.ends_with(".ts") {
             Some(("/render.ts", false))
+        } else if path_only.ends_with(".aac") {
+            // Players pick the HLS segment container from the URI extension;
+            // packed audio behind a `.ts` path is parsed as MPEG-TS and dropped.
+            Some(("/render.aac", false))
         } else {
             None
         };
@@ -361,6 +380,7 @@ fn rewrite_m3u8(
                         &full_url,
                         channel_id,
                         if is_manifest { quality } else { "" },
+                        is_manifest,
                     ));
                 }
             }
@@ -380,6 +400,10 @@ fn resolve_media_url(uri: &str, base_url: &str, params: &str) -> String {
     let lower = uri.to_lowercase();
     let mut full = if lower.starts_with("http://") || lower.starts_with("https://") {
         uri.to_string()
+    } else if let Ok(base) = url::Url::parse(base_url) {
+        base.join(uri)
+            .map(|url| url.to_string())
+            .unwrap_or_else(|_| format!("{base_url}{uri}"))
     } else {
         format!("{base_url}{uri}")
     };
@@ -391,12 +415,21 @@ fn resolve_media_url(uri: &str, base_url: &str, params: &str) -> String {
     full
 }
 
-fn build_encrypted_link(endpoint: &str, full_url: &str, channel_id: &str, quality: &str) -> String {
+fn build_encrypted_link(
+    endpoint: &str,
+    full_url: &str,
+    channel_id: &str,
+    quality: &str,
+    nested: bool,
+) -> String {
     // Encryption happens in the caller (needs access to AppState::secure);
     // this function is only reached through `render_replace`, which does
     // the encryption inline. Kept separate for the unit tests below, which
     // exercise URL resolution without needing a real SecureUrl.
-    format!("{endpoint}||{full_url}||{channel_id}||{quality}")
+    format!(
+        "{endpoint}||{full_url}||{channel_id}||{quality}||{}",
+        if nested { "1" } else { "" }
+    )
 }
 
 fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<String> {
@@ -411,7 +444,7 @@ fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<S
     if !(key_url.starts_with("http://") || key_url.starts_with("https://")) {
         return None;
     }
-    let replacement = build_encrypted_link("/render.key", key_url, channel_id, "");
+    let replacement = build_encrypted_link("/render.key", key_url, channel_id, "", false);
     let _ = params;
     Some(format!(
         "{}{}{}",
@@ -421,7 +454,30 @@ fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<S
     ))
 }
 
-/// Runs `rewrite_m3u8` and then actually encrypts every `endpoint||url||id||q`
+fn rewrite_media_attr_line(
+    line: &str,
+    base_url: &str,
+    params: &str,
+    channel_id: &str,
+    quality: &str,
+) -> Option<String> {
+    if !line.starts_with("#EXT-X-MEDIA:") {
+        return None;
+    }
+    let uri_start = line.find("URI=\"")? + 5;
+    let uri_end = line[uri_start..].find('"')? + uri_start;
+    let url = resolve_media_url(&line[uri_start..uri_end], base_url, params);
+    let replacement = build_encrypted_link("/render.m3u8", &url, channel_id, quality, true);
+    Some(format!(
+        "{}{}{}",
+        &line[..uri_start],
+        replacement,
+        &line[uri_end..]
+    ))
+}
+
+/// Runs `rewrite_m3u8` and then actually encrypts every
+/// `endpoint||url||id||q||nested`
 /// placeholder it produced (see `build_encrypted_link`).
 fn render_replace(
     state: &AppState,
@@ -444,9 +500,9 @@ fn render_replace(
     while let Some(start) = rest.find("/render.") {
         out.push_str(&rest[..start]);
         let tail = &rest[start..];
-        // Find the end of our placeholder: endpoint||url||id||q, terminated
-        // by end-of-line/string since these never legitimately contain '\n'.
-        let line_end = tail.find('\n').unwrap_or(tail.len());
+        // Quoted URI attributes end before the closing quote. Preserve that
+        // quote and any following attributes when encrypting the placeholder.
+        let line_end = tail.find(['\n', '\r', '"']).unwrap_or(tail.len());
         let placeholder_str = &tail[..line_end];
         if let Some(encoded) = encode_placeholder(state, placeholder_str) {
             out.push_str(&encoded);
@@ -461,11 +517,12 @@ fn render_replace(
 }
 
 fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
-    let mut parts = s.splitn(4, "||");
+    let mut parts = s.splitn(5, "||");
     let endpoint = parts.next()?;
     let url = parts.next()?;
     let channel_id = parts.next()?;
     let quality = parts.next()?;
+    let nested = parts.next().unwrap_or_default() == "1";
     let encrypted = state.secure.encrypt(url);
     let mut out = format!("{endpoint}?auth={encrypted}");
     if !channel_id.is_empty() {
@@ -473,6 +530,9 @@ fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
     }
     if !quality.is_empty() {
         out.push_str(&format!("&q={quality}"));
+    }
+    if nested {
+        out.push_str("&nested=true");
     }
     Some(out)
 }
@@ -504,6 +564,7 @@ pub async fn render_m3u8_handler(
     };
     let decoded = to_absolute_stream_url(&decoded, None);
     let quality = q.q.unwrap_or_default();
+    let nested = q.nested.unwrap_or(false);
 
     let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded);
     let cached = state.render_caches.get_hdnea(&hdnea_key);
@@ -539,7 +600,7 @@ pub async fn render_m3u8_handler(
                     token = h;
                 }
 
-                if status == 404 {
+                if status == 404 && !nested {
                     let retry_quality = if quality.is_empty() { "auto" } else { &quality };
                     let candidates = [retry_quality, "auto", "high", "medium", "low"];
                     let mut tried = std::collections::HashSet::new();
@@ -861,6 +922,26 @@ mod tests {
     }
 
     #[test]
+    fn resolves_root_relative_manifest_uri_against_origin() {
+        assert_eq!(
+            resolve_media_url(
+                "/bpk-tv/channel/variant.m3u8",
+                "https://a.b/live/channel/",
+                ""
+            ),
+            "https://a.b/bpk-tv/channel/variant.m3u8"
+        );
+    }
+
+    #[test]
+    fn resolves_parent_relative_manifest_uri() {
+        assert_eq!(
+            resolve_media_url("../variant.m3u8", "https://a.b/live/channel/", ""),
+            "https://a.b/live/variant.m3u8"
+        );
+    }
+
+    #[test]
     fn rewrites_ts_segment_lines() {
         let body = "#EXTM3U\nseg1.ts\n";
         let rewritten = rewrite_m3u8(
@@ -875,6 +956,14 @@ mod tests {
     }
 
     #[test]
+    fn rewrites_packed_audio_segments_to_aac_route() {
+        let body = "#EXTM3U\n#EXTINF:4,\naudio_1.aac?x=1\n#EXTINF:4,\nvideo_1.ts\n";
+        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "ex_1", "auto", false);
+        assert!(rewritten.contains("\n/render.aac||https://a.b/live/audio_1.aac?x=1||ex_1||"));
+        assert!(rewritten.contains("\n/render.ts||https://a.b/live/video_1.ts||ex_1||"));
+    }
+
+    #[test]
     fn ts_passthrough_when_disabled() {
         let body = "#EXTM3U\nseg1.ts\n";
         let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "auto", true);
@@ -886,7 +975,7 @@ mod tests {
         let body =
             "#EXT-X-KEY:METHOD=AES-128,URI=\"https://tv.media.jio.com/key.pkey\",IV=0x1\nseg1.ts\n";
         let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "auto", false);
-        assert!(rewritten.starts_with("#EXT-X-KEY:METHOD=AES-128,URI=\"/render.key||https://tv.media.jio.com/key.pkey||154||\""));
+        assert!(rewritten.starts_with("#EXT-X-KEY:METHOD=AES-128,URI=\"/render.key||https://tv.media.jio.com/key.pkey||154||||\""));
         assert!(rewritten.contains(",IV=0x1"));
     }
 
@@ -919,5 +1008,85 @@ mod tests {
         assert!(out.contains("/render.ts?auth="));
         assert!(out.contains("&channel_key_id=154"));
         assert!(!out.contains("||"));
+
+        for tag in ["EXT-X-KEY", "EXT-X-SESSION-KEY"] {
+            for suffix in ["", ",IV=0x1,KEYFORMAT=\"identity\""] {
+                let body = format!(
+                    "#EXTM3U\n#{tag}:METHOD=AES-128,URI=\"https://a.b/key.pkey\"{suffix}\nseg1.ts\n"
+                );
+                let out = render_replace(&state, &body, "https://a.b/live/", "", "154", "auto");
+                let line = out.lines().nth(1).unwrap();
+                let uri = line.split("URI=\"").nth(1).unwrap();
+                let (uri, remainder) = uri.split_once('"').expect("key URI must close");
+                assert_eq!(remainder, suffix);
+                assert!(uri.starts_with("/render.key?auth="));
+                let url = url::Url::parse(&format!("http://localhost{uri}")).unwrap();
+                let auth = url.query_pairs().find(|(k, _)| k == "auth").unwrap().1;
+                assert_eq!(state.secure.decrypt(&auth).unwrap(), "https://a.b/key.pkey");
+                assert!(out.contains("/render.ts?auth="));
+                assert!(!out.contains("||"));
+            }
+        }
+
+        let muxed = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Hindi\"";
+        for (uri, expected) in [
+            (
+                "audio.m3u8?language=hin",
+                "https://a.b/live/audio.m3u8?language=hin&__hdnea__=fresh",
+            ),
+            ("/audio.m3u8", "https://a.b/audio.m3u8?__hdnea__=fresh"),
+            (
+                "https://c.d/audio.m3u8",
+                "https://c.d/audio.m3u8?__hdnea__=fresh",
+            ),
+        ] {
+            let body = format!("{muxed},URI=\"{uri}\",DEFAULT=YES\r\n{muxed}\r\n");
+            let out = render_replace(
+                &state,
+                &body,
+                "https://a.b/live/",
+                "__hdnea__=fresh",
+                "154",
+                "auto",
+            );
+            let uri = out.lines().next().unwrap().split("URI=\"").nth(1).unwrap();
+            let (uri, suffix) = uri.split_once('"').unwrap();
+            assert_eq!(suffix, ",DEFAULT=YES");
+            let url = url::Url::parse(&format!("http://localhost{uri}")).unwrap();
+            let auth = url.query_pairs().find(|(k, _)| k == "auth").unwrap().1;
+            assert_eq!(state.secure.decrypt(&auth).unwrap(), expected);
+            assert!(uri.contains("&nested=true"));
+            assert!(out.ends_with(&format!("{muxed}\r\n")));
+        }
+    }
+
+    #[test]
+    fn child_manifest_links_are_marked_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            std::sync::Arc::new(crate::store::Store::open(dir.path().to_str().unwrap()).unwrap());
+        let secure = crate::secureurl::SecureUrl::new(false);
+        let state = AppState {
+            config: crate::config::Config::default(),
+            path_prefix: String::new(),
+            access: std::sync::Arc::new(crate::access::Access::new(store.clone())),
+            store,
+            tv: std::sync::Arc::new(crate::television::Television::new(reqwest::Client::new())),
+            secure: std::sync::Arc::new(secure),
+            http: reqwest::Client::new(),
+            drm_channels: Default::default(),
+            custom_channels: std::sync::Arc::new(crate::custom_channels::CustomChannels::new()),
+            render_caches: Default::default(),
+            dash_state: Default::default(),
+            epg_state: Default::default(),
+            extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
+            vod_state: Default::default(),
+            public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
+            unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+        };
+        let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nchild.m3u8\n";
+        let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");
+        assert!(out.contains("/render.m3u8?auth="));
+        assert!(out.contains("&nested=true"));
     }
 }

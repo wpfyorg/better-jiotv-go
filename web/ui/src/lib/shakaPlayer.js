@@ -82,6 +82,131 @@ export function playbackErrorMessage(error, capability = null) {
   return error?.message || String(error || "Playback failed");
 }
 
+// Shaka BAD_HTTP_STATUS (1001) carries [uri, status, ...] in error.data.
+export function playbackHttpStatus(error) {
+  const status = error?.httpStatus ?? error?.data?.httpStatus ?? (Number(error?.code) === 1001 ? error?.data?.[1] : undefined);
+  const n = Number(status);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Decide which user-facing explanation fits a terminal live-playback failure:
+// "browser_unsupported" (DRM/key-system capability and no usable HLS),
+// "provider_unavailable" (upstream 404) or "generic" (show the raw error).
+export function classifyPlaybackFailure({ dashError = null, hlsError = null, hadHls = false, capability = null } = {}) {
+  const drmCause = (error) =>
+    !!error && isDrmPlaybackError(error) && (Number(error.code) === 6001 || (!!capability && !capability.usable));
+  if (drmCause(dashError) && (!hadHls || hlsError)) return "browser_unsupported";
+  if (playbackHttpStatus(hlsError ?? dashError) === 404) return "provider_unavailable";
+  return "generic";
+}
+
+// `/api/live/play` answers 404 "No stream found..." when the provider returned no
+// usable DASH or HLS source; that is the same provider-side outage a 404 from
+// the player reports. Other 404s (e.g. a channel not available for the active
+// account) stay generic.
+export function sourceResolutionFailure(error) {
+  const noStream = Number(error?.status) === 404 && /no stream found/i.test(error?.message ?? "");
+  return noStream ? "provider_unavailable" : "generic";
+}
+
+export async function loadLiveSource({ player, video, source, drmCapability = null, isCurrent = () => true, onTerminalError = () => {} }) {
+  let fallbackPromise = null;
+  let usingHls = false;
+  let fallbackSettled = false;
+  let terminalReported = false;
+  let dashError = null;
+  let hlsError = null;
+
+  // onTerminalError(message, { kind, dashError, hlsError, hadHls }); the second
+  // argument is optional for callers that only need the message.
+  const reportTerminal = (error) => {
+    if (!terminalReported && isCurrent()) {
+      terminalReported = true;
+      if (usingHls) hlsError = error;
+      else dashError = dashError ?? error;
+      const hadHls = !!(source.dash && source.hls);
+      const kind = classifyPlaybackFailure({ dashError, hlsError, hadHls, capability: drmCapability });
+      // A browser-unsupported failure is explained by the DASH/DRM cause, not by
+      // whatever the HLS alternative then failed with.
+      const reported = kind === "browser_unsupported" && dashError ? dashError : error;
+      onTerminalError(playbackErrorMessage(reported, drmCapability), { kind, dashError, hlsError, hadHls });
+    }
+  };
+
+  const fallbackToHls = () => {
+    if (!source.dash || !source.hls) return Promise.resolve(false);
+    if (!isCurrent()) return Promise.resolve(false);
+    if (fallbackPromise) return fallbackPromise;
+
+    fallbackPromise = (async () => {
+      usingHls = true;
+      try {
+        await player.unload();
+        if (!isCurrent()) return false;
+        try {
+          await player.load(source.hls);
+        } catch (error) {
+          if (error?.code !== 4032 || !player.getConfiguration().drm.servers["com.widevine.alpha"]) throw error;
+          // Shaka applies configured license servers even to HLS without DRM
+          // metadata. Retry without the DASH server so AES HLS can use WebCrypto.
+          await player.unload();
+          if (!isCurrent()) return false;
+          player.configure({ drm: { servers: undefined } });
+          await player.load(source.hls);
+        }
+        if (!isCurrent()) return false;
+        await playWithAutoplay(video);
+        return true;
+      } finally {
+        fallbackSettled = true;
+      }
+    })();
+    return fallbackPromise;
+  };
+
+  player.addEventListener("error", (event) => {
+    const detail = event.detail;
+    // Shaka RECOVERABLE (1) errors are reported while it keeps playing, for any
+    // source; only CRITICAL ones may fall back to HLS or end playback.
+    if (detail?.severity === 1) return;
+    if (!usingHls) dashError = dashError ?? detail;
+    if (source.dash && source.hls && !usingHls) {
+      fallbackToHls().catch(reportTerminal);
+      return;
+    }
+    if (usingHls && !fallbackSettled) return;
+    reportTerminal(detail);
+  });
+
+  try {
+    await player.load(source.url);
+  } catch (error) {
+    dashError = dashError ?? error;
+    if (source.dash && source.hls) {
+      try {
+        if (await fallbackToHls()) return;
+        if (!isCurrent()) return;
+      } catch (fallbackError) {
+        reportTerminal(fallbackError);
+        return;
+      }
+    }
+    reportTerminal(error);
+    return;
+  }
+
+  if (fallbackPromise) {
+    try {
+      await fallbackPromise;
+    } catch (error) {
+      reportTerminal(error);
+    }
+    return;
+  }
+
+  if (isCurrent()) await playWithAutoplay(video);
+}
+
 export async function createShakaPlayer(container, video) {
   await Promise.all([
     loadScript("/static/external/shaka-player.ui.js"),

@@ -38,6 +38,9 @@ pub struct DrmMpdOutput {
 #[derive(Default)]
 pub struct DashState {
     drm_mpd_cache: RwLock<std::collections::HashMap<String, (DrmMpdOutput, Instant)>>,
+    live_cache: RwLock<std::collections::HashMap<String, (LiveUrlOutput, Instant, u64)>>,
+    /// Coalesces concurrent live-cache misses for the same channel.
+    live_locks: crate::keyed_locks::KeyedLocks,
     cdn_clock: Mutex<Option<(SystemTime, Instant)>>,
 }
 
@@ -58,6 +61,35 @@ impl DashState {
             .insert(key.to_string(), (out, Instant::now()));
     }
 
+    /// A cached entry is only served in the context epoch it was fetched in,
+    /// so a hit racing an account switch (epoch rotated, cache not yet
+    /// cleared) is a miss rather than the previous account's data.
+    fn get_live(&self, channel_id: &str, epoch: u64) -> Option<LiveUrlOutput> {
+        let map = self.live_cache.read().unwrap();
+        let (out, at, entry_epoch) = map.get(channel_id)?;
+        (*entry_epoch == epoch && at.elapsed() <= DRM_MPD_CACHE_TTL).then(|| out.clone())
+    }
+
+    /// Stores `out`, fetched under `epoch`, only if `current_epoch()` still
+    /// equals it. The comparison runs under the cache's write lock, which
+    /// `clear` also takes after the epoch rotates, so a fetch started before an
+    /// account switch cannot repopulate the cleared cache. Returns whether the
+    /// entry was stored.
+    fn set_live(
+        &self,
+        channel_id: &str,
+        out: LiveUrlOutput,
+        epoch: u64,
+        current_epoch: impl FnOnce() -> u64,
+    ) -> bool {
+        let mut map = self.live_cache.write().unwrap();
+        if current_epoch() != epoch {
+            return false;
+        }
+        map.insert(channel_id.to_string(), (out, Instant::now(), epoch));
+        true
+    }
+
     fn record_publish_time(&self, t: SystemTime) {
         *self.cdn_clock.lock().unwrap() = Some((t, Instant::now()));
     }
@@ -71,6 +103,7 @@ impl DashState {
 
     pub fn clear(&self) {
         self.drm_mpd_cache.write().unwrap().clear();
+        self.live_cache.write().unwrap().clear();
         *self.cdn_clock.lock().unwrap() = None;
     }
 }
@@ -105,6 +138,41 @@ fn cdn_host_and_dir(url_str: &str) -> Option<(String, String)> {
     Some((host, dir))
 }
 
+/// The full playback response for the in-app player, cached for the same
+/// short window as the DASH output so reloads and concurrent viewers do not
+/// each hit the playback API. Returns the context epoch the response belongs
+/// to; callers that encrypt URLs from it must confirm the epoch is unchanged
+/// afterwards, or the previous account's data would be re-encrypted under the
+/// new epoch.
+pub(crate) async fn get_live_cached(
+    state: &AppState,
+    channel_id: &str,
+) -> anyhow::Result<(LiveUrlOutput, u64)> {
+    let epoch = state.secure.current_epoch();
+    if let Some(cached) = state.dash_state.get_live(channel_id, epoch) {
+        return Ok((cached, epoch));
+    }
+    let _guard = state.dash_state.live_locks.lock(channel_id).await;
+    // Retry once if an account/product switch lands mid-fetch.
+    for _ in 0..2 {
+        let epoch = state.secure.current_epoch();
+        // Another request may have filled the cache while this one waited.
+        if let Some(cached) = state.dash_state.get_live(channel_id, epoch) {
+            return Ok((cached, epoch));
+        }
+        let live = crate::stream::fetch_live(state, channel_id).await?;
+        if state
+            .dash_state
+            .set_live(channel_id, live.clone(), epoch, || {
+                state.secure.current_epoch()
+            })
+        {
+            return Ok((live, epoch));
+        }
+    }
+    anyhow::bail!("the active account changed while resolving channel {channel_id}; retry")
+}
+
 pub(crate) async fn get_drm_mpd(
     state: &AppState,
     channel_id: &str,
@@ -120,7 +188,7 @@ pub(crate) async fn get_drm_mpd(
     Ok(out)
 }
 
-fn build_drm_mpd_output(
+pub(crate) fn build_drm_mpd_output(
     state: &AppState,
     live: &LiveUrlOutput,
     channel_id: &str,
@@ -837,6 +905,66 @@ mod httpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_cache_serves_recent_entries_and_clears_with_the_context() {
+        let state = DashState::default();
+        assert!(state.get_live("154", 1).is_none());
+        assert!(state.set_live(
+            "154",
+            LiveUrlOutput {
+                hdnea: "token".into(),
+                ..Default::default()
+            },
+            1,
+            || 1,
+        ));
+        assert_eq!(state.get_live("154", 1).unwrap().hdnea, "token");
+        assert!(state.get_live("155", 1).is_none());
+        state.clear();
+        assert!(state.get_live("154", 1).is_none());
+    }
+
+    #[test]
+    fn live_cache_discards_fetches_that_outlived_their_context() {
+        let state = DashState::default();
+        assert!(!state.set_live("154", LiveUrlOutput::default(), 1, || 2));
+        assert!(state.get_live("154", 1).is_none());
+        assert!(state.get_live("154", 2).is_none());
+    }
+
+    #[test]
+    fn live_cache_hit_in_a_newer_epoch_is_a_miss() {
+        let state = DashState::default();
+        assert!(state.set_live("154", LiveUrlOutput::default(), 1, || 1));
+        // The epoch rotated but `clear` has not run yet.
+        assert!(state.get_live("154", 2).is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_live_cache_misses_share_one_fetch() {
+        let state = Arc::new(DashState::default());
+        let fetches = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let viewer = |state: Arc<DashState>, fetches: Arc<std::sync::atomic::AtomicU32>| async move {
+            if state.get_live("154", 1).is_some() {
+                return;
+            }
+            let _guard = state.live_locks.lock("154").await;
+            if state.get_live("154", 1).is_some() {
+                return;
+            }
+            fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            state.set_live("154", LiveUrlOutput::default(), 1, || 1);
+        };
+        let tasks: Vec<_> = (0..5)
+            .map(|_| tokio::spawn(viewer(state.clone(), fetches.clone())))
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn parses_rfc3339_publish_time() {

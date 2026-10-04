@@ -226,6 +226,8 @@ struct ApiChannel {
     hd: bool,
     extras: bool,
     catchup: bool,
+    #[serde(rename = "requiresSubscription")]
+    requires_subscription: bool,
     playable: bool,
 }
 
@@ -253,6 +255,7 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
                 hd: ch.is_hd,
                 extras: ch.id.starts_with(crate::extras::ID_PREFIX),
                 catchup: ch.is_catchup_available,
+                requires_subscription: ch.requires_subscription(),
                 playable: state.is_playable(&ch.id),
             }
         })
@@ -322,6 +325,9 @@ pub async fn jiotv_verify_otp(
     state.invalidate_context();
     state.tv.set_credentials(creds);
     state.extras.invalidate_account_context();
+    // A request that entered after the first rotation still used the old
+    // credentials; rotate again now that the new ones are installed.
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": "success"})).into_response()
 }
@@ -334,6 +340,7 @@ pub async fn jiotv_logout(State(state): State<SharedState>) -> Response {
     state.invalidate_context();
     state.tv.clear_credentials();
     state.extras.invalidate_account_context();
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true})).into_response()
 }
@@ -406,6 +413,8 @@ pub async fn extras_verify_otp(
         .extras
         .verify_otp(&body.number, &body.otp, &state.store)
         .await;
+    // Anything resolved while the exchange was in flight used the old account.
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     match result {
         Ok(ok) => Json(json!({"status": ok})).into_response(),
@@ -422,6 +431,7 @@ pub async fn extras_logout(State(state): State<SharedState>) -> Response {
     state.invalidate_context();
     match state.extras.logout(&state.store) {
         Ok(()) => {
+            state.invalidate_context();
             crate::epg::trigger_regeneration(&state);
             Json(json!({"status": true})).into_response()
         }
@@ -475,6 +485,7 @@ pub async fn extras_unlock(
     }
     state.invalidate_context();
     state.extras.set_unlocked(true, &state.http, &state.store);
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
@@ -488,17 +499,19 @@ pub async fn extras_lock(State(state): State<SharedState>) -> Response {
     }
     state.invalidate_context();
     state.extras.set_unlocked(false, &state.http, &state.store);
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
 
 /// `GET /api/live/play/:id?q=` — resolves a live channel to what the
-/// in-app player needs, the same shape `/api/ott/play/:id` gives
-/// `VodPlayer.svelte` (`{dash, url, license}`), so `Watch.svelte` can use
+/// in-app player needs, the same shape `/api/ott/play/:id` gives plus an
+/// optional HLS alternative, so `Watch.svelte` can use
 /// the same Shaka/hls.js logic instead of the old Go-template `/mpd/:id`
-/// iframe. Tries DASH first via the same `get_drm_mpd` the IPTV
-/// `/live/mpd/:id` route uses, falling back to HLS exactly like
-/// `LiveHandler` does when there's no DASH stream.
+/// iframe. DASH remains the preferred source, matching the TV+ app. When the
+/// provider also returned HLS, expose that exact source so the UI can retry it
+/// after a DASH player failure. DASH-only channels therefore never fall into a
+/// fabricated `/live/...m3u8` request.
 pub async fn live_play(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
@@ -517,36 +530,77 @@ pub async fn live_play(
         return Json(json!({"dash": false, "url": ch.url, "license": null})).into_response();
     }
 
-    if let Ok(out) = crate::dash::get_drm_mpd(&state, &id, &quality).await {
+    // The response URLs are encrypted under the current context epoch, so the
+    // data they carry must belong to that epoch from lookup until the last URL
+    // is generated. If an account switch lands in between, resolve again.
+    for _ in 0..2 {
+        let (live, epoch) = match crate::dash::get_live_cached(&state, &id).await {
+            Ok(l) => l,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+        let response = live_play_response_from_live(&state, &live, &id, &quality);
+        if state.secure.current_epoch() == epoch {
+            return response;
+        }
+    }
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "The active account changed while resolving the stream; retry",
+    )
+}
+
+fn live_play_response_from_live(
+    state: &AppState,
+    live: &crate::television::LiveUrlOutput,
+    id: &str,
+    quality: &str,
+) -> Response {
+    let hls_quality = crate::stream::hls_quality_for_channel(id, quality);
+    let live_url = crate::television::select_best_live_hls_url(live, hls_quality);
+    let hls = if live_url.is_empty() {
+        serde_json::Value::Null
+    } else {
+        let abs = crate::stream::to_absolute_stream_url(
+            &live_url,
+            crate::stream::absolute_base_from_live(live).as_deref(),
+        );
+        let encrypted = state.secure.encrypt(&abs);
+        // Carry a forced quality so a 404 recovery retries it before `auto`.
+        let q = if hls_quality == "auto" {
+            String::new()
+        } else {
+            format!("&q={hls_quality}")
+        };
+        serde_json::Value::String(format!(
+            "/render.m3u8?auth={encrypted}&channel_key_id={id}{q}"
+        ))
+    };
+
+    if let Ok(out) = crate::dash::build_drm_mpd_output(state, live, id, quality) {
         if !out.play_url.is_empty() {
             let license = if out.license_url.is_empty() {
                 serde_json::Value::Null
             } else {
                 serde_json::Value::String(out.license_url)
             };
-            return Json(json!({"dash": true, "url": out.play_url, "license": license}))
-                .into_response();
+            return Json(json!({
+                "dash": true,
+                "url": out.play_url,
+                "license": license,
+                "hls": hls
+            }))
+            .into_response();
         }
     }
 
-    let live = match crate::stream::fetch_live(&state, &id).await {
-        Ok(l) => l,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-    let live_url = crate::television::select_best_live_hls_url(&live, &quality);
     if live_url.is_empty() {
         return err(
             StatusCode::NOT_FOUND,
             format!("No stream found for channel id: {id}"),
         );
     }
-    let abs = crate::stream::to_absolute_stream_url(
-        &live_url,
-        crate::stream::absolute_base_from_live(&live).as_deref(),
-    );
-    let encrypted = state.secure.encrypt(&abs);
-    let url = format!("/render.m3u8?auth={encrypted}&channel_key_id={id}");
-    Json(json!({"dash": false, "url": url, "license": null})).into_response()
+    let url = hls.as_str().unwrap_or_default();
+    Json(json!({"dash": false, "url": url, "license": null, "hls": null})).into_response()
 }
 
 #[cfg(test)]
@@ -620,5 +674,167 @@ mod tests {
         assert_eq!(json["catalogue"]["extrasEntitlementStatus"], "unknown");
         assert_eq!(json["catalogue"]["extrasEntitlementsAvailable"], false);
         assert_eq!(json["catalogue"]["extrasEntitlementsApplied"], false);
+    }
+
+    #[tokio::test]
+    async fn channels_marks_premium_business_type_as_subscription_required() {
+        let s = state();
+        s.tv.set_channels_for_test(vec![
+            crate::television::Channel {
+                id: "154".into(),
+                name: "Premium".into(),
+                business_type: "premium".into(),
+                ..Default::default()
+            },
+            crate::television::Channel {
+                id: "1148".into(),
+                name: "Free".into(),
+                business_type: "free".into(),
+                ..Default::default()
+            },
+        ]);
+
+        let response = channels(State(s)).await;
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let channels = json["channels"].as_array().unwrap();
+
+        let premium = channels.iter().find(|row| row["id"] == "154").unwrap();
+        let free = channels.iter().find(|row| row["id"] == "1148").unwrap();
+        assert_eq!(premium["requiresSubscription"], true);
+        assert_eq!(free["requiresSubscription"], false);
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_play_response_keeps_mpd_only_source_on_dash() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            mpd: crate::television::Mpd {
+                auto: "https://media.example/live/manifest.mpd".into(),
+                key: "https://license.example/widevine".into(),
+                ..Default::default()
+            },
+            is_drm: true,
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_mpd", "auto")).await;
+        assert_eq!(json["dash"], true);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.mpd?"));
+        assert!(json["license"].as_str().unwrap().starts_with("/drm?"));
+        assert!(json["hls"].is_null());
+    }
+
+    #[tokio::test]
+    async fn live_play_response_exposes_provider_hls_as_dash_alternative() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/master.m3u8".into(),
+                ..Default::default()
+            },
+            mpd: crate::television::Mpd {
+                auto: "https://media.example/live/manifest.mpd".into(),
+                key: "https://license.example/widevine".into(),
+                ..Default::default()
+            },
+            is_drm: true,
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_both", "auto")).await;
+        assert_eq!(json["dash"], true);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.mpd?"));
+        assert!(json["hls"].as_str().unwrap().starts_with("/render.m3u8?"));
+    }
+
+    #[tokio::test]
+    async fn live_play_response_marks_primary_hls_without_alternative() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/master.m3u8".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_hls", "auto")).await;
+        assert_eq!(json["dash"], false);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.m3u8?"));
+        assert!(json["license"].is_null());
+        assert!(json["hls"].is_null());
+    }
+
+    fn two_quality_hls() -> crate::television::LiveUrlOutput {
+        crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/auto.m3u8".into(),
+                high: "https://media.example/live/high.m3u8".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn decrypted_hls(s: &AppState, url: &str) -> (String, String) {
+        let query = url.split_once('?').unwrap().1;
+        let param = |name: &str| {
+            query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+                .unwrap_or_default()
+                .to_string()
+        };
+        (s.secure.decrypt(&param("auth")).unwrap(), param("q"))
+    }
+
+    #[tokio::test]
+    async fn live_play_response_carries_forced_quality_into_the_hls_url() {
+        let s = state();
+        let json = response_json(live_play_response_from_live(
+            &s,
+            &two_quality_hls(),
+            "ex_hls",
+            "high",
+        ))
+        .await;
+        let (source, q) = decrypted_hls(&s, json["url"].as_str().unwrap());
+        assert!(source.ends_with("/high.m3u8"));
+        assert_eq!(q, "high");
+    }
+
+    #[tokio::test]
+    async fn live_play_response_keeps_audio_only_channels_on_auto() {
+        let s = state();
+        for id in ["1349", "1322"] {
+            let json = response_json(live_play_response_from_live(
+                &s,
+                &two_quality_hls(),
+                id,
+                "high",
+            ))
+            .await;
+            let (source, q) = decrypted_hls(&s, json["url"].as_str().unwrap());
+            assert!(source.ends_with("/auto.m3u8"), "channel {id}");
+            assert_eq!(q, "", "channel {id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn account_transitions_rotate_again_after_the_new_state_is_installed() {
+        let s = state();
+        let before = s.secure.current_epoch();
+        jiotv_logout(State(s.clone())).await;
+        assert_eq!(s.secure.current_epoch(), before + 2, "logout");
+
+        let before = s.secure.current_epoch();
+        extras_lock(State(s.clone())).await;
+        assert_eq!(s.secure.current_epoch(), before + 2, "extras lock");
     }
 }

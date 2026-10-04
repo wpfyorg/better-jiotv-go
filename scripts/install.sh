@@ -121,8 +121,11 @@ local_ip() {
     case "$ifc" in utun*|ppp*|ipsec*|gif*|stf*) ifc= ;; esac
     if [ -n "$ifc" ]; then addr=$(ipconfig getifaddr "$ifc" 2>/dev/null || true); fi
     if [ -z "$addr" ]; then
-      for ifc in en0 en1; do
+      # Any active interface that is not loopback, a tunnel or a virtual bridge.
+      for ifc in $(ifconfig -l 2>/dev/null || true); do
+        case "$ifc" in lo*|utun*|ppp*|ipsec*|gif*|stf*|awdl*|llw*|bridge*|ap*|anpi*|vmenet*) continue ;; esac
         addr=$(ipconfig getifaddr "$ifc" 2>/dev/null || true)
+        case "$addr" in 169.254.*) addr= ;; esac
         [ -z "$addr" ] || break
       done
     fi
@@ -295,7 +298,7 @@ if [ "$openwrt" = true ]; then
   fi
   echo
   if [ "$variant" = slim ]; then
-    echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist; the slim build has no browser UI)"
+    echo "  IPTV apps  : use the playlist URL the service logs when it starts (logread -e jiotv | grep Playlist), on http://${ip}:${http_port}/. The slim build has no browser UI."
   elif [ "$install_tls" = 1 ] && [ "$tls_on" = 1 ]; then
     echo "  Browser UI : https://${ip}:${tls_port}/  (HTTPS, self-signed certificate; accept the one-time warning)"
     echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist)"
@@ -384,7 +387,7 @@ ip=$(local_ip)
 if [ "$install_tls" = 1 ]; then
   echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0 --tls"
   if [ "$variant" = slim ]; then
-    echo "IPTV apps (plain HTTP playlist): http://localhost:5001/ on this machine, http://${ip}:5001/ from other devices. The slim build has no browser UI."
+    echo "IPTV apps: use the playlist URL that jiotv serve prints when it starts, with localhost:5001 on this machine or ${ip}:5001 from other devices. The slim build has no browser UI."
   else
     echo "Browser UI on this machine (HTTPS, self-signed certificate; accept the one-time warning): https://localhost:5443/"
     echo "From other devices on your network: https://${ip}:5443/ (browser), http://${ip}:5001/ (IPTV apps, plain HTTP playlist). The address is detected automatically; if it does not work, use the one your network assigned to this machine."
@@ -392,7 +395,7 @@ if [ "$install_tls" = 1 ]; then
 else
   echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0"
   if [ "$variant" = slim ]; then
-    echo "IPTV apps (plain HTTP playlist): http://localhost:5001/ on this machine, http://${ip}:5001/ from other devices. The slim build has no browser UI."
+    echo "IPTV apps: use the playlist URL that jiotv serve prints when it starts, with localhost:5001 on this machine or ${ip}:5001 from other devices. The slim build has no browser UI."
   else
     echo "Browser UI on this machine: http://localhost:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)"
     echo "From other devices on your network: http://${ip}:5001/"

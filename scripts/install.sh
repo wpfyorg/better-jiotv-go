@@ -111,19 +111,28 @@ router_ip() {
   if [ -n "$addr" ]; then echo "$addr"; else echo "<router-ip>"; fi
 }
 
-# This machine's LAN address, for other devices on the network (best effort).
+# This machine's LAN address, for other devices on the network (best effort): the
+# address of the interface that carries the default route, since a machine with
+# Docker, a VPN or several adapters has more than one and their order is arbitrary.
 local_ip() {
   addr=
   if [ "$sys" = Darwin ]; then
-    for ifc in en0 en1; do
-      addr=$(ipconfig getifaddr "$ifc" 2>/dev/null || true)
-      [ -z "$addr" ] || break
-    done
-  elif command -v hostname >/dev/null 2>&1; then
-    addr=$(hostname -I 2>/dev/null | awk '{ print $1 }' || true)
-  fi
-  if [ -z "$addr" ] && command -v ip >/dev/null 2>&1; then
-    addr=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1 || true)
+    ifc=$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }' || true)
+    if [ -n "$ifc" ]; then addr=$(ipconfig getifaddr "$ifc" 2>/dev/null || true); fi
+    if [ -z "$addr" ]; then
+      for ifc in en0 en1; do
+        addr=$(ipconfig getifaddr "$ifc" 2>/dev/null || true)
+        [ -z "$addr" ] || break
+      done
+    fi
+  else
+    if command -v ip >/dev/null 2>&1; then
+      addr=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1 || true)
+    fi
+    if [ -z "$addr" ] && command -v hostname >/dev/null 2>&1; then
+      # Only a dotted IPv4 address is usable unbracketed in a URL.
+      addr=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+    fi
   fi
   if [ -n "$addr" ]; then echo "$addr"; else echo "<this-machine-ip>"; fi
 }

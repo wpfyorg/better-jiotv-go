@@ -259,7 +259,7 @@ if [ "$openwrt" = true ]; then
   fi
   echo
   if [ "$variant" = slim ]; then
-    echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist; the slim build has no browser UI)"
+    echo "  IPTV apps  : use the playlist URL the service logs when it starts (logread -e jiotv | grep -i playlist), on http://${ip}:${http_port}/. The slim build has no browser UI."
   elif [ "$install_tls" = 1 ] && [ "$tls_on" = 1 ]; then
     echo "  Browser UI : https://${ip}:${tls_port}/  (HTTPS, self-signed certificate; accept the one-time warning)"
     echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist)"
@@ -346,9 +346,18 @@ echo "Installed jiotv ($variant, $target) to $install_dir/jiotv"
 case ":${PATH:-}:" in *":$install_dir:"*) ;; *) echo "Add $install_dir to PATH to run jiotv directly." ;; esac
 if [ "$install_tls" = 1 ]; then
   echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0 --tls"
-  echo "Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<host>:5443/"
-  echo "IPTV apps (plain HTTP playlist): http://<host>:5001/"
+  if [ "$variant" = slim ]; then
+    echo "IPTV apps: use the playlist URL that jiotv serve prints when it starts, with localhost:5001 on this machine or this machine's address from other devices. The slim build has no browser UI."
+  else
+    echo "Browser UI on this machine (HTTPS, self-signed certificate; accept the one-time warning): https://localhost:5443/"
+    echo "From other devices on your network, use this machine's address instead of localhost: https://<this-machine-ip>:5443/ (browser), http://<this-machine-ip>:5001/ (IPTV apps, plain HTTP playlist)."
+  fi
 else
   echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0"
-  echo "Browser UI: http://<host>:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)"
+  if [ "$variant" = slim ]; then
+    echo "IPTV apps: use the playlist URL that jiotv serve prints when it starts, with localhost:5001 on this machine or this machine's address from other devices. The slim build has no browser UI."
+  else
+    echo "Browser UI on this machine: http://localhost:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)"
+    echo "From other devices on your network, use this machine's address instead of localhost: http://<this-machine-ip>:5001/"
+  fi
 fi

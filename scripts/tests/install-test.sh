@@ -117,6 +117,30 @@ run_case jiotv-full-x86_64-linux-android Linux x86_64 /data/data/com.termux/file
 run_case jiotv-full-x86_64-unknown-linux-musl Linux x86_64 '' env JIOTV_REPO=owner/project JIOTV_VERSION=1.2.3
 grep -F 'https://github.com/owner/project/releases/download/v1.2.3/' "$tmp/log-jiotv-full-x86_64-unknown-linux-musl" >/dev/null
 
+# A desktop install tells the user to browse to localhost on this machine, and to
+# use its own address from other devices (never a guessed one); slim has no UI.
+JIOTV_TEST_OS=Darwin JIOTV_TEST_MACHINE=arm64 JIOTV_TEST_ASSET_NAME=jiotv-full-aarch64-apple-darwin \
+  JIOTV_TEST_LOG="$tmp/log-desktop" JIOTV_INSTALL_DIR="$tmp/install-desktop" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >"$tmp/desktop-output"
+grep -F "https://localhost:5443/" "$tmp/desktop-output" >/dev/null
+grep -F "use this machine's address instead of localhost: https://<this-machine-ip>:5443/" "$tmp/desktop-output" >/dev/null
+if grep -F "<host>" "$tmp/desktop-output" >/dev/null; then
+  echo "the installer still prints the <host> placeholder" >&2
+  exit 1
+fi
+JIOTV_TEST_OS=Darwin JIOTV_TEST_MACHINE=arm64 JIOTV_VARIANT=slim JIOTV_TEST_ASSET_NAME=jiotv-slim-aarch64-apple-darwin \
+  JIOTV_TEST_LOG="$tmp/log-desktop-slim" JIOTV_INSTALL_DIR="$tmp/install-desktop-slim" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >"$tmp/desktop-slim-output"
+grep -F "has no browser UI" "$tmp/desktop-slim-output" >/dev/null
+if grep -F "Browser UI" "$tmp/desktop-slim-output" >/dev/null; then
+  echo "a slim desktop install printed a browser UI address" >&2
+  exit 1
+fi
+JIOTV_TEST_OS=Darwin JIOTV_TEST_MACHINE=arm64 JIOTV_INSTALL_TLS=0 JIOTV_TEST_ASSET_NAME=jiotv-full-aarch64-apple-darwin \
+  JIOTV_TEST_LOG="$tmp/log-desktop-plain" JIOTV_INSTALL_DIR="$tmp/install-desktop-plain" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >"$tmp/desktop-plain-output"
+grep -F "http://localhost:5001/" "$tmp/desktop-plain-output" >/dev/null
+
 if JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=mips PATH="$tmp/bin:$PATH" sh "$root/scripts/install.sh" >/dev/null 2>&1; then
   echo "unsupported architecture unexpectedly installed" >&2
   exit 1

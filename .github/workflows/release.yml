@@ -3,24 +3,38 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  # Dry runs build and verify everything but publish nothing: only a tag push
+  # creates a release. A pull request that changes this workflow runs once its
+  # Codex review is clean (the `codex-clean` label), so edits are tested before
+  # a real tag depends on them.
+  pull_request:
+    types: [labeled, synchronize, reopened]
+    paths: [".github/workflows/release.yml", "scripts/ci-openwrt-packages.sh", "scripts/build-openwrt-packages.sh", "openwrt/**"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   build:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'codex-clean')
     strategy:
       fail-fast: false
       matrix:
-        variant: [full, slim]
+        # One job per target builds both variants, so the toolchain and the
+        # dependencies are set up and compiled once. `test` runs the full test
+        # suite on that target; the others only smoke-test the built binaries,
+        # because CI already runs the whole suite on every change.
         target:
           - { triple: x86_64-unknown-linux-musl, os: ubuntu-latest, kind: zig }
           - { triple: aarch64-unknown-linux-musl, os: ubuntu-latest, kind: zig }
           - { triple: armv7-unknown-linux-musleabihf, os: ubuntu-latest, kind: zig }
           - { triple: i686-unknown-linux-musl, os: ubuntu-latest, kind: zig }
-          - { triple: aarch64-apple-darwin, os: macos-14, kind: native }
+          - { triple: aarch64-apple-darwin, os: macos-14, kind: native, test: true }
           - { triple: x86_64-apple-darwin, os: macos-15-intel, kind: native }
-          - { triple: x86_64-pc-windows-msvc, os: windows-2022, kind: native }
+          - { triple: x86_64-pc-windows-msvc, os: windows-2022, kind: native, test: true }
           - { triple: i686-pc-windows-msvc, os: windows-2022, kind: native }
           - { triple: aarch64-pc-windows-msvc, os: windows-11-arm, kind: native }
           - { triple: aarch64-linux-android, os: ubuntu-latest, kind: android }
@@ -34,43 +48,49 @@ jobs:
           targets: ${{ matrix.target.triple }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target.triple }}-${{ matrix.variant }}
-      - name: Install Zig and cargo-zigbuild
+          key: ${{ matrix.target.triple }}
+      - name: Install Zig
         if: matrix.target.kind == 'zig'
-        run: |
-          pip3 install ziglang
-          cargo install --locked cargo-zigbuild
+        run: pip3 install ziglang
+      # Prebuilt binaries: compiling these with `cargo install` took minutes per job.
+      - uses: taiki-e/install-action@v2
+        if: matrix.target.kind != 'native'
+        with:
+          tool: ${{ matrix.target.kind == 'zig' && 'cargo-zigbuild' || 'cargo-ndk' }}
       - uses: android-actions/setup-android@v4
         if: matrix.target.kind == 'android'
       - name: Install Android NDK
         if: matrix.target.kind == 'android'
         run: sdkmanager "ndk;27.2.12479018"
-      - name: Install cargo-ndk
-        if: matrix.target.kind == 'android'
-        run: cargo install --locked cargo-ndk
       - name: Build
         shell: bash
         run: |
-          flags=()
-          if [ "${{ matrix.variant }}" = slim ]; then flags=(--no-default-features --features slim); fi
-          case "${{ matrix.target.kind }}" in
-            zig) cargo zigbuild --release --locked --target "${{ matrix.target.triple }}" "${flags[@]}" ;;
-            android) cargo ndk --target "${{ matrix.target.triple }}" --platform 21 build --release --locked "${flags[@]}" ;;
-            *) cargo build --release --locked --target "${{ matrix.target.triple }}" "${flags[@]}" ;;
-          esac
           mkdir out
           suffix=""
           case "${{ matrix.target.triple }}" in *windows-msvc) suffix=.exe ;; esac
-          cp "target/${{ matrix.target.triple }}/release/jiotv${suffix}" "out/jiotv-${{ matrix.variant }}-${{ matrix.target.triple }}${suffix}"
+          for variant in full slim; do
+            flags=()
+            if [ "$variant" = slim ]; then flags=(--no-default-features --features slim); fi
+            case "${{ matrix.target.kind }}" in
+              zig) cargo zigbuild --release --locked --target "${{ matrix.target.triple }}" "${flags[@]}" ;;
+              android) cargo ndk --target "${{ matrix.target.triple }}" --platform 21 build --release --locked "${flags[@]}" ;;
+              *) cargo build --release --locked --target "${{ matrix.target.triple }}" "${flags[@]}" ;;
+            esac
+            cp "target/${{ matrix.target.triple }}/release/jiotv${suffix}" "out/jiotv-${variant}-${{ matrix.target.triple }}${suffix}"
+          done
       - name: Run native target tests
-        if: matrix.target.kind == 'native'
+        if: matrix.target.test
+        shell: bash
+        run: cargo test --locked --target "${{ matrix.target.triple }}"
+      - name: Smoke-test the built binaries
+        if: matrix.target.kind == 'native' || matrix.target.triple == 'x86_64-unknown-linux-musl'
         shell: bash
         run: |
-          flags=()
-          if [ "${{ matrix.variant }}" = slim ]; then flags=(--no-default-features --features slim); fi
-          cargo test --locked --target "${{ matrix.target.triple }}" "${flags[@]}"
+          for binary in out/*; do
+            "$binary" --help >/dev/null
+          done
       - name: Parse the Windows installer
-        if: contains(matrix.target.triple, 'windows-msvc')
+        if: matrix.target.triple == 'x86_64-pc-windows-msvc'
         shell: pwsh
         run: |
           $tokens = $null
@@ -79,7 +99,7 @@ jobs:
           if ($errors.Count) { $errors | Format-List; exit 1 }
       - uses: actions/upload-artifact@v4
         with:
-          name: jiotv-${{ matrix.variant }}-${{ matrix.target.triple }}
+          name: jiotv-${{ matrix.target.triple }}
           path: out/*
           if-no-files-found: error
           retention-days: 7
@@ -101,11 +121,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: jiotv-full-${{ matrix.arch == 'x86_64' && 'x86_64-unknown-linux-musl' || matrix.arch == 'aarch64' && 'aarch64-unknown-linux-musl' || 'armv7-unknown-linux-musleabihf' }}
-          path: dist/bin
-      - uses: actions/download-artifact@v4
-        with:
-          name: jiotv-slim-${{ matrix.arch == 'x86_64' && 'x86_64-unknown-linux-musl' || matrix.arch == 'aarch64' && 'aarch64-unknown-linux-musl' || 'armv7-unknown-linux-musleabihf' }}
+          name: jiotv-${{ matrix.arch == 'x86_64' && 'x86_64-unknown-linux-musl' || matrix.arch == 'aarch64' && 'aarch64-unknown-linux-musl' || 'armv7-unknown-linux-musleabihf' }}
           path: dist/bin
       - name: Restore executable permissions
         run: chmod 0755 dist/bin/jiotv-*
@@ -131,6 +147,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           want="v$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
           [ "$want" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} does not match Cargo.toml version $want"; exit 1; }
@@ -157,10 +174,12 @@ jobs:
           ) > SHA256SUMS.tmp
           mv SHA256SUMS.tmp dist/SHA256SUMS
       - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --generate-notes
   docker:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: release
     uses: ./.github/workflows/docker.yml
     permissions:

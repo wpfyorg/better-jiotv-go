@@ -39,6 +39,8 @@ pub struct DrmMpdOutput {
 pub struct DashState {
     drm_mpd_cache: RwLock<std::collections::HashMap<String, (DrmMpdOutput, Instant)>>,
     live_cache: RwLock<std::collections::HashMap<String, (LiveUrlOutput, Instant)>>,
+    /// Coalesces concurrent live-cache misses for the same channel.
+    live_locks: crate::keyed_locks::KeyedLocks,
     cdn_clock: Mutex<Option<(SystemTime, Instant)>>,
 }
 
@@ -65,11 +67,15 @@ impl DashState {
         (at.elapsed() <= DRM_MPD_CACHE_TTL).then(|| out.clone())
     }
 
-    fn set_live(&self, channel_id: &str, out: LiveUrlOutput) {
-        self.live_cache
-            .write()
-            .unwrap()
-            .insert(channel_id.to_string(), (out, Instant::now()));
+    /// Stores `out` only if `still_current` holds. It is evaluated under the
+    /// cache's write lock, which `clear` also takes after the context epoch
+    /// rotates, so a fetch started before an account switch cannot repopulate
+    /// the cleared cache.
+    fn set_live(&self, channel_id: &str, out: LiveUrlOutput, still_current: impl FnOnce() -> bool) {
+        let mut map = self.live_cache.write().unwrap();
+        if still_current() {
+            map.insert(channel_id.to_string(), (out, Instant::now()));
+        }
     }
 
     fn record_publish_time(&self, t: SystemTime) {
@@ -130,8 +136,16 @@ pub(crate) async fn get_live_cached(
     if let Some(cached) = state.dash_state.get_live(channel_id) {
         return Ok(cached);
     }
+    let _guard = state.dash_state.live_locks.lock(channel_id).await;
+    // Another request may have filled the cache while this one waited.
+    if let Some(cached) = state.dash_state.get_live(channel_id) {
+        return Ok(cached);
+    }
+    let epoch = state.secure.current_epoch();
     let live = crate::stream::fetch_live(state, channel_id).await?;
-    state.dash_state.set_live(channel_id, live.clone());
+    state.dash_state.set_live(channel_id, live.clone(), || {
+        state.secure.current_epoch() == epoch
+    });
     Ok(live)
 }
 
@@ -878,11 +892,44 @@ mod tests {
                 hdnea: "token".into(),
                 ..Default::default()
             },
+            || true,
         );
         assert_eq!(state.get_live("154").unwrap().hdnea, "token");
         assert!(state.get_live("155").is_none());
         state.clear();
         assert!(state.get_live("154").is_none());
+    }
+
+    #[test]
+    fn live_cache_discards_fetches_that_outlived_their_context() {
+        let state = DashState::default();
+        state.set_live("154", LiveUrlOutput::default(), || false);
+        assert!(state.get_live("154").is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_live_cache_misses_share_one_fetch() {
+        let state = Arc::new(DashState::default());
+        let fetches = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let viewer = |state: Arc<DashState>, fetches: Arc<std::sync::atomic::AtomicU32>| async move {
+            if state.get_live("154").is_some() {
+                return;
+            }
+            let _guard = state.live_locks.lock("154").await;
+            if state.get_live("154").is_some() {
+                return;
+            }
+            fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            state.set_live("154", LiveUrlOutput::default(), || true);
+        };
+        let tasks: Vec<_> = (0..5)
+            .map(|_| tokio::spawn(viewer(state.clone(), fetches.clone())))
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -117,7 +117,10 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
       else dashError = dashError ?? error;
       const hadHls = !!(source.dash && source.hls);
       const kind = classifyPlaybackFailure({ dashError, hlsError, hadHls, capability: drmCapability });
-      onTerminalError(playbackErrorMessage(error, drmCapability), { kind, dashError, hlsError, hadHls });
+      // A browser-unsupported failure is explained by the DASH/DRM cause, not by
+      // whatever the HLS alternative then failed with.
+      const reported = kind === "browser_unsupported" && dashError ? dashError : error;
+      onTerminalError(playbackErrorMessage(reported, drmCapability), { kind, dashError, hlsError, hadHls });
     }
   };
 
@@ -154,6 +157,9 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
 
   player.addEventListener("error", (event) => {
     const detail = event.detail;
+    // Shaka RECOVERABLE (1) errors are reported while it keeps playing; only
+    // CRITICAL ones may abandon a DASH stream for its HLS alternative.
+    if (detail?.severity === 1 && source.dash && source.hls && !usingHls) return;
     if (!usingHls) dashError = dashError ?? detail;
     if (source.dash && source.hls && !usingHls) {
       fallbackToHls().catch(reportTerminal);

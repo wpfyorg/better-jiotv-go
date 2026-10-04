@@ -248,7 +248,7 @@ test("reports browser_unsupported when DASH is DRM-blocked and HLS returns 404",
     onTerminalError: (message, info) => reports.push([message, info.kind]),
   });
   assert.deepEqual(player.loads, ["dash", "hls"]);
-  assert.deepEqual(reports, [["Playback error 1001", "browser_unsupported"]]);
+  assert.deepEqual(reports, [["Playback error 6001", "browser_unsupported"]]);
 });
 
 test("reports browser_unsupported for MPD-only DRM failure", async () => {
@@ -296,4 +296,47 @@ test("keeps generic errors generic and uses capability for other 6xxx codes", as
     onTerminalError: (m, info) => drmReports.push([m, info.kind]),
   });
   assert.deepEqual(drmReports, [["DRM_ENVIRONMENT_BLOCKED: no cdm", "browser_unsupported"]]);
+});
+
+test("keeps the DRM cause in the message when the HLS fallback then fails", async () => {
+  const player = fakePlayer((url) => (url === "dash" ? Promise.reject({ code: 6001 }) : Promise.reject(http404())));
+  const messages = [];
+  await loadLiveSource({
+    player,
+    video,
+    source: { dash: true, url: "dash", hls: "hls" },
+    drmCapability: { usable: false, message: "This browser has no working Widevine module." },
+    onTerminalError: (message) => messages.push(message),
+  });
+  assert.deepEqual(messages, ["DRM_ENVIRONMENT_BLOCKED: This browser has no working Widevine module."]);
+});
+
+test("keeps DASH playing through a recoverable Shaka error", async () => {
+  const dash = deferred();
+  const player = fakePlayer((url) => (url === "dash" ? dash.promise : Promise.resolve()));
+  const errors = [];
+  const loading = loadLiveSource({
+    player,
+    video,
+    source: { dash: true, url: "dash", hls: "hls" },
+    onTerminalError: (message) => errors.push(message),
+  });
+  await Promise.resolve();
+  player.emitError({ code: 1002, severity: 1 });
+  dash.resolve();
+  await loading;
+  assert.deepEqual(player.loads, ["dash"]);
+  assert.equal(player.unloads, 0);
+  assert.deepEqual(errors, []);
+});
+
+test("falls back to HLS on a critical Shaka error", async () => {
+  const dash = deferred();
+  const player = fakePlayer((url) => (url === "dash" ? dash.promise : Promise.resolve()));
+  const loading = loadLiveSource({ player, video, source: { dash: true, url: "dash", hls: "hls" } });
+  await Promise.resolve();
+  player.emitError({ code: 1002, severity: 2 });
+  dash.resolve();
+  await loading;
+  assert.deepEqual(player.loads, ["dash", "hls"]);
 });

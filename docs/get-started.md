@@ -52,12 +52,13 @@ jiotv serve --host 0.0.0.0 --port 5001 --tls
 
 Enter the OTP yourself when prompted.
 
-For OpenWrt, the installer already started the service. Sign in from the browser UI, or run `jiotv login otp` and then restart the service so it picks up the login:
+For OpenWrt, the installer already started the service. Set the admin password, then sign in from the browser UI. To sign in from the terminal instead, stop the service around the login so it cannot overwrite it:
 
 ```sh
-jiotv login otp
-/etc/init.d/jiotv restart
 jiotv admin password
+/etc/init.d/jiotv stop; sleep 3
+jiotv login otp
+/etc/init.d/jiotv start
 ```
 
 For Docker, run:

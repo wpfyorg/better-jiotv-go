@@ -48,18 +48,31 @@ verify_asset() {
 
 size_kib() { echo $(( $(wc -c <"$1") / 1024 )); }
 
-# True once the URL answers; used to confirm the service really came up.
-http_ok() {
-  if command -v curl >/dev/null 2>&1; then curl -fsS -o /dev/null --max-time 3 "$1" >/dev/null 2>&1
-  elif command -v wget >/dev/null 2>&1; then wget -q -T 3 -O /dev/null "$1" >/dev/null 2>&1
-  else return 1
+# True when something listens on the TCP port. Only when no socket listing tool
+# works is the answer "unknown", which counts as success so it never blocks.
+port_listening() {
+  if command -v netstat >/dev/null 2>&1; then listing=$(netstat -ltn 2>/dev/null || true)
+  elif command -v ss >/dev/null 2>&1; then listing=$(ss -ltn 2>/dev/null || true)
+  else return 0
   fi
+  [ -n "$listing" ] || return 0
+  printf '%s\n' "$listing" | grep -Eq "[:.]$1[[:space:]]"
 }
 
 # Print one uci option of the jiotv service, or the default when unavailable.
 uci_opt() {
   value=$(uci -q get "jiotv.main.$1" 2>/dev/null || true)
   if [ -n "$value" ]; then echo "$value"; else echo "$2"; fi
+}
+
+# A uci boolean as 1 or 0, using the same spellings as OpenWrt's get_bool, so
+# this agrees with what the init script does with the value.
+uci_flag() {
+  case "$(uci_opt "$1" "$2")" in
+    1|on|true|yes|enabled) echo 1 ;;
+    0|off|false|no|disabled) echo 0 ;;
+    *) echo "$2" ;;
+  esac
 }
 
 # The router's LAN address, so the printed URLs can be opened as shown.
@@ -153,19 +166,23 @@ if [ "$openwrt" = true ]; then
   "$init_script" enable
 
   running=false
-  if [ "$start_service" = 1 ]; then
+  disabled=false
+  [ "$(uci_flag enabled 1)" = 1 ] || disabled=true
+  if [ "$start_service" = 1 ] && [ "$disabled" = true ]; then
+    say "The service is disabled in /etc/config/jiotv (option enabled '0'); leaving it stopped"
+  elif [ "$start_service" = 1 ]; then
     # restart, not start: an upgrade must replace a process that is already running.
     say "Starting the service"
     if "$init_script" restart; then
       http_port=$(uci_opt port 5001)
       tries=0
       while [ "$tries" -lt 15 ]; do
-        if http_ok "http://127.0.0.1:${http_port}/"; then running=true; break; fi
+        if "$init_script" running >/dev/null 2>&1 && port_listening "$http_port"; then running=true; break; fi
         tries=$((tries + 1))
         sleep 1
       done
       if [ "$running" = true ]; then note "listening on port $http_port"
-      else echo "warning: the service did not answer on port $http_port within 15 seconds" >&2
+      else echo "warning: the service is not listening on port $http_port after 15 seconds" >&2
       fi
     else
       echo "warning: '$init_script restart' failed" >&2
@@ -173,16 +190,17 @@ if [ "$openwrt" = true ]; then
   fi
 
   ip=$(router_ip)
-  tls_on=$(uci_opt tls 1)
+  tls_on=$(uci_flag tls 1)
   http_port=$(uci_opt port 5001)
   tls_port=$(uci_opt tls_port 5443)
   echo
   if [ "$running" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed and running."
-  elif [ "$start_service" = 1 ]; then echo "JioTV ($variant, ${tag#v}) is installed, but the service is not answering yet."
+  elif [ "$disabled" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed; the service is disabled in /etc/config/jiotv."
+  elif [ "$start_service" = 1 ]; then echo "JioTV ($variant, ${tag#v}) is installed, but the service is not listening yet."
   else echo "JioTV ($variant, ${tag#v}) is installed (not started: JIOTV_START_SERVICE=0)."
   fi
   echo
-  if [ "$install_tls" = 1 ] && [ "$tls_on" != 0 ]; then
+  if [ "$install_tls" = 1 ] && [ "$tls_on" = 1 ]; then
     echo "  Browser UI : https://${ip}:${tls_port}/  (HTTPS, self-signed certificate; accept the one-time warning)"
     echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist)"
   else
@@ -191,17 +209,22 @@ if [ "$openwrt" = true ]; then
   fi
   echo
   echo "Next steps:"
-  if [ "$running" = true ]; then
-    echo "  1. Open the browser UI and sign in (you enter the OTP yourself)."
-  else
-    echo "  1. Start the service: $init_script start  (then check: logread -e jiotv)"
-    echo "     and sign in from the browser UI (you enter the OTP yourself)."
+  step=1
+  if [ "$disabled" = true ]; then
+    echo "  $step. Enable the service: uci set jiotv.main.enabled=1 && uci commit jiotv && $init_script start"
+    step=$((step + 1))
+  elif [ "$running" != true ]; then
+    echo "  $step. Start the service: $init_script start  (then check: logread -e jiotv)"
+    step=$((step + 1))
   fi
-  echo "  2. Set the admin password: jiotv admin password"
-  echo "  Prefer the terminal for signing in? Run 'jiotv login otp', then '$init_script restart'."
+  echo "  $step. Set the admin password: jiotv admin password"
+  step=$((step + 1))
+  echo "  $step. Open the browser UI, log in with that password, then sign in to JioTV (you enter the OTP yourself)."
+  echo "  To sign in to JioTV from the terminal instead, stop the service first so it cannot overwrite the login:"
+  echo "    $init_script stop; sleep 3; jiotv login otp; $init_script start"
   echo
   echo "Service control: $init_script start|stop|restart    Logs: logread -e jiotv"
-  [ "$start_service" = 0 ] || [ "$running" = true ] || exit 1
+  [ "$start_service" = 0 ] || [ "$disabled" = true ] || [ "$running" = true ] || exit 1
   exit 0
 fi
 

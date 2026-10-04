@@ -60,9 +60,25 @@ chmod +x "$tmp/bin/id"
 cat >"$tmp/bin/jiotv-init" <<'EOF'
 #!/bin/sh
 [ -z "${JIOTV_TEST_INIT_LOG:-}" ] || printf '%s\n' "${1:-}" >>"$JIOTV_TEST_INIT_LOG"
-case "${1:-}" in enable|restart) ;; *) exit 1 ;; esac
+case "${1:-}" in enable|restart|running) ;; *) exit 1 ;; esac
 EOF
 chmod +x "$tmp/bin/jiotv-init"
+
+# The readiness check looks for a listening socket and the uci options.
+cat >"$tmp/bin/netstat" <<'EOF'
+#!/bin/sh
+echo 'Active Internet connections (only servers)'
+echo 'tcp        0      0 0.0.0.0:5001            0.0.0.0:*               LISTEN'
+EOF
+cat >"$tmp/bin/uci" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *jiotv.main.enabled) [ -z "${JIOTV_TEST_UCI_ENABLED:-}" ] || echo "$JIOTV_TEST_UCI_ENABLED" ;;
+  *jiotv.main.tls) [ -z "${JIOTV_TEST_UCI_TLS:-}" ] || echo "$JIOTV_TEST_UCI_TLS" ;;
+esac
+exit 0
+EOF
+chmod +x "$tmp/bin/netstat" "$tmp/bin/uci"
 
 run_case() {
   expected=$1
@@ -155,6 +171,30 @@ if grep -x "restart" "$tmp/openwrt-nostart-init" >/dev/null; then
   exit 1
 fi
 grep -F "not started" "$tmp/openwrt-nostart-output" >/dev/null
+# A service disabled in /etc/config/jiotv stays stopped and is not an install failure.
+JIOTV_PLATFORM=openwrt JIOTV_TEST_UCI_ENABLED=off JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-disabled-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-disabled-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  JIOTV_TEST_INIT_LOG="$tmp/openwrt-disabled-init" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >"$tmp/openwrt-disabled-output"
+if grep -x "restart" "$tmp/openwrt-disabled-init" >/dev/null; then
+  echo "a disabled service was started" >&2
+  exit 1
+fi
+grep -F "disabled in /etc/config/jiotv" "$tmp/openwrt-disabled-output" >/dev/null
+# Every uci spelling of false turns the HTTPS address off, as the init script does.
+JIOTV_PLATFORM=openwrt JIOTV_TEST_UCI_TLS=off JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-notls-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-notls-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  PATH="$tmp/bin:$PATH" sh "$root/scripts/install.sh" >"$tmp/openwrt-notls-output"
+if grep -F "https://" "$tmp/openwrt-notls-output" >/dev/null; then
+  echo "HTTPS address printed although tls is off" >&2
+  exit 1
+fi
+grep -F "Browser UI : http://" "$tmp/openwrt-notls-output" >/dev/null
+# The admin password comes before signing in, and terminal login stops the service.
+grep -n "Set the admin password" "$tmp/openwrt-apk-output" | grep -F "1." >/dev/null
+grep -F "stop; sleep 3; jiotv login otp" "$tmp/openwrt-apk-output" >/dev/null
 if JIOTV_PLATFORM=openwrt JIOTV_TEST_PACKAGE_ARCH=aarch64_cortex-a72 \
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-unsupported-package" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >/dev/null 2>&1; then

@@ -246,12 +246,33 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     } else {
         default_path_prefix()?
     };
-    std::fs::create_dir_all(&prefix)?;
+    // The OpenWrt default lives outside /root, so a directory created by a raw
+    // install must not be readable by other users (the package applies 0700).
+    if cfg.path_prefix.is_empty() && is_openwrt() {
+        create_private_dir(&prefix)?;
+    } else {
+        std::fs::create_dir_all(&prefix)?;
+    }
     Ok(if prefix.ends_with('/') {
         prefix
     } else {
         format!("{prefix}/")
     })
+}
+
+fn create_private_dir(path: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
 }
 
 fn default_path_prefix() -> anyhow::Result<String> {
@@ -578,7 +599,7 @@ fn admin_password(access: &access::Access, path_prefix: &str) -> anyhow::Result<
         // The running service caches the store in memory and rewrites the whole
         // file on every update, so the password must be written while it is
         // stopped, through a freshly loaded store.
-        let restarted = with_service_stopped(init, || {
+        let restarted = with_service_stopped(init, std::time::Duration::from_secs(10), || {
             let store = Arc::new(store::Store::open(path_prefix)?);
             access::Access::new(store).set_password(&password)?;
             Ok(())
@@ -599,16 +620,29 @@ fn admin_password(access: &access::Access, path_prefix: &str) -> anyhow::Result<
 /// only if it was running. Returns whether the service was restarted.
 fn with_service_stopped(
     init: &std::path::Path,
+    stop_timeout: std::time::Duration,
     change: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<bool> {
-    let was_running = std::process::Command::new(init)
-        .arg("running")
-        .status()?
-        .success();
+    let is_running = || -> std::io::Result<bool> {
+        Ok(std::process::Command::new(init)
+            .arg("running")
+            .status()?
+            .success())
+    };
+    let was_running = is_running()?;
     if was_running {
         let stop = std::process::Command::new(init).arg("stop").status()?;
         if !stop.success() {
             anyhow::bail!("could not stop the JioTV service ({stop}); nothing was changed");
+        }
+        // procd only signals the process on `stop`; wait until it has exited so
+        // its cached store cannot be written over the new one.
+        let deadline = std::time::Instant::now() + stop_timeout;
+        while is_running()? {
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("the JioTV service did not stop in time; nothing was changed");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
     let result = change();
@@ -669,6 +703,8 @@ mod tests {
         use super::*;
         use std::os::unix::fs::PermissionsExt;
 
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
         /// A fake init script that logs each action and reports `running`
         /// according to the presence of a `running` marker file.
         fn fake_init(dir: &std::path::Path, running: bool) -> std::path::PathBuf {
@@ -690,10 +726,12 @@ mod tests {
             script
         }
 
-        fn calls(dir: &std::path::Path) -> Vec<String> {
+        /// The stop/start actions issued, ignoring `running` status polls.
+        fn actions(dir: &std::path::Path) -> Vec<String> {
             std::fs::read_to_string(dir.join("calls"))
                 .unwrap_or_default()
                 .lines()
+                .filter(|l| *l != "running")
                 .map(str::to_owned)
                 .collect()
         }
@@ -703,7 +741,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let init = fake_init(dir.path(), true);
             let marker = dir.path().join("running");
-            let restarted = with_service_stopped(&init, || {
+            let restarted = with_service_stopped(&init, TIMEOUT, || {
                 assert!(
                     !marker.exists(),
                     "service must be stopped during the change"
@@ -712,25 +750,58 @@ mod tests {
             })
             .unwrap();
             assert!(restarted);
-            assert_eq!(calls(dir.path()), ["running", "stop", "start"]);
+            assert_eq!(actions(dir.path()), ["stop", "start"]);
+        }
+
+        #[test]
+        fn change_waits_for_the_service_to_exit_and_is_skipped_if_it_never_does() {
+            let dir = tempfile::tempdir().unwrap();
+            let init = fake_init(dir.path(), true);
+            // `stop` succeeds but the process lingers: make it a no-op.
+            std::fs::write(
+                &init,
+                format!(
+                    "#!/bin/sh\necho \"$1\" >> '{}'\ncase \"$1\" in running) exit 0 ;; esac\n",
+                    dir.path().join("calls").display()
+                ),
+            )
+            .unwrap();
+            let mut changed = false;
+            let err = with_service_stopped(&init, std::time::Duration::from_millis(300), || {
+                changed = true;
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(err.to_string().contains("did not stop in time"));
+            assert!(!changed, "must not touch the store while the service lingers");
+            assert!(!actions(dir.path()).contains(&"start".to_string()));
+        }
+
+        #[test]
+        fn private_dir_is_created_with_owner_only_access() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("etc").join("jiotv");
+            create_private_dir(target.to_str().unwrap()).unwrap();
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "group/other must have no access");
         }
 
         #[test]
         fn stopped_service_stays_stopped() {
             let dir = tempfile::tempdir().unwrap();
             let init = fake_init(dir.path(), false);
-            let restarted = with_service_stopped(&init, || Ok(())).unwrap();
+            let restarted = with_service_stopped(&init, TIMEOUT, || Ok(())).unwrap();
             assert!(!restarted);
-            assert_eq!(calls(dir.path()), ["running"]);
+            assert!(actions(dir.path()).is_empty());
         }
 
         #[test]
         fn failed_change_still_restores_a_running_service() {
             let dir = tempfile::tempdir().unwrap();
             let init = fake_init(dir.path(), true);
-            let err = with_service_stopped(&init, || anyhow::bail!("disk full")).unwrap_err();
+            let err = with_service_stopped(&init, TIMEOUT, || anyhow::bail!("disk full")).unwrap_err();
             assert!(err.to_string().contains("disk full"));
-            assert_eq!(calls(dir.path()), ["running", "stop", "start"]);
+            assert_eq!(actions(dir.path()), ["stop", "start"]);
         }
     }
 }

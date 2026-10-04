@@ -82,14 +82,14 @@ impl VodState {
     }
 
     pub fn clear(&self) {
-        // The bump happens under the playback lock that `set_playback` checks
-        // under, and before the playlist is cleared under its own lock.
+        // The bump happens while holding both locks, so every generation check
+        // (made under the playback or the playlist lock) is atomic with it.
         let mut map = self.playback.lock().unwrap();
+        let mut playlist = self.playlist.lock().unwrap();
         self.generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         map.clear();
-        drop(map);
-        *self.playlist.lock().unwrap() = None;
+        *playlist = None;
     }
 }
 
@@ -445,6 +445,14 @@ pub async fn vod_playlist_handler(
             xml
         }
     };
+    // Final synchronized check: a playlist cloned from the cache or built for the
+    // previous account must not be returned once a switch has completed.
+    if state.vod_state.generation() != generation {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The active account changed while this request was running; retry",
+        );
+    }
     let scheme = if https.is_some() { "https" } else { "http" };
     let base = headers
         .get(header::HOST)

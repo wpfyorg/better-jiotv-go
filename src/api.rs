@@ -415,17 +415,23 @@ pub async fn extras_verify_otp(
         return err(StatusCode::BAD_REQUEST, "extras is not enabled");
     }
     let before = state.extras.credentials_marker();
+    // Rotate the moment verified credentials replace the old account's, not when
+    // the token exchange that follows finishes: for that whole network wait the
+    // client holds the new account's partial credentials, and the old epoch
+    // would keep serving the previous account's URLs and caches. A rejected OTP
+    // never installs anything, so it neither calls this nor rotates, and does
+    // not cut off existing viewers.
     let result = state
         .extras
-        .verify_otp(&body.number, &body.otp, &state.store)
+        .verify_otp(&body.number, &body.otp, &state.store, || {
+            state.invalidate_context()
+        })
         .await;
-    // A wrong or mistyped OTP leaves the active account untouched, so it must
-    // not rotate the context and cut off existing viewers. Rotate whenever the
-    // installed credentials actually changed, which includes an OTP that
-    // verified but failed its token exchange: that already swapped the account.
-    // This also discards anything resolved while the exchange was in flight (the
-    // Extras and VOD caches are guarded by a generation, and URL-minting
-    // handlers re-check the epoch).
+    // Rotate again once the exchange has finished and the final credentials are
+    // in place. This also covers an OTP that verified but failed its exchange
+    // (it already swapped the account), and discards anything resolved while the
+    // exchange was in flight (the Extras and VOD caches are guarded by a
+    // generation, and URL-minting handlers re-check the epoch).
     if state.extras.credentials_marker() != before {
         state.invalidate_context();
         crate::epg::trigger_regeneration(&state);
@@ -664,6 +670,7 @@ mod tests {
     async fn extras_state_with_mock_auth(
         verify_status: u16,
         exchange_status: u16,
+        exchange_delay_ms: u64,
     ) -> (Arc<AppState>, wiremock::MockServer, wiremock::MockServer) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -691,13 +698,16 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/loginotp/exchangetoken"))
-            .respond_with(if exchange_status == 200 {
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "authToken": "redacted-at", "refreshToken": "redacted-rt", "userId": "redacted-uid"
-                }))
-            } else {
-                ResponseTemplate::new(exchange_status)
-            })
+            .respond_with(
+                if exchange_status == 200 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "authToken": "redacted-at", "refreshToken": "redacted-rt", "userId": "redacted-uid"
+                    }))
+                } else {
+                    ResponseTemplate::new(exchange_status)
+                }
+                .set_delay(std::time::Duration::from_millis(exchange_delay_ms)),
+            )
             .mount(&user_service)
             .await;
 
@@ -731,7 +741,7 @@ mod tests {
     async fn otp_that_verifies_but_fails_its_exchange_still_rotates_the_context() {
         // The verification installed the new account's SSO credentials before
         // the exchange failed, so the previous account's artifacts are stale.
-        let (s, _auth, _user) = extras_state_with_mock_auth(200, 500).await;
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 500, 0).await;
         let before = s.secure.current_epoch();
         let resp = verify(&s).await;
         let json = response_json(resp).await;
@@ -741,8 +751,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_rotates_when_otp_credentials_are_installed_not_after_the_exchange() {
+        // The token exchange is slow; for its whole duration the client holds
+        // the new account's partial credentials, so the old epoch must already
+        // be gone.
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 200, 600).await;
+        let before = s.secure.current_epoch();
+        let task = tokio::spawn({
+            let s = s.clone();
+            async move { verify(&s).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert!(!task.is_finished(), "the exchange should still be in flight");
+        assert!(
+            s.secure.current_epoch() > before,
+            "context was not rotated while the exchange was in flight"
+        );
+        let resp = task.await.unwrap();
+        assert_eq!(response_json(resp).await["status"], true);
+    }
+
+    #[tokio::test]
     async fn rejected_otp_leaves_the_context_alone() {
-        let (s, _auth, _user) = extras_state_with_mock_auth(401, 200).await;
+        let (s, _auth, _user) = extras_state_with_mock_auth(401, 200, 0).await;
         let before = s.secure.current_epoch();
         let resp = verify(&s).await;
         assert_eq!(response_json(resp).await["status"], false);
@@ -751,7 +782,7 @@ mod tests {
 
     #[tokio::test]
     async fn successful_otp_rotates_the_context() {
-        let (s, _auth, _user) = extras_state_with_mock_auth(200, 200).await;
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 200, 0).await;
         let before = s.secure.current_epoch();
         let resp = verify(&s).await;
         assert_eq!(response_json(resp).await["status"], true);

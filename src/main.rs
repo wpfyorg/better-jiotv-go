@@ -642,8 +642,9 @@ async fn extras_login_cli(store: &store::Store) -> anyhow::Result<()> {
     let mut otp = String::new();
     std::io::stdin().read_line(&mut otp)?;
 
+    // The CLI has no running server whose caches need invalidating.
     let result = client
-        .verify_otp(&number, &resp.identifier, otp.trim())
+        .verify_otp(&number, &resp.identifier, otp.trim(), || {})
         .await;
     if let Some(cr) = client.credentials() {
         cr.save(store)?;

@@ -664,11 +664,14 @@ impl ExtrasState {
         })
     }
 
+    /// `on_installed` is forwarded to the client and runs as soon as the
+    /// verified credentials are installed (see `Client::verify_otp`).
     pub async fn verify_otp(
         &self,
         number: &str,
         otp: &str,
         store: &crate::store::Store,
+        on_installed: impl FnOnce(),
     ) -> anyhow::Result<bool> {
         let client = self
             .client()
@@ -686,7 +689,9 @@ impl ExtrasState {
             p.identifier.clone()
         };
         let before = self.credentials_marker();
-        let result = client.verify_otp(&number, &identifier, otp).await;
+        let result = client
+            .verify_otp(&number, &identifier, otp, on_installed)
+            .await;
         // Save even on a failed exchange: the SSO token is valid and the
         // exchange can be retried without another OTP.
         if let Some(cr) = client.credentials() {

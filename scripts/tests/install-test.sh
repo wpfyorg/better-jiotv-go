@@ -59,7 +59,8 @@ chmod +x "$tmp/bin/id"
 
 cat >"$tmp/bin/jiotv-init" <<'EOF'
 #!/bin/sh
-[ "${1:-}" = enable ]
+[ -z "${JIOTV_TEST_INIT_LOG:-}" ] || printf '%s\n' "${1:-}" >>"$JIOTV_TEST_INIT_LOG"
+case "${1:-}" in enable|restart) ;; *) exit 1 ;; esac
 EOF
 chmod +x "$tmp/bin/jiotv-init"
 
@@ -122,9 +123,15 @@ openwrt_slim_apk=jiotv-slim-1.3.1-r1_x86_64.apk
 JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_apk JIOTV_TEST_EXTRA_ASSET_NAME=$openwrt_slim_apk \
   JIOTV_TEST_INSTALLED_PACKAGE=jiotv-slim JIOTV_TEST_LOG="$tmp/openwrt-apk-downloads" \
-  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-apk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" PATH="$tmp/bin:$PATH" \
-  sh "$root/scripts/install.sh" >/dev/null
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-apk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  JIOTV_TEST_INIT_LOG="$tmp/openwrt-apk-init" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >"$tmp/openwrt-apk-output"
 grep -F "del jiotv-slim" "$tmp/openwrt-apk-package" >/dev/null
+grep -x "enable" "$tmp/openwrt-apk-init" >/dev/null
+grep -x "restart" "$tmp/openwrt-apk-init" >/dev/null
+grep -F "is installed and running" "$tmp/openwrt-apk-output" >/dev/null
+grep -F "http://<router-ip>:5001/" "$tmp/openwrt-apk-output" >/dev/null
+grep -F "Checksum verified" "$tmp/openwrt-apk-output" >/dev/null
 grep -F "add --allow-untrusted" "$tmp/openwrt-apk-package" >/dev/null
 grep -F "/$openwrt_apk" "$tmp/openwrt-apk-downloads" >/dev/null
 if grep -F "/$openwrt_slim_apk" "$tmp/openwrt-apk-downloads" >/dev/null; then
@@ -137,6 +144,17 @@ JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-aarch64-apk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >/dev/null
 grep -F "/$openwrt_aarch64_apk" "$tmp/openwrt-aarch64-apk-downloads" >/dev/null
+JIOTV_PLATFORM=openwrt JIOTV_START_SERVICE=0 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-nostart-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-nostart-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  JIOTV_TEST_INIT_LOG="$tmp/openwrt-nostart-init" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >"$tmp/openwrt-nostart-output"
+grep -x "enable" "$tmp/openwrt-nostart-init" >/dev/null
+if grep -x "restart" "$tmp/openwrt-nostart-init" >/dev/null; then
+  echo "JIOTV_START_SERVICE=0 still started the service" >&2
+  exit 1
+fi
+grep -F "not started" "$tmp/openwrt-nostart-output" >/dev/null
 if JIOTV_PLATFORM=openwrt JIOTV_TEST_PACKAGE_ARCH=aarch64_cortex-a72 \
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-unsupported-package" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >/dev/null 2>&1; then

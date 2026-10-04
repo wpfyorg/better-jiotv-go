@@ -5,8 +5,10 @@ repo=${JIOTV_REPO:-wpfyorg/better-jiotv-go}
 variant=${JIOTV_VARIANT:-full}
 version=${JIOTV_VERSION:-latest}
 install_tls=${JIOTV_INSTALL_TLS:-1}
+start_service=${JIOTV_START_SERVICE:-1}
 
 case "$install_tls" in 0|1) ;; *) echo "JIOTV_INSTALL_TLS must be 0 or 1" >&2; exit 2 ;; esac
+case "$start_service" in 0|1) ;; *) echo "JIOTV_START_SERVICE must be 0 or 1" >&2; exit 2 ;; esac
 
 case "$variant" in full|slim) ;; *) echo "JIOTV_VARIANT must be full or slim" >&2; exit 2 ;; esac
 case "$repo" in */*) ;; *) echo "JIOTV_REPO must be owner/repository" >&2; exit 2 ;; esac
@@ -20,6 +22,9 @@ case "$sys" in Android) termux=true ;; esac
 tmp=${TMPDIR:-/tmp}/jiotv-install-$$
 mkdir -m 700 "$tmp"
 trap 'rm -rf "$tmp"' 0 HUP INT TERM
+
+say() { printf '==> %s\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
 
 download() {
   if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
@@ -39,6 +44,32 @@ verify_asset() {
   else echo "sha256sum or shasum is required to verify the download" >&2; exit 1
   fi
   [ "$(printf '%s' "$expected" | tr 'A-F' 'a-f')" = "$(printf '%s' "$actual" | tr 'A-F' 'a-f')" ] || { echo "checksum mismatch for $asset_name" >&2; exit 1; }
+}
+
+size_kib() { echo $(( $(wc -c <"$1") / 1024 )); }
+
+# True once the URL answers; used to confirm the service really came up.
+http_ok() {
+  if command -v curl >/dev/null 2>&1; then curl -fsS -o /dev/null --max-time 3 "$1" >/dev/null 2>&1
+  elif command -v wget >/dev/null 2>&1; then wget -q -T 3 -O /dev/null "$1" >/dev/null 2>&1
+  else return 1
+  fi
+}
+
+# Print one uci option of the jiotv service, or the default when unavailable.
+uci_opt() {
+  value=$(uci -q get "jiotv.main.$1" 2>/dev/null || true)
+  if [ -n "$value" ]; then echo "$value"; else echo "$2"; fi
+}
+
+# The router's LAN address, so the printed URLs can be opened as shown.
+router_ip() {
+  addr=$(uci -q get network.lan.ipaddr 2>/dev/null | head -n 1 || true)
+  if [ -z "$addr" ] && command -v ip >/dev/null 2>&1; then
+    addr=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -n 1)
+  fi
+  addr=${addr%%/*}
+  if [ -n "$addr" ]; then echo "$addr"; else echo "<router-ip>"; fi
 }
 
 openwrt=false
@@ -73,6 +104,7 @@ if [ "$openwrt" = true ]; then
     *) echo "unsupported OpenWrt package architecture: ${package_arch:-unknown}" >&2; exit 1 ;;
   esac
 
+  say "OpenWrt detected: package manager $package_manager, architecture $package_arch"
   if [ "$version" = latest ]; then
     release_api="https://api.github.com/repos/${repo}/releases/latest"
   else
@@ -82,6 +114,7 @@ if [ "$openwrt" = true ]; then
   download "$release_api" "$tmp/release.json"
   tag=$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/release.json" | head -n 1)
   [ -n "$tag" ] || { echo "could not determine the release version" >&2; exit 1; }
+  say "Release $tag"
 
   package_name=jiotv
   [ "$variant" = slim ] && package_name=jiotv-slim
@@ -98,12 +131,16 @@ if [ "$openwrt" = true ]; then
   [ -n "$asset" ] || { echo "no $variant OpenWrt package found for $machine in $tag" >&2; exit 1; }
 
   base="https://github.com/${repo}/releases/download/${tag}"
+  say "Downloading $asset"
   download "$base/$asset" "$tmp/$asset"
+  note "$(size_kib "$tmp/$asset") KiB"
   download "$base/SHA256SUMS" "$tmp/SHA256SUMS"
   verify_asset "$asset" "$tmp/SHA256SUMS" "$tmp/$asset"
+  say "Checksum verified (SHA-256)"
 
   other_package=jiotv-slim
   [ "$variant" = slim ] && other_package=jiotv
+  say "Installing with $package_manager"
   if [ "$package_manager" = apk ]; then
     if apk info -e "$other_package" >/dev/null 2>&1; then apk del "$other_package"; fi
     apk add --allow-untrusted "$tmp/$asset"
@@ -112,18 +149,59 @@ if [ "$openwrt" = true ]; then
     opkg install "$tmp/$asset"
   fi
   init_script=${JIOTV_INIT_SCRIPT:-/etc/init.d/jiotv}
+  say "Enabling the service at boot"
   "$init_script" enable
-  echo "Installed JioTV ($variant) for OpenWrt."
-  echo "Next: jiotv login otp"
-  echo "Then: jiotv admin password"
-  echo "Then: /etc/init.d/jiotv start"
-  if [ "$install_tls" = 1 ]; then
-    echo "Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<router-ip>:5443/"
-    echo "IPTV apps (plain HTTP playlist): http://<router-ip>:5001/"
-  else
-    echo "HTTPS instructions are off for this install (JIOTV_INSTALL_TLS=0); the service setting is unchanged, so HTTPS stays on unless you set 'option tls 0' in /etc/config/jiotv."
-    echo "Browser UI over plain HTTP: http://<router-ip>:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback)."
+
+  running=false
+  if [ "$start_service" = 1 ]; then
+    # restart, not start: an upgrade must replace a process that is already running.
+    say "Starting the service"
+    if "$init_script" restart; then
+      http_port=$(uci_opt port 5001)
+      tries=0
+      while [ "$tries" -lt 15 ]; do
+        if http_ok "http://127.0.0.1:${http_port}/"; then running=true; break; fi
+        tries=$((tries + 1))
+        sleep 1
+      done
+      if [ "$running" = true ]; then note "listening on port $http_port"
+      else echo "warning: the service did not answer on port $http_port within 15 seconds" >&2
+      fi
+    else
+      echo "warning: '$init_script restart' failed" >&2
+    fi
   fi
+
+  ip=$(router_ip)
+  tls_on=$(uci_opt tls 1)
+  http_port=$(uci_opt port 5001)
+  tls_port=$(uci_opt tls_port 5443)
+  echo
+  if [ "$running" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed and running."
+  elif [ "$start_service" = 1 ]; then echo "JioTV ($variant, ${tag#v}) is installed, but the service is not answering yet."
+  else echo "JioTV ($variant, ${tag#v}) is installed (not started: JIOTV_START_SERVICE=0)."
+  fi
+  echo
+  if [ "$install_tls" = 1 ] && [ "$tls_on" != 0 ]; then
+    echo "  Browser UI : https://${ip}:${tls_port}/  (HTTPS, self-signed certificate; accept the one-time warning)"
+    echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist)"
+  else
+    echo "  Browser UI : http://${ip}:${http_port}/  (browsers need HTTPS or localhost for DRM and encrypted HLS playback)"
+    [ "$install_tls" = 1 ] || echo "  HTTPS instructions are off (JIOTV_INSTALL_TLS=0); the service setting is unchanged, so HTTPS stays on unless 'option tls 0' is set in /etc/config/jiotv."
+  fi
+  echo
+  echo "Next steps:"
+  if [ "$running" = true ]; then
+    echo "  1. Open the browser UI and sign in (you enter the OTP yourself)."
+  else
+    echo "  1. Start the service: $init_script start  (then check: logread -e jiotv)"
+    echo "     and sign in from the browser UI (you enter the OTP yourself)."
+  fi
+  echo "  2. Set the admin password: jiotv admin password"
+  echo "  Prefer the terminal for signing in? Run 'jiotv login otp', then '$init_script restart'."
+  echo
+  echo "Service control: $init_script start|stop|restart    Logs: logread -e jiotv"
+  [ "$start_service" = 0 ] || [ "$running" = true ] || exit 1
   exit 0
 fi
 
@@ -150,6 +228,7 @@ if [ "$termux" = true ]; then
   esac
 fi
 
+say "Detected $sys/$machine: installing the $variant build for $target"
 asset="jiotv-${variant}-${target}"
 if [ "$version" = latest ]; then
   base="https://github.com/${repo}/releases/latest/download"
@@ -157,9 +236,12 @@ else
   case "$version" in v*) tag=$version ;; *) tag="v${version}" ;; esac
   base="https://github.com/${repo}/releases/download/${tag}"
 fi
+say "Downloading $asset"
 download "$base/$asset" "$tmp/$asset"
+note "$(size_kib "$tmp/$asset") KiB"
 download "$base/SHA256SUMS" "$tmp/SHA256SUMS"
 verify_asset "$asset" "$tmp/SHA256SUMS" "$tmp/$asset"
+say "Checksum verified (SHA-256)"
 
 if [ -n "${JIOTV_INSTALL_DIR:-}" ]; then install_dir=$JIOTV_INSTALL_DIR
 elif [ "$termux" = true ]; then install_dir=${PREFIX}/bin

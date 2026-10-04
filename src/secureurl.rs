@@ -8,11 +8,19 @@
 use aes::cipher::{KeyIvInit, StreamCipher};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use std::sync::RwLock;
 
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
-pub struct SecureUrl {
+const CONTEXT_PREFIX: &str = "jiotv-context:";
+
+struct KeyState {
     key: [u8; 32],
+    epoch: u64,
+}
+
+pub struct SecureUrl {
+    state: RwLock<KeyState>,
     disable: bool,
 }
 
@@ -24,6 +32,8 @@ pub enum SecureUrlError {
     Base64,
     #[error("invalid utf8")]
     Utf8,
+    #[error("stale context")]
+    StaleContext,
 }
 
 impl SecureUrl {
@@ -31,18 +41,39 @@ impl SecureUrl {
     /// `disable_url_encryption`: URLs are then only percent-encoded, which
     /// must never be combined with an open (no access-key) deployment.
     pub fn new(disable: bool) -> SecureUrl {
-        let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
-        SecureUrl { key, disable }
+        SecureUrl {
+            state: RwLock::new(KeyState {
+                key: random_key(),
+                epoch: 1,
+            }),
+            disable,
+        }
+    }
+
+    /// Invalidates every encrypted proxy URL issued in the previous account
+    /// or product context. This is also enforced when URL encryption is
+    /// disabled, so that debug deployments do not accidentally keep stale
+    /// account-scoped URLs alive across a context switch.
+    pub fn rotate(&self) -> u64 {
+        let mut state = self.state.write().unwrap();
+        state.key = random_key();
+        state.epoch = state.epoch.wrapping_add(1).max(1);
+        state.epoch
+    }
+
+    pub fn current_epoch(&self) -> u64 {
+        self.state.read().unwrap().epoch
     }
 
     pub fn encrypt(&self, input: &str) -> String {
+        let state = self.state.read().unwrap();
+        let payload = scoped_payload(state.epoch, input);
         if self.disable {
-            return urlencoding::encode(input).into_owned();
+            return urlencoding::encode(&payload).into_owned();
         }
         let mut iv = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut iv);
-        self.encrypt_with_iv(input, iv)
+        encrypt_with_iv(&payload, iv, &state.key)
     }
 
     /// Same ciphertext for the same input every time (derives the nonce from
@@ -50,33 +81,27 @@ impl SecureUrl {
     /// segment URLs a player might otherwise re-request as "new" segments
     /// across manifest refreshes.
     pub fn encrypt_deterministic(&self, input: &str) -> String {
+        let state = self.state.read().unwrap();
+        let payload = scoped_payload(state.epoch, input);
         if self.disable {
-            return urlencoding::encode(input).into_owned();
+            return urlencoding::encode(&payload).into_owned();
         }
         let mut hasher = Sha256::new();
-        hasher.update(self.key);
-        hasher.update(input.as_bytes());
+        hasher.update(state.key);
+        hasher.update(payload.as_bytes());
         let sum = hasher.finalize();
         let mut iv = [0u8; 16];
         iv.copy_from_slice(&sum[..16]);
-        self.encrypt_with_iv(input, iv)
-    }
-
-    fn encrypt_with_iv(&self, input: &str, iv: [u8; 16]) -> String {
-        let mut buf = input.as_bytes().to_vec();
-        let mut cipher = Aes256Ctr::new((&self.key).into(), (&iv).into());
-        cipher.apply_keystream(&mut buf);
-        let mut out = Vec::with_capacity(16 + buf.len());
-        out.extend_from_slice(&iv);
-        out.extend_from_slice(&buf);
-        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE, out)
+        encrypt_with_iv(&payload, iv, &state.key)
     }
 
     pub fn decrypt(&self, input: &str) -> Result<String, SecureUrlError> {
+        let state = self.state.read().unwrap();
         if self.disable {
-            return urlencoding::decode(input)
+            let decoded = urlencoding::decode(input)
                 .map(|s| s.into_owned())
-                .map_err(|_| SecureUrlError::Utf8);
+                .map_err(|_| SecureUrlError::Utf8)?;
+            return parse_scoped_payload(&decoded, state.epoch);
         }
         let raw = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE, input)
             .map_err(|_| SecureUrlError::Base64)?;
@@ -85,10 +110,39 @@ impl SecureUrl {
         }
         let (iv, ct) = raw.split_at(16);
         let mut buf = ct.to_vec();
-        let mut cipher = Aes256Ctr::new(self.key.as_ref().into(), iv.into());
+        let mut cipher = Aes256Ctr::new(state.key.as_ref().into(), iv.into());
         cipher.apply_keystream(&mut buf);
-        String::from_utf8(buf).map_err(|_| SecureUrlError::Utf8)
+        let decoded = String::from_utf8(buf).map_err(|_| SecureUrlError::Utf8)?;
+        parse_scoped_payload(&decoded, state.epoch)
     }
+}
+
+fn random_key() -> [u8; 32] {
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut key);
+    key
+}
+
+fn scoped_payload(epoch: u64, input: &str) -> String {
+    format!("{CONTEXT_PREFIX}{epoch}:{input}")
+}
+
+fn parse_scoped_payload(payload: &str, epoch: u64) -> Result<String, SecureUrlError> {
+    let expected = format!("{CONTEXT_PREFIX}{epoch}:");
+    payload
+        .strip_prefix(&expected)
+        .map(str::to_string)
+        .ok_or(SecureUrlError::StaleContext)
+}
+
+fn encrypt_with_iv(input: &str, iv: [u8; 16], key: &[u8; 32]) -> String {
+    let mut buf = input.as_bytes().to_vec();
+    let mut cipher = Aes256Ctr::new(key.into(), (&iv).into());
+    cipher.apply_keystream(&mut buf);
+    let mut out = Vec::with_capacity(16 + buf.len());
+    out.extend_from_slice(&iv);
+    out.extend_from_slice(&buf);
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE, out)
 }
 
 #[cfg(test)]
@@ -136,5 +190,24 @@ mod tests {
         if let Ok(s) = b.decrypt(&enc) {
             assert_ne!(s, "https://example.com/x");
         }
+    }
+
+    #[test]
+    fn rotating_context_invalidates_old_encrypted_urls() {
+        let s = SecureUrl::new(false);
+        let old = s.encrypt("https://example.com/x");
+        let old_epoch = s.current_epoch();
+        assert!(s.rotate() > old_epoch);
+        assert!(s.decrypt(&old).is_err());
+        let fresh = s.encrypt("https://example.com/x");
+        assert_eq!(s.decrypt(&fresh).unwrap(), "https://example.com/x");
+    }
+
+    #[test]
+    fn rotating_context_invalidates_old_urls_when_encryption_is_disabled() {
+        let s = SecureUrl::new(true);
+        let old = s.encrypt("https://example.com/x");
+        s.rotate();
+        assert!(matches!(s.decrypt(&old), Err(SecureUrlError::StaleContext)));
     }
 }

@@ -37,6 +37,13 @@ pub async fn catchup_stream_handler(
     prefix: Option<axum::Extension<crate::api::KeyPrefix>>,
 ) -> Response {
     let id = id.trim_end_matches(".m3u8").to_string();
+    if !state.channel_allowed(&id).await || crate::extras::content_id::content_id(&id).is_some() {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("Channel {id} is not available for TV catch-up"),
+        )
+            .into_response();
+    }
     let (Some(start), Some(end)) = (q.start, q.end) else {
         return (StatusCode::BAD_REQUEST, "Missing start or end time").into_response();
     };
@@ -52,9 +59,17 @@ pub async fn catchup_stream_handler(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
-    let target = if !result.bitrates.auto.is_empty() { result.bitrates.auto.clone() } else { result.result.clone() };
+    let target = if !result.bitrates.auto.is_empty() {
+        result.bitrates.auto.clone()
+    } else {
+        result.result.clone()
+    };
     if target.is_empty() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "failed to get catchup URL from API").into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to get catchup URL from API",
+        )
+            .into_response();
     }
 
     let encrypted = state.secure.encrypt(&target);

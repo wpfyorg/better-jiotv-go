@@ -52,7 +52,10 @@ impl DashState {
     }
 
     fn set_cached(&self, key: &str, out: DrmMpdOutput) {
-        self.drm_mpd_cache.write().unwrap().insert(key.to_string(), (out, Instant::now()));
+        self.drm_mpd_cache
+            .write()
+            .unwrap()
+            .insert(key.to_string(), (out, Instant::now()));
     }
 
     fn record_publish_time(&self, t: SystemTime) {
@@ -64,6 +67,11 @@ impl DashState {
         let guard = self.cdn_clock.lock().unwrap();
         let (t, at) = (*guard)?;
         Some(t + at.elapsed())
+    }
+
+    pub fn clear(&self) {
+        self.drm_mpd_cache.write().unwrap().clear();
+        *self.cdn_clock.lock().unwrap() = None;
     }
 }
 
@@ -97,7 +105,11 @@ fn cdn_host_and_dir(url_str: &str) -> Option<(String, String)> {
     Some((host, dir))
 }
 
-pub(crate) async fn get_drm_mpd(state: &AppState, channel_id: &str, quality: &str) -> anyhow::Result<DrmMpdOutput> {
+pub(crate) async fn get_drm_mpd(
+    state: &AppState,
+    channel_id: &str,
+    quality: &str,
+) -> anyhow::Result<DrmMpdOutput> {
     let cache_key = format!("{channel_id}_{quality}");
     if let Some(cached) = state.dash_state.get_cached(&cache_key) {
         return Ok(cached);
@@ -108,21 +120,41 @@ pub(crate) async fn get_drm_mpd(state: &AppState, channel_id: &str, quality: &st
     Ok(out)
 }
 
-fn build_drm_mpd_output(state: &AppState, live: &LiveUrlOutput, channel_id: &str, quality: &str) -> anyhow::Result<DrmMpdOutput> {
+fn build_drm_mpd_output(
+    state: &AppState,
+    live: &LiveUrlOutput,
+    channel_id: &str,
+    quality: &str,
+) -> anyhow::Result<DrmMpdOutput> {
     let bitrates = live.mpd.resolved_bitrates();
-    let mut tv_url = television::select_quality(quality, &bitrates.auto, &bitrates.high, &bitrates.medium, &bitrates.low).to_string();
+    let mut tv_url = television::select_quality(
+        quality,
+        &bitrates.auto,
+        &bitrates.high,
+        &bitrates.medium,
+        &bitrates.low,
+    )
+    .to_string();
     if tv_url.is_empty() {
-        tv_url = [&bitrates.high, &bitrates.auto, &bitrates.medium, &bitrates.low]
-            .into_iter()
-            .find(|s| !s.is_empty())
-            .cloned()
-            .unwrap_or_default();
+        tv_url = [
+            &bitrates.high,
+            &bitrates.auto,
+            &bitrates.medium,
+            &bitrates.low,
+        ]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .cloned()
+        .unwrap_or_default();
     }
     if tv_url.is_empty() {
         tv_url = live.mpd.result.clone();
     }
     if tv_url.is_empty() {
-        return Ok(DrmMpdOutput { is_drm: live.is_drm, ..Default::default() });
+        return Ok(DrmMpdOutput {
+            is_drm: live.is_drm,
+            ..Default::default()
+        });
     }
 
     let channel_enc_url = state.secure.encrypt(&tv_url);
@@ -134,10 +166,16 @@ fn build_drm_mpd_output(state: &AppState, live: &LiveUrlOutput, channel_id: &str
     };
 
     if live.algo_name == "timesplay" {
-        return Ok(DrmMpdOutput { is_drm: live.is_drm, play_url: tv_url, license_url, ..Default::default() });
+        return Ok(DrmMpdOutput {
+            is_drm: live.is_drm,
+            play_url: tv_url,
+            license_url,
+            ..Default::default()
+        });
     }
 
-    let (host, dir_path) = cdn_host_and_dir(&tv_url).ok_or_else(|| anyhow::anyhow!("invalid upstream URL"))?;
+    let (host, dir_path) =
+        cdn_host_and_dir(&tv_url).ok_or_else(|| anyhow::anyhow!("invalid upstream URL"))?;
     let tv_url_path = state.secure.encrypt_deterministic(&dir_path);
     let tv_url_host = state.secure.encrypt_deterministic(&host);
 
@@ -166,6 +204,14 @@ pub async fn live_mpd_handler(
 ) -> Response {
     let quality = q.q.unwrap_or_else(|| "auto".to_string());
 
+    if !state.channel_allowed(&channel_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("Channel {channel_id} is not available for the active account"),
+        )
+            .into_response();
+    }
+
     if let Some(ch) = state.custom_channels.get(&channel_id) {
         return Redirect::to(&ch.url).into_response();
     }
@@ -179,7 +225,10 @@ pub async fn live_mpd_handler(
             // No DRM/DASH stream available; fall back to this server's own
             // HLS route rather than the Go version's HTML fallback player.
             let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
-            let hls_path = format!("{prefix_str}{}", crate::extras_state::ExtrasState::live_hls_path(&channel_id, &quality));
+            let hls_path = format!(
+                "{prefix_str}{}",
+                crate::extras_state::ExtrasState::live_hls_path(&channel_id, &quality)
+            );
             Redirect::to(&hls_path).into_response()
         }
     }
@@ -196,17 +245,31 @@ pub async fn live_key_handler(
     body: Bytes,
 ) -> Response {
     let quality = q.q.unwrap_or_else(|| "auto".to_string());
+    if !state.channel_allowed(&channel_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("Channel {channel_id} is not available for the active account"),
+        )
+            .into_response();
+    }
     let drm = match get_drm_mpd(&state, &channel_id, &quality).await {
         Ok(d) => d,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     if drm.license_url.is_empty() {
-        return (StatusCode::NOT_FOUND, format!("No License URL found for channel {channel_id}")).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            format!("No License URL found for channel {channel_id}"),
+        )
+            .into_response();
     }
     let Some((_, query)) = drm.license_url.split_once('?') else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "malformed license URL").into_response();
     };
-    let params: std::collections::HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes()).into_owned().collect();
+    let params: std::collections::HashMap<String, String> =
+        url::form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
     drm_license_impl(state, params, method, headers, body).await
 }
 
@@ -231,7 +294,20 @@ async fn drm_license_impl(
     let Some(auth) = params.get("auth") else {
         return (StatusCode::BAD_REQUEST, "auth is required").into_response();
     };
-    let channel_id = params.get("channel_id").cloned().unwrap_or_default();
+    let Some(channel_id) = params
+        .get("channel_id")
+        .filter(|id| !id.is_empty())
+        .cloned()
+    else {
+        return (StatusCode::BAD_REQUEST, "channel_id is required").into_response();
+    };
+    if !state.channel_allowed(&channel_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            "channel is not available for the active account",
+        )
+            .into_response();
+    }
     let decoded_url = match state.secure.decrypt(auth) {
         Ok(u) => u,
         Err(_) => return (StatusCode::FORBIDDEN, "invalid auth parameter").into_response(),
@@ -242,7 +318,10 @@ async fn drm_license_impl(
     // cookie-harvesting dance below entirely, mirroring `DRMKeyHandler`'s
     // `extrasLicenseHeaders` branch.
     let is_custom = state.custom_channels.contains(&channel_id);
-    if let Some(content_id) = state.extras.route(&channel_id, state.tv.logged_in(), is_custom) {
+    if let Some(content_id) = state
+        .extras
+        .route(&channel_id, state.tv.logged_in(), is_custom)
+    {
         let mut req = state
             .http
             .request(method, &decoded_url)
@@ -312,7 +391,8 @@ async fn drm_license_impl(
 async fn send_license_request(req: reqwest::RequestBuilder, body: Bytes) -> Response {
     match req.body(body).send().await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let ct = resp.headers().get(header::CONTENT_TYPE).cloned();
             let bytes = resp.bytes().await.unwrap_or_default();
             let mut builder = Response::builder().status(status);
@@ -329,7 +409,15 @@ fn generate_date_time() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let millis = now.subsec_millis();
     let (y, m, d, hh, mm, _ss) = crate::television::civil_from_unix(now.as_secs());
-    format!("{:02}{:02}{:02}{:02}{:02}{:03}", y % 100, m, d, hh, mm, millis)
+    format!(
+        "{:02}{:02}{:02}{:02}{:02}{:03}",
+        y % 100,
+        m,
+        d,
+        hh,
+        mm,
+        millis
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -343,21 +431,30 @@ pub struct RenderMpdQuery {
 /// `/render.mpd` — fetches the MPD, rewrites `BaseURL` to route segments
 /// through `/render.dash/...`, injects a `UTCTiming` element pointing at
 /// `/dashtime`, and records the CDN's own clock from `publishTime`.
-pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Query<RenderMpdQuery>) -> Response {
+pub async fn render_mpd_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<RenderMpdQuery>,
+) -> Response {
+    let Some(channel_id) = q.channel_id.as_deref().filter(|id| !id.is_empty()) else {
+        return (StatusCode::BAD_REQUEST, "channel_id is required").into_response();
+    };
+    if !state.channel_allowed(channel_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            "channel is not available for the active account",
+        )
+            .into_response();
+    }
     let mut decrypted = match state.secure.decrypt(&q.auth) {
         Ok(u) => u,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
     let quality = q.q.clone().unwrap_or_default();
 
-    if let Some(channel_id) = &q.channel_id {
-        if !channel_id.is_empty() {
-            if let Ok(live) = crate::stream::fetch_live(&state, channel_id).await {
-                let fresh = television::select_best_live_mpd_url(&live, &quality);
-                if !fresh.is_empty() {
-                    decrypted = fresh;
-                }
-            }
+    if let Ok(live) = crate::stream::fetch_live(&state, channel_id).await {
+        let fresh = television::select_best_live_mpd_url(&live, &quality);
+        if !fresh.is_empty() {
+            decrypted = fresh;
         }
     }
 
@@ -367,12 +464,16 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
     let enc_host = state.secure.encrypt_deterministic(&proxy_host);
     let enc_path = state.secure.encrypt_deterministic(&base_path);
 
+    let encoded_channel = urlencoding::encode(channel_id);
     let cached_hdnea = q.hdnea.clone();
-    let mut dash_base = format!("/render.dash/host/{enc_host}/path/{enc_path}");
+    let mut dash_base =
+        format!("/render.dash/channel/{encoded_channel}/host/{enc_host}/path/{enc_path}");
     if let Some(h) = &cached_hdnea {
         if !h.is_empty() {
-            let enc = state.secure.encrypt_deterministic(&format!("__hdnea__={h}"));
-            dash_base = format!("/render.dash/host/{enc_host}/path/{enc_path}/hdnea/{enc}");
+            let enc = state
+                .secure
+                .encrypt_deterministic(&format!("__hdnea__={h}"));
+            dash_base = format!("/render.dash/channel/{encoded_channel}/host/{enc_host}/path/{enc_path}/hdnea/{enc}");
         }
     }
 
@@ -388,12 +489,18 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
         set_cookies = c;
     }
 
-    let upstream_hdnea = set_cookies
-        .iter()
-        .find_map(|sc| sc.split(';').map(str::trim).find_map(|p| p.strip_prefix("__hdnea__=")));
+    let upstream_hdnea = set_cookies.iter().find_map(|sc| {
+        sc.split(';')
+            .map(str::trim)
+            .find_map(|p| p.strip_prefix("__hdnea__="))
+    });
     if let Some(h) = upstream_hdnea {
-        let enc = state.secure.encrypt_deterministic(&format!("__hdnea__={h}"));
-        dash_base = format!("/render.dash/host/{enc_host}/path/{enc_path}/hdnea/{enc}");
+        let enc = state
+            .secure
+            .encrypt_deterministic(&format!("__hdnea__={h}"));
+        dash_base = format!(
+            "/render.dash/channel/{encoded_channel}/host/{enc_host}/path/{enc_path}/hdnea/{enc}"
+        );
     }
 
     let mut body_str = String::from_utf8_lossy(&body).to_string();
@@ -403,7 +510,10 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
     }
 
     if !body_str.contains("<UTCTiming") {
-        if let Some(idx) = body_str.find("<MPD").and_then(|i| body_str[i..].find('>').map(|j| i + j + 1)) {
+        if let Some(idx) = body_str
+            .find("<MPD")
+            .and_then(|i| body_str[i..].find('>').map(|j| i + j + 1))
+        {
             let utc_timing = "<UTCTiming schemeIdUri=\"urn:mpeg:dash:utc:http-xsdate:2014\" value=\"/dashtime\"/>";
             body_str.insert_str(idx, utc_timing);
         }
@@ -412,14 +522,18 @@ pub async fn render_mpd_handler(State(state): State<Arc<AppState>>, Query(q): Qu
     body_str = rewrite_base_url(&body_str, &dash_base);
 
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
-    let mut builder = Response::builder().status(status_code).header(header::CONTENT_TYPE, "application/dash+xml");
+    let mut builder = Response::builder()
+        .status(status_code)
+        .header(header::CONTENT_TYPE, "application/dash+xml");
     // Forward the CDN's own cookies to the client (Shaka and other
     // same-origin players use them for the segment requests that follow),
     // with Domain stripped and Path rewritten to this server's own
     // /render.dash prefix — mirrors MpdHandler's Set-Cookie rewriting.
     for raw in &set_cookies {
         let domain_needle = format!("Domain={proxy_host};");
-        let rewritten = raw.replace(&domain_needle, "").replacen("path=/", "path=/render.dash", 1);
+        let rewritten = raw
+            .replace(&domain_needle, "")
+            .replacen("path=/", "path=/render.dash", 1);
         builder = builder.header(header::SET_COOKIE, rewritten);
     }
     builder.body(Body::from(body_str)).unwrap()
@@ -433,7 +547,9 @@ fn rewrite_base_url(body: &str, dash_base: &str) -> String {
         let mut out = String::with_capacity(body.len());
         let mut rest = body;
         while let Some(start) = rest.find("<BaseURL>") {
-            let Some(end_rel) = rest[start..].find("</BaseURL>") else { break };
+            let Some(end_rel) = rest[start..].find("</BaseURL>") else {
+                break;
+            };
             out.push_str(&rest[..start]);
             out.push_str(&format!("<BaseURL>{dash_base}/dash/</BaseURL>"));
             rest = &rest[start + end_rel + "</BaseURL>".len()..];
@@ -446,7 +562,9 @@ fn rewrite_base_url(body: &str, dash_base: &str) -> String {
     while let Some(start) = rest.find("<Period") {
         // Skip tags that only start with "<Period", such as <PeriodX>.
         let after = rest[start + "<Period".len()..].chars().next();
-        let Some(tag_end_rel) = rest[start..].find('>') else { break };
+        let Some(tag_end_rel) = rest[start..].find('>') else {
+            break;
+        };
         let insert_at = start + tag_end_rel + 1;
         out.push_str(&rest[..insert_at]);
         if matches!(after, Some(c) if c.is_whitespace() || c == '>' || c == '/') {
@@ -475,16 +593,19 @@ pub(crate) fn parse_rfc3339(s: &str) -> Option<SystemTime> {
     let m: i64 = parts.next()?.parse().ok()?;
     let d: i64 = parts.next()?.parse().ok()?;
     let rest = rest.trim_end_matches('Z');
-    let (time_part, offset) = rest.split_once('+').map(|(a, b)| (a, Some(("+", b)))).unwrap_or_else(|| {
-        // A "-" offset only appears after the seconds field, so look past
-        // index 5 (HH:MM) to avoid the date's own dashes not being present here.
-        if let Some(idx) = rest.rfind('-') {
-            if idx > 5 {
-                return (&rest[..idx], Some(("-", &rest[idx + 1..])));
+    let (time_part, offset) = rest
+        .split_once('+')
+        .map(|(a, b)| (a, Some(("+", b))))
+        .unwrap_or_else(|| {
+            // A "-" offset only appears after the seconds field, so look past
+            // index 5 (HH:MM) to avoid the date's own dashes not being present here.
+            if let Some(idx) = rest.rfind('-') {
+                if idx > 5 {
+                    return (&rest[..idx], Some(("-", &rest[idx + 1..])));
+                }
             }
-        }
-        (rest, None)
-    });
+            (rest, None)
+        });
     let mut tparts = time_part.split(':');
     let hh: i64 = tparts.next()?.parse().ok()?;
     let mm: i64 = tparts.next()?.parse().ok()?;
@@ -528,7 +649,13 @@ fn player_user_agent_for(state: &AppState, url: &str) -> &'static str {
 
 async fn proxy_mpd(state: &AppState, url: &str) -> (u16, Vec<u8>, Vec<String>) {
     let ua = player_user_agent_for(state, url);
-    match state.http.get(url).header(header::USER_AGENT, ua).send().await {
+    match state
+        .http
+        .get(url)
+        .header(header::USER_AGENT, ua)
+        .send()
+        .await
+    {
         Ok(resp) => {
             let status = resp.status().as_u16();
             let cookies: Vec<String> = resp
@@ -545,25 +672,33 @@ async fn proxy_mpd(state: &AppState, url: &str) -> (u16, Vec<u8>, Vec<String>) {
     }
 }
 
-/// `/render.dash/host/<enc>/path/<enc>[/hdnea/<enc>]/<segment-path>` —
+/// `/render.dash/channel/<id>/host/<enc>/path/<enc>[/hdnea/<enc>]/<segment-path>` —
 /// proxies one DASH segment or the manifest's own directory listing to the
 /// real CDN. The whole remainder of the path is taken as a single wildcard
 /// and parsed by hand (mirrors `DashHandler`'s own manual parsing, which
 /// exists for the same reason: the segment path's own depth is unbounded).
-/// Parses `/render.dash/host/<enc>/path/<enc>[/hdnea/<enc>]/<segment-path>`
-/// into `(enc_host, enc_path, enc_hdnea, segment_path)`, where
+/// Parses `/render.dash/channel/<id>/host/<enc>/path/<enc>[/hdnea/<enc>]/<segment-path>`
+/// into `(channel_id, enc_host, enc_path, enc_hdnea, segment_path)`, where
 /// `segment_path` starts with `/`. A pure function (no decryption, no I/O)
 /// so it's directly testable against the exact path shapes a real client
 /// resolves a relative `SegmentTemplate` reference into.
-fn split_dash_path(path: &str) -> Option<(&str, &str, Option<&str>, String)> {
-    let rest = path.strip_prefix("/render.dash/host/")?;
+fn split_dash_path(path: &str) -> Option<(String, &str, &str, Option<&str>, String)> {
+    let rest = path.strip_prefix("/render.dash/channel/")?;
+    let (encoded_channel, rest) = rest.split_once("/host/")?;
+    let channel_id = urlencoding::decode(encoded_channel).ok()?.into_owned();
     let (enc_host, remainder) = rest.split_once("/path/")?;
     if let Some((before, after)) = remainder.split_once("/hdnea/") {
         let (enc_hdnea, seg) = after.split_once('/').unwrap_or((after, ""));
-        Some((enc_host, before, Some(enc_hdnea), format!("/{seg}")))
+        Some((
+            channel_id,
+            enc_host,
+            before,
+            Some(enc_hdnea),
+            format!("/{seg}"),
+        ))
     } else {
         let (p, seg) = remainder.split_once('/').unwrap_or((remainder, ""));
-        Some((enc_host, p, None, format!("/{seg}")))
+        Some((channel_id, enc_host, p, None, format!("/{seg}")))
     }
 }
 
@@ -583,11 +718,22 @@ fn build_dash_proxy_url(host: &str, base_path: &str, segment_path: &str, query: 
     url
 }
 
-pub async fn render_dash_handler(State(state): State<Arc<AppState>>, uri: axum::http::Uri) -> Response {
-    let (enc_host, enc_path, enc_hdnea, segment_path) = match split_dash_path(uri.path()) {
-        Some(v) => v,
-        None => return (StatusCode::BAD_REQUEST, "malformed dash path").into_response(),
-    };
+pub async fn render_dash_handler(
+    State(state): State<Arc<AppState>>,
+    uri: axum::http::Uri,
+) -> Response {
+    let (channel_id, enc_host, enc_path, enc_hdnea, segment_path) =
+        match split_dash_path(uri.path()) {
+            Some(v) => v,
+            None => return (StatusCode::BAD_REQUEST, "malformed dash path").into_response(),
+        };
+    if !state.channel_allowed(&channel_id).await {
+        return (
+            StatusCode::NOT_FOUND,
+            "channel is not available for the active account",
+        )
+            .into_response();
+    }
 
     let hdnea_token = enc_hdnea.and_then(|enc| {
         state
@@ -606,7 +752,8 @@ pub async fn render_dash_handler(State(state): State<Arc<AppState>>, uri: axum::
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid path parameter").into_response(),
     };
 
-    let proxy_url = build_dash_proxy_url(&host, &base_path, &segment_path, uri.query().unwrap_or(""));
+    let proxy_url =
+        build_dash_proxy_url(&host, &base_path, &segment_path, uri.query().unwrap_or(""));
 
     let (status, body, ct) = proxy_dash_segment(&state, &proxy_url, hdnea_token.as_deref()).await;
     let mut status = status;
@@ -619,14 +766,19 @@ pub async fn render_dash_handler(State(state): State<Arc<AppState>>, uri: axum::
         ct = c;
     }
 
-    let mut builder = Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY));
+    let mut builder =
+        Response::builder().status(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY));
     if let Some(ct) = ct {
         builder = builder.header(header::CONTENT_TYPE, ct);
     }
     builder.body(Body::from(body)).unwrap()
 }
 
-async fn proxy_dash_segment(state: &AppState, url: &str, hdnea: Option<&str>) -> (u16, Vec<u8>, Option<String>) {
+async fn proxy_dash_segment(
+    state: &AppState,
+    url: &str,
+    hdnea: Option<&str>,
+) -> (u16, Vec<u8>, Option<String>) {
     let ua = player_user_agent_for(state, url);
     let mut req = state.http.get(url).header(header::USER_AGENT, ua);
     if let Some(t) = hdnea {
@@ -635,7 +787,11 @@ async fn proxy_dash_segment(state: &AppState, url: &str, hdnea: Option<&str>) ->
     match req.send().await {
         Ok(resp) => {
             let status = resp.status().as_u16();
-            let ct = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let ct = resp
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             let body = resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
             (status, body, ct)
         }
@@ -671,7 +827,10 @@ mod httpdate {
         const MO: [&str; 13] = [
             "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
-        format!("{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT", WD[weekday as usize], d, MO[m as usize], y, hh, mm, ss)
+        format!(
+            "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
+            WD[weekday as usize], d, MO[m as usize], y, hh, mm, ss
+        )
     }
 }
 
@@ -696,24 +855,39 @@ mod tests {
     #[test]
     fn rewrites_existing_base_url() {
         let body = "<Period><BaseURL>https://old/</BaseURL></Period>";
-        let out = rewrite_base_url(body, "/render.dash/host/x/path/y");
-        assert_eq!(out, "<Period><BaseURL>/render.dash/host/x/path/y/dash/</BaseURL></Period>");
+        let out = rewrite_base_url(body, "/render.dash/channel/ex_1/host/x/path/y");
+        assert_eq!(
+            out,
+            "<Period><BaseURL>/render.dash/channel/ex_1/host/x/path/y/dash/</BaseURL></Period>"
+        );
     }
 
     #[test]
     fn inserts_base_url_when_missing() {
         let body = "<Period id=\"0\"><AdaptationSet/></Period>";
-        let out = rewrite_base_url(body, "/render.dash/host/x/path/y");
-        assert!(out.contains("<Period id=\"0\">\n<BaseURL>/render.dash/host/x/path/y/</BaseURL>"));
+        let out = rewrite_base_url(body, "/render.dash/channel/ex_1/host/x/path/y");
+        assert!(out.contains(
+            "<Period id=\"0\">\n<BaseURL>/render.dash/channel/ex_1/host/x/path/y/</BaseURL>"
+        ));
         assert!(!out.contains("/dash/"));
     }
 
     #[test]
     fn rewrites_every_period_and_base_url() {
         let two = "<Period id=\"a\"><AdaptationSet/></Period><Period id=\"b\"/>";
-        assert_eq!(rewrite_base_url(two, "/r").matches("<BaseURL>/r/</BaseURL>").count(), 2);
+        assert_eq!(
+            rewrite_base_url(two, "/r")
+                .matches("<BaseURL>/r/</BaseURL>")
+                .count(),
+            2
+        );
         let bases = "<BaseURL>a/</BaseURL><Period><BaseURL>b/</BaseURL></Period>";
-        assert_eq!(rewrite_base_url(bases, "/r").matches("<BaseURL>/r/dash/</BaseURL>").count(), 2);
+        assert_eq!(
+            rewrite_base_url(bases, "/r")
+                .matches("<BaseURL>/r/dash/</BaseURL>")
+                .count(),
+            2
+        );
     }
 
     /// Regression test for a live-verified bug: channel 151's extras-mirrored
@@ -728,7 +902,11 @@ mod tests {
         let (host, dir) = cdn_host_and_dir(url).unwrap();
         assert_eq!(host, "cdn.example.com");
         assert_eq!(dir, "/bpk-tv/MoviesNow_BTS/WDVLive/");
-        assert_eq!(dir.matches('/').count(), 4, "expected exactly 4 slashes: leading + 3 directories");
+        assert_eq!(
+            dir.matches('/').count(),
+            4,
+            "expected exactly 4 slashes: leading + 3 directories"
+        );
     }
 
     #[test]
@@ -742,7 +920,8 @@ mod tests {
 
     #[test]
     fn host_and_dir_plain_case_matches_go() {
-        let (host, dir) = cdn_host_and_dir("https://cdn.example.com/bpk-tv/Name_BTS/WDVLive/index.mpd").unwrap();
+        let (host, dir) =
+            cdn_host_and_dir("https://cdn.example.com/bpk-tv/Name_BTS/WDVLive/index.mpd").unwrap();
         assert_eq!(host, "cdn.example.com");
         assert_eq!(dir, "/bpk-tv/Name_BTS/WDVLive/");
     }
@@ -771,10 +950,12 @@ mod tests {
 
         // Shaka resolves the relative SegmentTemplate reference
         // "index_video_7_0_init.mp4?m=1773052885" against our rewritten
-        // BaseURL ("/render.dash/host/<enc>/path/<enc>/dash/") into this
+        // BaseURL ("/render.dash/channel/<id>/host/<enc>/path/<enc>/dash/") into this
         // request.
-        let request_path = format!("/render.dash/host/{enc_host}/path/{enc_path}/dash/index_video_7_0_init.mp4");
-        let (got_enc_host, got_enc_path, got_hdnea, segment_path) = split_dash_path(&request_path).unwrap();
+        let request_path = format!("/render.dash/channel/ex_151/host/{enc_host}/path/{enc_path}/dash/index_video_7_0_init.mp4");
+        let (channel_id, got_enc_host, got_enc_path, got_hdnea, segment_path) =
+            split_dash_path(&request_path).unwrap();
+        assert_eq!(channel_id, "ex_151");
         assert_eq!(got_enc_host, enc_host);
         assert_eq!(got_enc_path, enc_path);
         assert!(got_hdnea.is_none());
@@ -785,7 +966,12 @@ mod tests {
         assert_eq!(decrypted_host, "cdn.example.com");
         assert_eq!(decrypted_dir, "/bpk-tv/MoviesNow_BTS/WDVLive/");
 
-        let proxy_url = build_dash_proxy_url(&decrypted_host, &decrypted_dir, &segment_path, "m=1773052885");
+        let proxy_url = build_dash_proxy_url(
+            &decrypted_host,
+            &decrypted_dir,
+            &segment_path,
+            "m=1773052885",
+        );
         assert_eq!(
             proxy_url,
             "https://cdn.example.com/bpk-tv/MoviesNow_BTS/WDVLive/dash/index_video_7_0_init.mp4?m=1773052885"
@@ -794,12 +980,18 @@ mod tests {
 
     #[test]
     fn split_dash_path_extracts_the_hdnea_segment_when_present() {
-        let (host, path, hdnea, seg) = split_dash_path("/render.dash/host/H/path/P/hdnea/HD/seg.m4s").unwrap();
-        assert_eq!((host, path, hdnea, seg.as_str()), ("H", "P", Some("HD"), "/seg.m4s"));
+        let (channel, host, path, hdnea, seg) =
+            split_dash_path("/render.dash/channel/ex_42/host/H/path/P/hdnea/HD/seg.m4s").unwrap();
+        assert_eq!(channel, "ex_42");
+        assert_eq!(
+            (host, path, hdnea, seg.as_str()),
+            ("H", "P", Some("HD"), "/seg.m4s")
+        );
     }
 
     #[test]
     fn split_dash_path_rejects_a_malformed_prefix() {
         assert!(split_dash_path("/not-render-dash/x").is_none());
+        assert!(split_dash_path("/render.dash/host/H/path/P/seg.m4s").is_none());
     }
 }

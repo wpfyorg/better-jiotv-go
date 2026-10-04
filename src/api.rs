@@ -27,7 +27,10 @@ fn session_cookie_header(_state: &AppState, value: &str) -> String {
 }
 
 fn clear_cookie_header() -> String {
-    format!("{}=; Path=/; HttpOnly; Max-Age=0", crate::access::SESSION_COOKIE)
+    format!(
+        "{}=; Path=/; HttpOnly; Max-Age=0",
+        crate::access::SESSION_COOKIE
+    )
 }
 
 fn err(status: StatusCode, message: impl Into<String>) -> Response {
@@ -35,7 +38,9 @@ fn err(status: StatusCode, message: impl Into<String>) -> Response {
 }
 
 pub fn has_session(state: &AppState, cookie_header: Option<&str>) -> bool {
-    let Some(cookies) = cookie_header else { return false };
+    let Some(cookies) = cookie_header else {
+        return false;
+    };
     for part in cookies.split(';') {
         let part = part.trim();
         if let Some(v) = part.strip_prefix(&format!("{}=", crate::access::SESSION_COOKIE)) {
@@ -57,7 +62,10 @@ pub async fn auth_state(
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let authed = state.config.disable_auth
-        || has_session(&state, headers.get(header::COOKIE).and_then(|v| v.to_str().ok()));
+        || has_session(
+            &state,
+            headers.get(header::COOKIE).and_then(|v| v.to_str().ok()),
+        );
     let key_presented = prefix.map(|p| !p.0 .0.is_empty()).unwrap_or(false);
     Json(json!({
         "passwordSet": state.access.has_password(),
@@ -81,14 +89,21 @@ pub async fn auth_setup(
     }
     let has_prefix = prefix.map(|p| !p.0 .0.is_empty()).unwrap_or(false);
     if !has_prefix && !state.config.disable_auth {
-        return err(StatusCode::FORBIDDEN, "open the setup link that contains the access key");
+        return err(
+            StatusCode::FORBIDDEN,
+            "open the setup link that contains the access key",
+        );
     }
     match state.access.set_password(&body.password) {
         Ok(()) => login_response(&state),
-        Err(crate::access::AccessError::WeakPassword(n)) => {
-            err(StatusCode::BAD_REQUEST, format!("the password needs at least {n} characters"))
-        }
-        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "cannot save the password"),
+        Err(crate::access::AccessError::WeakPassword(n)) => err(
+            StatusCode::BAD_REQUEST,
+            format!("the password needs at least {n} characters"),
+        ),
+        Err(_) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cannot save the password",
+        ),
     }
 }
 
@@ -97,12 +112,16 @@ pub async fn auth_login(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<PasswordBody>,
 ) -> Response {
-    match state.access.login(&addr.ip().to_string(), &body.password, SystemTime::now()) {
+    match state
+        .access
+        .login(&addr.ip().to_string(), &body.password, SystemTime::now())
+    {
         Ok(true) => login_response(&state),
         Ok(false) => err(StatusCode::UNAUTHORIZED, "wrong password"),
-        Err(crate::access::AccessError::TooManyAttempts) => {
-            err(StatusCode::TOO_MANY_REQUESTS, "too many wrong passwords, try again later")
-        }
+        Err(crate::access::AccessError::TooManyAttempts) => err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many wrong passwords, try again later",
+        ),
         Err(_) => err(StatusCode::BAD_REQUEST, "no password is set yet"),
     }
 }
@@ -138,11 +157,17 @@ pub async fn account_password(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<ChangePasswordBody>,
 ) -> Response {
-    match state.access.login(&addr.ip().to_string(), &body.current, SystemTime::now()) {
+    match state
+        .access
+        .login(&addr.ip().to_string(), &body.current, SystemTime::now())
+    {
         Ok(true) => {}
         Ok(false) => return err(StatusCode::UNAUTHORIZED, "the current password is wrong"),
         Err(crate::access::AccessError::TooManyAttempts) => {
-            return err(StatusCode::TOO_MANY_REQUESTS, "too many wrong passwords, try again later")
+            return err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "too many wrong passwords, try again later",
+            )
         }
         Err(_) => return err(StatusCode::UNAUTHORIZED, "the current password is wrong"),
     }
@@ -158,14 +183,30 @@ pub async fn status(State(state): State<SharedState>) -> Response {
     } else {
         match state.access.playlist_path() {
             Ok(p) => p,
-            Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot read the access key"),
+            Err(_) => {
+                return err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cannot read the access key",
+                )
+            }
         }
     };
     let epg_path = format!("{}epg.xml.gz", playlist.trim_end_matches("playlist.m3u"));
+    let tv_plan = state.tv.plan_summary().await;
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "jiotv": {"loggedIn": state.tv.logged_in()},
         "extras": {"enabled": state.extras.enabled(), "connected": state.extras.connected()},
+        "catalogue": {
+            "activeProduct": state.active_product().as_str(),
+            "extrasEntitlementsAvailable": state.extras.entitlements_available(),
+            "extrasEntitlementsApplied": state.extras.entitlements_applied(),
+            "extrasEntitlementStatus": state.extras.entitlement_status().as_str(),
+            "tvPlanDataAvailable": tv_plan.is_some(),
+            "tvActivePlanCount": tv_plan.as_ref().map(|summary| summary.active_plan_count),
+            "tvPlanProviderCount": tv_plan.as_ref().map(|summary| summary.provider_count),
+            "tvLinearEntitlement": "unknown"
+        },
         "playlistPath": playlist,
         "epgPath": epg_path,
         "epg": state.config.epg,
@@ -189,19 +230,16 @@ struct ApiChannel {
 }
 
 pub async fn channels(State(state): State<SharedState>) -> Response {
-    let list = match state.tv.channels().await {
+    let all = match state.effective_channels().await {
         Ok(l) => l,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    state.extras.refresh_catalogue_if_needed(&state.tv).await;
-    let mut all = list.result;
-    all.extend(state.extras.exclusive_channels(&all));
-    all.extend(state.custom_channels.all());
 
     let mut out: Vec<ApiChannel> = all
         .iter()
         .map(|ch| {
-            let logo = if ch.logo_url.starts_with("http://") || ch.logo_url.starts_with("https://") {
+            let logo = if ch.logo_url.starts_with("http://") || ch.logo_url.starts_with("https://")
+            {
                 ch.logo_url.clone()
             } else {
                 format!("/jtvimage/{}", ch.logo_url)
@@ -232,31 +270,59 @@ pub struct JioTvOtpBody {
 
 /// `POST /login/sendOTP`: sends a JioTV login OTP. Mirrors
 /// `LoginSendOTPHandler`.
-pub async fn jiotv_send_otp(State(state): State<SharedState>, Json(body): Json<JioTvOtpBody>) -> Response {
+pub async fn jiotv_send_otp(
+    State(state): State<SharedState>,
+    Json(body): Json<JioTvOtpBody>,
+) -> Response {
     if body.number.is_empty() {
         return err(StatusCode::BAD_REQUEST, "Mobile Number is required");
     }
-    match crate::login::LoginClient::new(state.http.clone()).send_otp(&body.number).await {
+    match crate::login::LoginClient::new(state.http.clone())
+        .send_otp(&body.number)
+        .await
+    {
         Ok(sent) => Json(json!({"status": sent})).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not send the OTP: {e}")),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not send the OTP: {e}"),
+        ),
     }
 }
 
 /// `POST /login/verifyOTP`: completes the JioTV login and loads it. Mirrors
 /// `LoginVerifyOTPHandler`.
-pub async fn jiotv_verify_otp(State(state): State<SharedState>, Json(body): Json<JioTvOtpBody>) -> Response {
+pub async fn jiotv_verify_otp(
+    State(state): State<SharedState>,
+    Json(body): Json<JioTvOtpBody>,
+) -> Response {
     if body.number.is_empty() || body.otp.is_empty() {
-        return err(StatusCode::BAD_REQUEST, "Mobile Number and OTP are required");
+        return err(
+            StatusCode::BAD_REQUEST,
+            "Mobile Number and OTP are required",
+        );
     }
-    let creds = match crate::login::LoginClient::new(state.http.clone()).verify_otp(&body.number, &body.otp, &state.tv.device_id).await {
+    let creds = match crate::login::LoginClient::new(state.http.clone())
+        .verify_otp(&body.number, &body.otp, &state.tv.device_id)
+        .await
+    {
         Ok(Some(c)) => c,
-        Ok(None) => return Json(json!({"status": "failed", "message": "Invalid OTP"})).into_response(),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not verify the OTP: {e}")),
+        Ok(None) => {
+            return Json(json!({"status": "failed", "message": "Invalid OTP"})).into_response()
+        }
+        Err(e) => {
+            return err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not verify the OTP: {e}"),
+            )
+        }
     };
     if crate::login::save(&state.store, &creds, crate::login::TOUCH_ALL).is_err() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot save the login");
     }
+    state.invalidate_context();
     state.tv.set_credentials(creds);
+    state.extras.invalidate_account_context();
+    crate::epg::trigger_regeneration(&state);
     Json(json!({"status": "success"})).into_response()
 }
 
@@ -265,7 +331,10 @@ pub async fn jiotv_logout(State(state): State<SharedState>) -> Response {
         return err(StatusCode::FORBIDDEN, "logout is disabled");
     }
     let _ = crate::login::clear(&state.store);
+    state.invalidate_context();
     state.tv.clear_credentials();
+    state.extras.invalidate_account_context();
+    crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true})).into_response()
 }
 
@@ -279,7 +348,6 @@ pub async fn rotate_key(State(state): State<SharedState>) -> Response {
     status(State(state)).await
 }
 
-
 #[derive(Deserialize)]
 pub struct ExtrasSendOtpBody {
     number: String,
@@ -290,7 +358,10 @@ pub struct ExtrasSendOtpBody {
 /// the fibre connections on the number when there's a choice; a second call
 /// with `connection` sends the OTP for that connection. Mirrors
 /// `ExtrasSendOTPHandler`.
-pub async fn extras_send_otp(State(state): State<SharedState>, Json(body): Json<ExtrasSendOtpBody>) -> Response {
+pub async fn extras_send_otp(
+    State(state): State<SharedState>,
+    Json(body): Json<ExtrasSendOtpBody>,
+) -> Response {
     if !state.extras.enabled() {
         return err(StatusCode::BAD_REQUEST, "extras is not enabled");
     }
@@ -307,7 +378,10 @@ pub async fn extras_send_otp(State(state): State<SharedState>, Json(body): Json<
                 .collect();
             Json(json!({"status": outcome.sent, "connections": connections})).into_response()
         }
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("Could not send the OTP: {e}")),
+        Err(e) => err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Could not send the OTP: {e}"),
+        ),
     }
 }
 
@@ -318,11 +392,22 @@ pub struct ExtrasVerifyOtpBody {
 }
 
 /// `POST /api/extras/login/verifyOTP`. Mirrors `ExtrasVerifyOTPHandler`.
-pub async fn extras_verify_otp(State(state): State<SharedState>, Json(body): Json<ExtrasVerifyOtpBody>) -> Response {
+pub async fn extras_verify_otp(
+    State(state): State<SharedState>,
+    Json(body): Json<ExtrasVerifyOtpBody>,
+) -> Response {
     if !state.extras.enabled() {
         return err(StatusCode::BAD_REQUEST, "extras is not enabled");
     }
-    match state.extras.verify_otp(&body.number, &body.otp, &state.store).await {
+    // Block every old account-scoped artifact before the Extras client can
+    // install credentials returned by the OTP exchange.
+    state.invalidate_context();
+    let result = state
+        .extras
+        .verify_otp(&body.number, &body.otp, &state.store)
+        .await;
+    crate::epg::trigger_regeneration(&state);
+    match result {
         Ok(ok) => Json(json!({"status": ok})).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
@@ -334,8 +419,12 @@ pub async fn extras_logout(State(state): State<SharedState>) -> Response {
     if state.config.disable_logout {
         return err(StatusCode::FORBIDDEN, "logout is disabled");
     }
+    state.invalidate_context();
     match state.extras.logout(&state.store) {
-        Ok(()) => Json(json!({"status": true})).into_response(),
+        Ok(()) => {
+            crate::epg::trigger_regeneration(&state);
+            Json(json!({"status": true})).into_response()
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -365,7 +454,10 @@ pub async fn extras_unlock(
     let ip = addr.ip().to_string();
     let now = SystemTime::now();
     if !state.unlock_limiter.allowed(&ip, now) {
-        return err(StatusCode::TOO_MANY_REQUESTS, "too many attempts, try again later");
+        return err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many attempts, try again later",
+        );
     }
     let Some(public_ip) = state.public_ip.get().await else {
         return err(
@@ -381,18 +473,22 @@ pub async fn extras_unlock(
     if let Err(e) = state.store.set(crate::unlock::STORE_KEY_UNLOCKED, "true") {
         tracing::warn!("extras unlock: cannot save: {e}");
     }
+    state.invalidate_context();
     state.extras.set_unlocked(true, &state.http, &state.store);
+    crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
 
-/// `POST /api/extras/lock` — the Settings page's "Lock" button. Clears the
-/// stored panel unlock; has no effect on the `extras` config/env switch,
-/// which stays the way in for a headless install.
+/// `POST /api/extras/lock` — the Settings page's "Lock" button. The stored
+/// false value explicitly overrides the `extras` config/env default, so a
+/// router configured with `JIOTV_EXTRAS=true` can still be locked from UI.
 pub async fn extras_lock(State(state): State<SharedState>) -> Response {
     if let Err(e) = state.store.set(crate::unlock::STORE_KEY_UNLOCKED, "false") {
         tracing::warn!("extras lock: cannot save: {e}");
     }
+    state.invalidate_context();
     state.extras.set_unlocked(false, &state.http, &state.store);
+    crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
 
@@ -403,8 +499,19 @@ pub async fn extras_lock(State(state): State<SharedState>) -> Response {
 /// iframe. Tries DASH first via the same `get_drm_mpd` the IPTV
 /// `/live/mpd/:id` route uses, falling back to HLS exactly like
 /// `LiveHandler` does when there's no DASH stream.
-pub async fn live_play(Path(id): Path<String>, Query(q): Query<HashMap<String, String>>, State(state): State<SharedState>) -> Response {
+pub async fn live_play(
+    Path(id): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+    State(state): State<SharedState>,
+) -> Response {
     let quality = q.get("q").cloned().unwrap_or_else(|| "auto".to_string());
+
+    if !state.channel_allowed(&id).await {
+        return err(
+            StatusCode::NOT_FOUND,
+            format!("Channel {id} is not available for the active account"),
+        );
+    }
 
     if let Some(ch) = state.custom_channels.get(&id) {
         return Json(json!({"dash": false, "url": ch.url, "license": null})).into_response();
@@ -417,7 +524,8 @@ pub async fn live_play(Path(id): Path<String>, Query(q): Query<HashMap<String, S
             } else {
                 serde_json::Value::String(out.license_url)
             };
-            return Json(json!({"dash": true, "url": out.play_url, "license": license})).into_response();
+            return Json(json!({"dash": true, "url": out.play_url, "license": license}))
+                .into_response();
         }
     }
 
@@ -427,9 +535,15 @@ pub async fn live_play(Path(id): Path<String>, Query(q): Query<HashMap<String, S
     };
     let live_url = crate::television::select_best_live_hls_url(&live, &quality);
     if live_url.is_empty() {
-        return err(StatusCode::NOT_FOUND, format!("No stream found for channel id: {id}"));
+        return err(
+            StatusCode::NOT_FOUND,
+            format!("No stream found for channel id: {id}"),
+        );
     }
-    let abs = crate::stream::to_absolute_stream_url(&live_url, crate::stream::absolute_base_from_live(&live).as_deref());
+    let abs = crate::stream::to_absolute_stream_url(
+        &live_url,
+        crate::stream::absolute_base_from_live(&live).as_deref(),
+    );
     let encrypted = state.secure.encrypt(&abs);
     let url = format!("/render.m3u8?auth={encrypted}&channel_key_id={id}");
     Json(json!({"dash": false, "url": url, "license": null})).into_response()
@@ -439,6 +553,7 @@ pub async fn live_play(Path(id): Path<String>, Query(q): Query<HashMap<String, S
 mod tests {
     use super::*;
     use crate::{access::Access, secureurl::SecureUrl, store::Store, television::Television};
+    use http_body_util::BodyExt;
 
     use crate::config::Config;
 
@@ -458,7 +573,8 @@ mod tests {
             custom_channels: Arc::new(crate::custom_channels::CustomChannels::new()),
             render_caches: Default::default(),
             dash_state: Default::default(),
-            extras: Arc::new(crate::extras_state::ExtrasState::new(false, false)),
+            epg_state: Default::default(),
+            extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
@@ -468,7 +584,14 @@ mod tests {
     #[tokio::test]
     async fn setup_requires_key_prefix_when_auth_enabled() {
         let s = state();
-        let resp = auth_setup(State(s.clone()), None, Json(PasswordBody { password: "longenough".into() })).await;
+        let resp = auth_setup(
+            State(s.clone()),
+            None,
+            Json(PasswordBody {
+                password: "longenough".into(),
+            }),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 
@@ -476,8 +599,26 @@ mod tests {
     async fn setup_succeeds_with_key_prefix_extension() {
         let s = state();
         let prefix = Some(axum::Extension(KeyPrefix("/k/abc/".to_string())));
-        let resp = auth_setup(State(s.clone()), prefix, Json(PasswordBody { password: "longenough".into() })).await;
+        let resp = auth_setup(
+            State(s.clone()),
+            prefix,
+            Json(PasswordBody {
+                password: "longenough".into(),
+            }),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(s.access.has_password());
+    }
+
+    #[tokio::test]
+    async fn status_does_not_claim_unknown_entitlements_were_applied() {
+        let response = status(State(state())).await;
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["catalogue"]["tvLinearEntitlement"], "unknown");
+        assert_eq!(json["catalogue"]["extrasEntitlementStatus"], "unknown");
+        assert_eq!(json["catalogue"]["extrasEntitlementsAvailable"], false);
+        assert_eq!(json["catalogue"]["extrasEntitlementsApplied"], false);
     }
 }

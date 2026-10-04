@@ -4,7 +4,10 @@
 //! real credentials by tests in this repo — see `tests/login_mock.rs` for
 //! coverage against a local mock server.
 
-use crate::television::{Credentials, JIOTV_API_DOMAIN, LOGIN_SEND_OTP_PATH, LOGIN_VERIFY_OTP_PATH, REFRESH_SSO_TOKEN_URL, REFRESH_TOKEN_URL};
+use crate::television::{
+    Credentials, JIOTV_API_DOMAIN, LOGIN_SEND_OTP_PATH, LOGIN_VERIFY_OTP_PATH,
+    REFRESH_SSO_TOKEN_URL, REFRESH_TOKEN_URL,
+};
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::json;
@@ -50,6 +53,15 @@ fn encode_number(number: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(number)
 }
 
+pub fn normalize_indian_mobile(number: &str) -> String {
+    let trimmed = number.trim();
+    if trimmed.len() == 10 && trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        format!("+91{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 impl LoginClient {
     pub fn new(client: reqwest::Client) -> LoginClient {
         LoginClient {
@@ -72,33 +84,64 @@ impl LoginClient {
     }
 
     fn app_headers(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        req.header("appname", "RJIL_JioTV").header("os", "android").header("devicetype", "phone")
+        req.header("appname", "RJIL_JioTV")
+            .header("os", "android")
+            .header("devicetype", "phone")
     }
 
     /// Sends a login OTP to `number` (with country code, e.g. +91...).
     /// Mirrors `LoginSendOTP`: the API answers 204 when the OTP is sent.
     pub async fn send_otp(&self, number: &str) -> anyhow::Result<bool> {
         let url = format!("{}{LOGIN_SEND_OTP_PATH}", self.api_base);
-        let resp = self.app_headers(self.client.post(url)).json(&json!({"number": encode_number(number)})).send().await?;
+        let number = normalize_indian_mobile(number);
+        let resp = self
+            .app_headers(self.client.post(url))
+            .json(&json!({"number": encode_number(&number)}))
+            .send()
+            .await?;
         if !resp.status().is_success() {
-            anyhow::bail!("send OTP failed with status {}", resp.status());
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| {
+                    v.get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
+                })
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| body.chars().take(256).collect());
+            if detail.is_empty() {
+                anyhow::bail!("send OTP failed with status {status}");
+            }
+            anyhow::bail!("send OTP failed with status {status}: {detail}");
         }
         Ok(true)
     }
 
     /// Verifies the OTP. Returns None when Jio rejects it. Mirrors
     /// `LoginVerifyOTP` (v1 endpoint: v2 needs an extra token exchange).
-    pub async fn verify_otp(&self, number: &str, otp: &str, device_id: &str) -> anyhow::Result<Option<Credentials>> {
+    pub async fn verify_otp(
+        &self,
+        number: &str,
+        otp: &str,
+        device_id: &str,
+    ) -> anyhow::Result<Option<Credentials>> {
         let url = format!("{}{LOGIN_VERIFY_OTP_PATH}", self.api_base);
+        let number = normalize_indian_mobile(number);
         let payload = json!({
-            "number": encode_number(number),
+            "number": encode_number(&number),
             "otp": otp,
             "deviceInfo": {
                 "consumptionDeviceName": "SM-G930F",
                 "info": {"type": "android", "platform": {"name": "SM-G930F"}, "androidId": device_id},
             },
         });
-        let resp = self.app_headers(self.client.post(url)).json(&payload).send().await?;
+        let resp = self
+            .app_headers(self.client.post(url))
+            .json(&payload)
+            .send()
+            .await?;
         if !resp.status().is_success() {
             anyhow::bail!("verify OTP failed with status {}", resp.status());
         }
@@ -116,7 +159,11 @@ impl LoginClient {
     }
 
     /// Gets a new access token. Mirrors `LoginRefreshAccessToken`.
-    pub async fn refresh(&self, creds: &Credentials, device_id: &str) -> anyhow::Result<Credentials> {
+    pub async fn refresh(
+        &self,
+        creds: &Credentials,
+        device_id: &str,
+    ) -> anyhow::Result<Credentials> {
         #[derive(Deserialize)]
         struct Resp {
             #[serde(rename = "authToken", default)]
@@ -140,11 +187,18 @@ impl LoginClient {
         if body.auth_token.is_empty() {
             anyhow::bail!("access token not found in the refresh response");
         }
-        Ok(Credentials { access_token: body.auth_token, ..creds.clone() })
+        Ok(Credentials {
+            access_token: body.auth_token,
+            ..creds.clone()
+        })
     }
 
     /// Gets a new SSO token. Mirrors `LoginRefreshSSOToken`.
-    pub async fn refresh_sso(&self, creds: &Credentials, device_id: &str) -> anyhow::Result<Credentials> {
+    pub async fn refresh_sso(
+        &self,
+        creds: &Credentials,
+        device_id: &str,
+    ) -> anyhow::Result<Credentials> {
         #[derive(Deserialize)]
         struct Resp {
             #[serde(rename = "ssoToken", default)]
@@ -172,12 +226,19 @@ impl LoginClient {
         if body.sso_token.is_empty() {
             anyhow::bail!("SSO token not found in the refresh response");
         }
-        Ok(Credentials { sso_token: body.sso_token, ..creds.clone() })
+        Ok(Credentials {
+            sso_token: body.sso_token,
+            ..creds.clone()
+        })
     }
 }
 
 fn now_unix() -> String {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .to_string()
 }
 
 /// Which refresh timestamps a save should reset to now.
@@ -187,7 +248,10 @@ pub struct Touch {
     pub sso: bool,
 }
 
-pub const TOUCH_ALL: Touch = Touch { access: true, sso: true };
+pub const TOUCH_ALL: Touch = Touch {
+    access: true,
+    sso: true,
+};
 
 /// Saves the login under the same store keys as the Go version
 /// (`WriteJIOTVCredentials`), so either binary can use the store.
@@ -227,12 +291,25 @@ pub fn load(store: &crate::store::Store) -> Option<Credentials> {
 
 /// Unix time of the last access or SSO token refresh, from the store.
 pub fn last_refresh(store: &crate::store::Store, sso: bool) -> Option<u64> {
-    let key = if sso { "lastSSOTokenRefreshTime" } else { "lastTokenRefreshTime" };
+    let key = if sso {
+        "lastSSOTokenRefreshTime"
+    } else {
+        "lastTokenRefreshTime"
+    };
     store.get_opt(key)?.parse().ok()
 }
 
 pub fn clear(store: &crate::store::Store) -> anyhow::Result<()> {
-    for key in ["ssoToken", "crm", "uniqueId", "accessToken", "refreshToken", "lastTokenRefreshTime", "lastSSOTokenRefreshTime", "jiotv_credentials"] {
+    for key in [
+        "ssoToken",
+        "crm",
+        "uniqueId",
+        "accessToken",
+        "refreshToken",
+        "lastTokenRefreshTime",
+        "lastSSOTokenRefreshTime",
+        "jiotv_credentials",
+    ] {
         let _ = store.delete(key);
     }
     Ok(())
@@ -270,7 +347,11 @@ mod tests {
 
         let client = LoginClient::with_base(reqwest::Client::new(), &server.uri());
         assert!(client.send_otp("+91XXXXXXXXXX").await.unwrap());
-        let creds = client.verify_otp("+91XXXXXXXXXX", "0000", "dev").await.unwrap().unwrap();
+        let creds = client
+            .verify_otp("+91XXXXXXXXXX", "0000", "dev")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(creds.sso_token, "sso-redacted");
         assert_eq!(creds.access_token, "at-redacted");
         assert_eq!(creds.crm, "crm-redacted");
@@ -282,11 +363,41 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path(super::super::television::LOGIN_VERIFY_OTP_PATH))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"message": "Invalid OTP"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"message": "Invalid OTP"})),
+            )
             .mount(&server)
             .await;
         let client = LoginClient::with_base(reqwest::Client::new(), &server.uri());
-        assert!(client.verify_otp("+91XXXXXXXXXX", "1111", "dev").await.unwrap().is_none());
+        assert!(client
+            .verify_otp("+91XXXXXXXXXX", "1111", "dev")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn send_otp_surfaces_upstream_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(super::super::television::LOGIN_SEND_OTP_PATH))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({"message": "request rejected"})),
+            )
+            .mount(&server)
+            .await;
+        let client = LoginClient::with_base(reqwest::Client::new(), &server.uri());
+        let err = client.send_otp("9000000000").await.unwrap_err().to_string();
+        assert!(err.contains("400 Bad Request"));
+        assert!(err.contains("request rejected"));
+    }
+
+    #[test]
+    fn normalizes_ten_digit_indian_mobile() {
+        assert_eq!(normalize_indian_mobile("9120031376"), "+919120031376");
+        assert_eq!(normalize_indian_mobile("+919120031376"), "+919120031376");
     }
 
     #[test]

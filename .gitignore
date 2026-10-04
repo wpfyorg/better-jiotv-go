@@ -24,6 +24,7 @@ jiotv.json
 
 # EPG
 epg.xml.gz
+epg.xml.gz.context.json
 
 # Logs
 jiotv*.log

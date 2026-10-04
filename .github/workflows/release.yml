@@ -12,8 +12,10 @@ on:
     paths: [".github/workflows/release.yml", "scripts/ci-openwrt-packages.sh", "scripts/build-openwrt-packages.sh", "openwrt/**"]
   workflow_dispatch:
 
+# Read-only by default: dry runs on pull requests execute branch code. Only the job
+# that publishes a release gets write access.
 permissions:
-  contents: write
+  contents: read
 
 # A newer push to a pull request supersedes its dry run; tag releases are never cancelled.
 concurrency:
@@ -159,6 +161,8 @@ jobs:
   release:
     needs: [build, openwrt]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Check the tag matches Cargo.toml

@@ -111,6 +111,23 @@ router_ip() {
   if [ -n "$addr" ]; then echo "$addr"; else echo "<router-ip>"; fi
 }
 
+# This machine's LAN address, for other devices on the network (best effort).
+local_ip() {
+  addr=
+  if [ "$sys" = Darwin ]; then
+    for ifc in en0 en1; do
+      addr=$(ipconfig getifaddr "$ifc" 2>/dev/null || true)
+      [ -z "$addr" ] || break
+    done
+  elif command -v hostname >/dev/null 2>&1; then
+    addr=$(hostname -I 2>/dev/null | awk '{ print $1 }' || true)
+  fi
+  if [ -z "$addr" ] && command -v ip >/dev/null 2>&1; then
+    addr=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1 || true)
+  fi
+  if [ -n "$addr" ]; then echo "$addr"; else echo "<this-machine-ip>"; fi
+}
+
 openwrt=false
 if [ "${JIOTV_PLATFORM:-}" = openwrt ] || [ -r /etc/openwrt_release ]; then openwrt=true; fi
 
@@ -344,11 +361,21 @@ else cp "$tmp/$asset" "$install_dir/jiotv" && chmod 0755 "$install_dir/jiotv"
 fi
 echo "Installed jiotv ($variant, $target) to $install_dir/jiotv"
 case ":${PATH:-}:" in *":$install_dir:"*) ;; *) echo "Add $install_dir to PATH to run jiotv directly." ;; esac
+ip=$(local_ip)
 if [ "$install_tls" = 1 ]; then
   echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0 --tls"
-  echo "Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<host>:5443/"
-  echo "IPTV apps (plain HTTP playlist): http://<host>:5001/"
+  if [ "$variant" = slim ]; then
+    echo "IPTV apps (plain HTTP playlist): http://localhost:5001/ on this machine, http://${ip}:5001/ from other devices. The slim build has no browser UI."
+  else
+    echo "Browser UI on this machine (HTTPS, self-signed certificate; accept the one-time warning): https://localhost:5443/"
+    echo "From other devices on your network: https://${ip}:5443/ (browser), http://${ip}:5001/ (IPTV apps, plain HTTP playlist)"
+  fi
 else
   echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0"
-  echo "Browser UI: http://<host>:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)"
+  if [ "$variant" = slim ]; then
+    echo "IPTV apps (plain HTTP playlist): http://localhost:5001/ on this machine, http://${ip}:5001/ from other devices. The slim build has no browser UI."
+  else
+    echo "Browser UI on this machine: http://localhost:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)"
+    echo "From other devices on your network: http://${ip}:5001/"
+  fi
 fi

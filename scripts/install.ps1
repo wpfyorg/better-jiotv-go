@@ -46,12 +46,19 @@ try {
     Write-Output "Installed jiotv ($Variant, $target) to $destination"
     if ($NoTls) {
         Write-Output 'Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0'
-        Write-Output 'Browser UI: http://<host>:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)'
+        if ($Variant -eq 'slim') { Write-Output 'IPTV apps (plain HTTP playlist): http://localhost:5001/ on this PC, http://<this-pc-ip>:5001/ from other devices (see ipconfig). The slim build has no browser UI.' }
+        else {
+            Write-Output 'Browser UI on this PC: http://localhost:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)'
+            Write-Output 'From other devices on your network: http://<this-pc-ip>:5001/ (see ipconfig)'
+        }
     }
     else {
         Write-Output 'Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0 --tls'
-        Write-Output 'Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<host>:5443/'
-        Write-Output 'IPTV apps (plain HTTP playlist): http://<host>:5001/'
+        if ($Variant -eq 'slim') { Write-Output 'IPTV apps (plain HTTP playlist): http://localhost:5001/ on this PC, http://<this-pc-ip>:5001/ from other devices (see ipconfig). The slim build has no browser UI.' }
+        else {
+            Write-Output 'Browser UI on this PC (HTTPS, self-signed certificate; accept the one-time warning): https://localhost:5443/'
+            Write-Output 'From other devices on your network: https://<this-pc-ip>:5443/ (browser), http://<this-pc-ip>:5001/ (IPTV apps, plain HTTP playlist); see ipconfig for the address'
+        }
     }
 }
 finally { Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue }

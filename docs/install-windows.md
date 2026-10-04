@@ -12,4 +12,4 @@ Release binaries are unsigned; Windows SmartScreen may show a warning. No built-
 
 Data uses the Windows profile directory when `HOME` is unavailable. Run `jiotv login otp`, then `jiotv admin password`. Update with `jiotv update`; the updater stages the new executable and replaces it after the current process exits. Uninstall by removing `jiotv.exe` and, if desired, the application data directory.
 
-Browse to `https://<host>:5443/` and accept the one-time self-signed certificate warning; browsers need HTTPS for protected playback. IPTV apps should use the `http://<host>:5001/` playlist. Windows Firewall may prompt to allow `jiotv.exe` on private networks. See [HTTPS in Usage](usage.md#https).
+On this PC, browse to `https://localhost:5443/` and accept the one-time self-signed certificate warning; browsers need HTTPS or `localhost` for protected playback. Other devices use `https://<this-pc-ip>:5443/` (find the address with `ipconfig`), and IPTV apps should use the `http://<this-pc-ip>:5001/` playlist. Windows Firewall may prompt to allow `jiotv.exe` on private networks. See [HTTPS in Usage](usage.md#https).

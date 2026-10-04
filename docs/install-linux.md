@@ -10,7 +10,7 @@ The default is `full`. Set `JIOTV_VARIANT=slim` for a headless installation. Set
 
 Data defaults to `$HOME/.jiotv_go`; set `JIOTV_PATH_PREFIX` for a service-managed location. Run `jiotv login otp`, then `jiotv admin password`, and start with `jiotv serve --host 0.0.0.0 --tls`. For systemd use `jiotv autostart --args "--host 0.0.0.0 --port 5001 --tls"`; see [Homelab / VM / LXC](install-homelab.md) for a dedicated service user example.
 
-Open the UI at `https://<host>:5443/` (self-signed certificate; accept the one-time browser warning) because browsers need HTTPS for protected playback, and give IPTV apps the `http://<host>:5001/` playlist. See [HTTPS in Usage](usage.md#https).
+On the same machine, open the UI at `https://localhost:5443/` (self-signed certificate; accept the one-time browser warning) because browsers need HTTPS or `localhost` for protected playback. From other devices use `https://<host>:5443/`, and give IPTV apps the `http://<host>:5001/` playlist, where `<host>` is the machine's address (the installer prints it). See [HTTPS in Usage](usage.md#https).
 
 Update a manually installed binary with `jiotv update`. Remove by stopping/removing its service, deleting the `jiotv` executable, and removing the data directory only if you intend to delete saved credentials and settings.
 

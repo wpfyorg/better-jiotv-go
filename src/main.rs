@@ -381,6 +381,13 @@ async fn serve(
         println!("Auth is disabled: playlist at /playlist.m3u");
     }
 
+    if let Ok(http) = args.port.parse::<u16>() {
+        let tls = args
+            .tls
+            .then(|| args.tls_port.parse::<u16>().ok())
+            .flatten();
+        let _ = state.listen.set(state::ListenPorts { http, tls });
+    }
     let service = server::GatedService::new(state);
 
     let tls = if args.tls {
@@ -516,6 +523,7 @@ fn build_app_state(
         vod_state: Default::default(),
         public_ip: Arc::new(unlock::PublicIp::new(http)),
         unlock_limiter: Arc::new(unlock::AttemptLimiter::default()),
+        listen: Default::default(),
     }))
 }
 

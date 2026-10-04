@@ -215,6 +215,8 @@ pub async fn status(State(state): State<SharedState>) -> Response {
         },
         "playlistPath": playlist,
         "epgPath": epg_path,
+        "httpPort": state.listen.get().map(|l| l.http),
+        "tlsPort": state.listen.get().and_then(|l| l.tls),
         "epg": state.config.epg,
         "drm": state.config.drm,
         "logoutDisabled": state.config.disable_logout,
@@ -638,6 +640,7 @@ mod tests {
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+            listen: Default::default(),
         })
     }
 
@@ -706,6 +709,24 @@ mod tests {
         assert_eq!(json["catalogue"]["extrasEntitlementStatus"], "unknown");
         assert_eq!(json["catalogue"]["extrasEntitlementsAvailable"], false);
         assert_eq!(json["catalogue"]["extrasEntitlementsApplied"], false);
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_listen_ports_once_serve_has_chosen_them() {
+        let s = state();
+        let json = response_json(status(State(s.clone())).await).await;
+        assert!(json["httpPort"].is_null());
+        assert!(json["tlsPort"].is_null());
+
+        s.listen
+            .set(crate::state::ListenPorts {
+                http: 5001,
+                tls: Some(5443),
+            })
+            .unwrap();
+        let json = response_json(status(State(s)).await).await;
+        assert_eq!(json["httpPort"], 5001);
+        assert_eq!(json["tlsPort"], 5443);
     }
 
     #[tokio::test]

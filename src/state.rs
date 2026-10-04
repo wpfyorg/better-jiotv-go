@@ -50,6 +50,15 @@ pub struct AppState {
     /// unlock code. See `unlock.rs`.
     pub public_ip: Arc<crate::unlock::PublicIp>,
     pub unlock_limiter: Arc<crate::unlock::AttemptLimiter>,
+    /// The ports `serve` listens on, recorded once the listeners are chosen so
+    /// the UI can offer the plain-HTTP playlist origin from an HTTPS page.
+    pub listen: std::sync::OnceLock<ListenPorts>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListenPorts {
+    pub http: u16,
+    pub tls: Option<u16>,
 }
 
 impl AppState {

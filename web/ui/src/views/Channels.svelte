@@ -57,10 +57,16 @@
             const list = await loadChannels(true);
             if (isLatest()) {
               channels = list;
-              // A failed first load must not keep hiding a list that now loaded.
+              // A failed first load must not keep hiding a list that now loaded,
+              // and this refresh may finish before the older request does.
               error = "";
+              loading = false;
             }
-          } catch {}
+          } catch {
+            // The code was accepted but the list could not be refreshed: keep what
+            // is shown and say so, instead of claiming extra channels are listed.
+            if (isLatest() && unlockNotice) unlockNotice = { ...unlockNotice, refreshFailed: true };
+          }
         })
         .catch(() => {});
     }
@@ -101,7 +107,9 @@
     <div class="unlock-copy">
       <strong>Extra channels unlocked</strong>
       <span>
-        {#if unlockNotice.connected}
+        {#if unlockNotice.refreshFailed}
+          The channel list could not be refreshed. Reload the page to see the extra channels.
+        {:else if unlockNotice.connected}
           The extra source is connected; its channels are listed below.
         {:else}
           Login with number with access to the extra in Settings to be able to play its channels.

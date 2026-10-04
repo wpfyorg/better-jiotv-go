@@ -210,13 +210,10 @@ if [ "$openwrt" = true ]; then
     # What is left running now was running before and is deliberately untouched.
     if [ "$stop_failed" != true ] && "$init_script" running >/dev/null 2>&1; then kept_running=true; fi
   elif [ "$disabled" = true ]; then
-    # The setting wins over a process started earlier: stop it rather than only saying so.
-    if "$init_script" running >/dev/null 2>&1; then
-      say "The service is disabled in /etc/config/jiotv (option enabled '0'); stopping it"
-      stop_service || stop_failed=true
-    else
-      say "The service is disabled in /etc/config/jiotv (option enabled '0'); leaving it stopped"
-    fi
+    # The setting wins over a process started earlier. Stop unconditionally: a respawning
+    # instance between attempts reports "not running" but would launch again.
+    say "The service is disabled in /etc/config/jiotv (option enabled '0'); making sure it is stopped"
+    stop_service || stop_failed=true
   else
     # Stop and wait before starting: an upgrade must replace the old process, and
     # only a process started after the old one is gone proves the new binary runs.

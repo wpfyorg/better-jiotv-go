@@ -19,7 +19,7 @@ That is the recommended installation method. The script automatically:
 - stops a running service and waits for it to exit, starts the new one, and checks that jiotv itself is listening on its port, unless `option enabled '0'` is set in `/etc/config/jiotv`;
 - prints the browser and playlist addresses for your router.
 
-Set `JIOTV_START_SERVICE=0` to install and enable without starting the service. The package's own hook starts the service on a fresh install, so the installer stops it again in that case; a service that was already running is left as it was.
+Set `JIOTV_START_SERVICE=0` to install and enable without starting the service. `JIOTV_READY_TIMEOUT=<seconds>` sets how long the installer waits for the service to stop and to start listening (default 15, minimum 2); raise it on a slow router. The package's own hook starts the service on a fresh install, so the installer stops it again in that case; a service that was already running is left as it was.
 
 After installation, set the admin password, then open the web UI and sign in; you enter the OTP yourself:
 

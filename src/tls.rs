@@ -185,19 +185,22 @@ fn hostname() -> Option<String> {
 }
 
 /// The certificate lives in the data directory and is reused on every start, so
-/// its validity must not depend on the clock being right when it is created: an
-/// RTC-less router can boot with a 1970 or far-future clock before NTP runs.
-/// It therefore starts at a fixed past date, and ends ten years after the later
-/// of "now" and a floor that is already in the past for any correct clock.
-fn cert_validity(now: time::OffsetDateTime) -> (time::OffsetDateTime, time::OffsetDateTime) {
-    let date = |year| {
-        time::Date::from_calendar_date(year, time::Month::January, 1)
-            .expect("valid calendar date")
-            .midnight()
-            .assume_utc()
-    };
-    let floor = date(2026);
-    (date(2020), now.max(floor) + time::Duration::days(3650))
+/// it must never become invalid: not because the clock was wrong when it was
+/// created (an RTC-less router can boot with a 1970 clock before NTP runs), and
+/// not by expiring years later. It is valid from a fixed past date until the
+/// last date X.509 can express, 9999-12-31 23:59:59 UTC, the conventional "no
+/// expiry" value (RFC 5280, 4.1.2.5).
+fn cert_validity() -> (time::OffsetDateTime, time::OffsetDateTime) {
+    let start = time::Date::from_calendar_date(2020, time::Month::January, 1)
+        .expect("valid calendar date")
+        .midnight()
+        .assume_utc();
+    let end = time::Date::from_calendar_date(9999, time::Month::December, 31)
+        .expect("valid calendar date")
+        .with_hms(23, 59, 59)
+        .expect("valid time")
+        .assume_utc();
+    (start, end)
 }
 
 fn generate_self_signed(
@@ -222,7 +225,7 @@ fn generate_self_signed(
     params.subject_alt_names = sans;
     params.distinguished_name.push(DnType::CommonName, "JioTV Go");
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
-    let (not_before, not_after) = cert_validity(time::OffsetDateTime::now_utc());
+    let (not_before, not_after) = cert_validity();
     params.not_before = not_before;
     params.not_after = not_after;
     let key_pair = KeyPair::generate()?;
@@ -335,27 +338,14 @@ pub async fn serve<S, F>(
 #[cfg(test)]
 mod tests {
     #[test]
-    fn certificate_validity_survives_a_wrong_clock_at_creation() {
-        let at = |year, month, day| {
-            time::Date::from_calendar_date(year, month, day)
-                .unwrap()
-                .midnight()
-                .assume_utc()
-        };
-        let real_now = at(2026, time::Month::October, 4);
-        // A 1970 clock (RTC-less router before NTP) and a far-future clock.
-        for wrong_now in [at(1970, time::Month::January, 1), at(2040, time::Month::June, 1)] {
-            let (from, to) = cert_validity(wrong_now);
-            assert!(from < real_now, "not yet valid for clock {wrong_now}");
-            assert!(
-                to > real_now + time::Duration::days(3000),
-                "short-lived for clock {wrong_now}"
-            );
-        }
-        let now = at(2027, time::Month::March, 1);
-        let (from, to) = cert_validity(now);
-        assert!(from < now);
-        assert_eq!(to, now + time::Duration::days(3650));
+    fn certificate_never_becomes_invalid_from_clock_or_age() {
+        let (from, to) = cert_validity();
+        // Valid from before any plausible real or wrongly-set "now" (not 1970).
+        assert_eq!(from.year(), 2020);
+        // And until the last date X.509 can express.
+        assert_eq!(to.year(), 9999);
+        assert_eq!((to.month(), to.day()), (time::Month::December, 31));
+        assert!(to > from);
     }
 
     use super::*;

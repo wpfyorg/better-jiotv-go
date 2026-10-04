@@ -414,16 +414,19 @@ pub async fn extras_verify_otp(
     if !state.extras.enabled() {
         return err(StatusCode::BAD_REQUEST, "extras is not enabled");
     }
+    let before = state.extras.credentials_marker();
     let result = state
         .extras
         .verify_otp(&body.number, &body.otp, &state.store)
         .await;
     // A wrong or mistyped OTP leaves the active account untouched, so it must
-    // not rotate the context and cut off existing viewers. Only a successful
-    // exchange installs new credentials; rotating then also discards anything
-    // resolved while it was in flight (the Extras and VOD caches are guarded by
-    // a generation, and URL-minting handlers re-check the epoch).
-    if matches!(result, Ok(true)) {
+    // not rotate the context and cut off existing viewers. Rotate whenever the
+    // installed credentials actually changed, which includes an OTP that
+    // verified but failed its token exchange: that already swapped the account.
+    // This also discards anything resolved while the exchange was in flight (the
+    // Extras and VOD caches are guarded by a generation, and URL-minting
+    // handlers re-check the epoch).
+    if state.extras.credentials_marker() != before {
         state.invalidate_context();
         crate::epg::trigger_regeneration(&state);
     }
@@ -653,6 +656,107 @@ mod tests {
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
             listen: Default::default(),
         })
+    }
+
+    /// Extras state with a mock auth service. `exchange_ok` decides whether the
+    /// token exchange after a verified OTP succeeds; `verify_status` is the
+    /// status of the OTP verification itself.
+    async fn extras_state_with_mock_auth(
+        verify_status: u16,
+        exchange_status: u16,
+    ) -> (Arc<AppState>, wiremock::MockServer, wiremock::MockServer) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        let user_service = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/apis/v3.2/stbotplogin/sendotp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "message": "ok", "identifier": "redacted-identifier", "fttxIds": []
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/apis/v3.2/stbotplogin/verifyotp"))
+            .respond_with(if verify_status == 200 {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ssoToken": "redacted-sso",
+                    "sessionAttributes": {"user": {"subscriberId": "redacted-sub", "unique": "redacted-uniq"}}
+                }))
+            } else {
+                ResponseTemplate::new(verify_status)
+            })
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/loginotp/exchangetoken"))
+            .respond_with(if exchange_status == 200 {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "authToken": "redacted-at", "refreshToken": "redacted-rt", "userId": "redacted-uid"
+                }))
+            } else {
+                ResponseTemplate::new(exchange_status)
+            })
+            .mount(&user_service)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
+        std::mem::forget(dir);
+        let extras = Arc::new(crate::extras_state::ExtrasState::new(true, None));
+        extras.init(&reqwest::Client::new(), &store);
+        extras.set_endpoints_for_test(crate::extras::Endpoints {
+            auth: auth.uri(),
+            user_service: user_service.uri(),
+            ..Default::default()
+        });
+        let s = state_with(store, extras);
+        s.extras.send_otp("9876543210", None).await.unwrap();
+        (s, auth, user_service)
+    }
+
+    async fn verify(s: &Arc<AppState>) -> Response {
+        extras_verify_otp(
+            State(s.clone()),
+            Json(ExtrasVerifyOtpBody {
+                number: "9876543210".into(),
+                otp: "123456".into(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn otp_that_verifies_but_fails_its_exchange_still_rotates_the_context() {
+        // The verification installed the new account's SSO credentials before
+        // the exchange failed, so the previous account's artifacts are stale.
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 500).await;
+        let before = s.secure.current_epoch();
+        let resp = verify(&s).await;
+        let json = response_json(resp).await;
+        assert_eq!(json["status"], false);
+        assert!(s.secure.current_epoch() > before, "context was not rotated");
+        assert!(!s.extras.connected(), "no auth token after a failed exchange");
+    }
+
+    #[tokio::test]
+    async fn rejected_otp_leaves_the_context_alone() {
+        let (s, _auth, _user) = extras_state_with_mock_auth(401, 200).await;
+        let before = s.secure.current_epoch();
+        let resp = verify(&s).await;
+        assert_eq!(response_json(resp).await["status"], false);
+        assert_eq!(s.secure.current_epoch(), before);
+    }
+
+    #[tokio::test]
+    async fn successful_otp_rotates_the_context() {
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 200).await;
+        let before = s.secure.current_epoch();
+        let resp = verify(&s).await;
+        assert_eq!(response_json(resp).await["status"], true);
+        assert!(s.secure.current_epoch() > before);
+        assert!(s.extras.connected());
     }
 
     #[tokio::test]

@@ -159,6 +159,16 @@ impl ExtrasState {
         self.clear_catalogue_state();
     }
 
+    /// Identifies the credentials currently installed on the client, so a
+    /// caller can tell whether an operation replaced them, even partway (an OTP
+    /// that verifies but fails its token exchange has already swapped the
+    /// account while leaving it without an auth token).
+    pub fn credentials_marker(&self) -> Option<(String, String, String)> {
+        self.client()?
+            .credentials()
+            .map(|c| (c.number, c.sso_token, c.auth_token))
+    }
+
     /// Loads (or creates) the device and any saved login from the store.
     /// Safe to call again after login/logout, mirroring `InitExtras`.
     pub fn init(&self, http: &reqwest::Client, store: &crate::store::Store) {
@@ -294,10 +304,10 @@ impl ExtrasState {
         }
         match client.channels().await {
             Ok(mut fetched) => {
+                let mut applied = false;
                 if let Some(map) = subscriptions.as_ref() {
                     fetched.retain(|ch| ch.allowed_by_subscriptions(map));
-                    self.entitlements_applied
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    applied = true;
                 }
                 let mirrors = match tv.channels().await {
                     Ok(jiotv) => Some(crate::extras::mirrors(&fetched, &jiotv.result)),
@@ -319,6 +329,10 @@ impl ExtrasState {
                     }
                     *self.catalogue.write().unwrap() = fetched;
                     *self.catalogue_fetched_at.write().unwrap() = Some(Instant::now());
+                    // Committed with the catalogue it describes, so an obsolete
+                    // refresh cannot mark a cleared state as entitlement-filtered.
+                    self.entitlements_applied
+                        .store(applied, std::sync::atomic::Ordering::Relaxed);
                 });
             }
             Err(e) => tracing::warn!("extras: cannot fetch channels: {e}"),
@@ -671,6 +685,7 @@ impl ExtrasState {
             }
             p.identifier.clone()
         };
+        let before = self.credentials_marker();
         let result = client.verify_otp(&number, &identifier, otp).await;
         // Save even on a failed exchange: the SSO token is valid and the
         // exchange can be retried without another OTP.
@@ -687,7 +702,15 @@ impl ExtrasState {
                 self.init(&reqwest::Client::new(), store);
                 Ok(true)
             }
-            Err(_) => Ok(false),
+            Err(_) => {
+                // The OTP can verify and the token exchange still fail, which
+                // has already replaced the account's credentials; the previous
+                // account's caches must not outlive that.
+                if self.credentials_marker() != before {
+                    self.clear_catalogue_state();
+                }
+                Ok(false)
+            }
         }
     }
 
@@ -736,6 +759,12 @@ impl ExtrasState {
 
 #[cfg(test)]
 impl ExtrasState {
+    pub fn set_endpoints_for_test(&self, endpoints: crate::extras::Endpoints) {
+        self.client()
+            .expect("test extras client must be initialized")
+            .set_endpoints(endpoints);
+    }
+
     pub fn prime_for_test(
         &self,
         credentials: Credentials,
@@ -771,6 +800,63 @@ use crate::television::has_dash;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn obsolete_catalogue_refresh_cannot_mark_cleared_state_as_filtered() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/v2/subscription"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200,
+                "data": {"subscriptions": {"JioCinema-Premium": true}}
+            })))
+            .mount(&server)
+            .await;
+        // The channel fetch is slow enough for an account switch to land mid-flight.
+        Mock::given(method("GET"))
+            .and(path("/metadata/v2/livechannels"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": {}}))
+                    .set_delay(std::time::Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
+        let s = Arc::new(ExtrasState::new(true, None));
+        s.init(&reqwest::Client::new(), &store);
+        s.set_endpoints_for_test(crate::extras::Endpoints {
+            content: server.uri(),
+            user_api: server.uri(),
+            ..Default::default()
+        });
+        s.client().unwrap().set_credentials(Some(Credentials {
+            sso_token: "redacted-sso".into(),
+            subscriber_id: "redacted-sub".into(),
+            user_id: "redacted-user".into(),
+            auth_token: "redacted-access".into(),
+            ..Default::default()
+        }));
+        let tv = Arc::new(Television::new(reqwest::Client::new()));
+        tv.set_channels_for_test(Vec::new());
+
+        let refresh = {
+            let (s, tv) = (s.clone(), tv.clone());
+            tokio::spawn(async move { s.refresh_catalogue_if_needed(&tv).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        s.invalidate_account_context();
+        refresh.await.unwrap();
+
+        assert!(!s.entitlements_applied(), "obsolete refresh set the flag");
+        assert!(s.catalogue_channels().is_empty());
+        assert_eq!(s.entitlement_status(), EntitlementStatus::Unknown);
+    }
 
     #[test]
     fn commits_apply_only_in_the_generation_they_started_in() {

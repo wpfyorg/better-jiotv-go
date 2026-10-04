@@ -193,15 +193,25 @@ if [ "$openwrt" = true ]; then
   "$init_script" enable
 
   running=false
+  kept_running=false
+  stop_failed=false
   disabled=false
   [ "$(uci_flag enabled 1)" = 1 ] || disabled=true
   if [ "$start_service" = 0 ]; then
     if [ "$was_running" != true ] && "$init_script" running >/dev/null 2>&1; then
       say "Stopping the service the package started (JIOTV_START_SERVICE=0)"
-      stop_service || echo "warning: the service did not stop; run '$init_script stop'" >&2
+      stop_service || stop_failed=true
     fi
+    # What is left running now was running before and is deliberately untouched.
+    if [ "$stop_failed" != true ] && "$init_script" running >/dev/null 2>&1; then kept_running=true; fi
   elif [ "$disabled" = true ]; then
-    say "The service is disabled in /etc/config/jiotv (option enabled '0'); leaving it stopped"
+    # The setting wins over a process started earlier: stop it rather than only saying so.
+    if "$init_script" running >/dev/null 2>&1; then
+      say "The service is disabled in /etc/config/jiotv (option enabled '0'); stopping it"
+      stop_service || stop_failed=true
+    else
+      say "The service is disabled in /etc/config/jiotv (option enabled '0'); leaving it stopped"
+    fi
   else
     # Stop and wait before starting: an upgrade must replace the old process, and
     # only a process started after the old one is gone proves the new binary runs.
@@ -238,7 +248,9 @@ if [ "$openwrt" = true ]; then
   http_port=$(uci_opt port 5001)
   tls_port=$(uci_opt tls_port 5443)
   echo
-  if [ "$running" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed and running."
+  if [ "$stop_failed" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed, but the service could not be stopped: run '$init_script stop'."
+  elif [ "$running" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed and running."
+  elif [ "$kept_running" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed; the service that was already running was left as it was (JIOTV_START_SERVICE=0)."
   elif [ "$disabled" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed; the service is disabled in /etc/config/jiotv."
   elif [ "$start_service" = 1 ]; then echo "JioTV ($variant, ${tag#v}) is installed, but the service is not listening yet."
   else echo "JioTV ($variant, ${tag#v}) is installed (not started: JIOTV_START_SERVICE=0)."
@@ -259,7 +271,7 @@ if [ "$openwrt" = true ]; then
   if [ "$disabled" = true ]; then
     echo "  $step. Enable the service: uci set jiotv.main.enabled=1 && uci commit jiotv && $init_script start"
     step=$((step + 1))
-  elif [ "$running" != true ]; then
+  elif [ "$running" != true ] && [ "$kept_running" != true ]; then
     echo "  $step. Start the service: $init_script start  (then check: logread -e jiotv)"
     step=$((step + 1))
   fi
@@ -275,6 +287,7 @@ if [ "$openwrt" = true ]; then
   fi
   echo
   echo "Service control: $init_script start|stop|restart    Logs: logread -e jiotv"
+  [ "$stop_failed" != true ] || exit 1
   [ "$start_service" = 0 ] || [ "$disabled" = true ] || [ "$running" = true ] || exit 1
   exit 0
 fi

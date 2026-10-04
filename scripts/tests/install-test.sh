@@ -75,6 +75,8 @@ cat >"$tmp/bin/uci" <<'EOF'
 case "$*" in
   *jiotv.main.enabled) [ -z "${JIOTV_TEST_UCI_ENABLED:-}" ] || echo "$JIOTV_TEST_UCI_ENABLED" ;;
   *jiotv.main.tls) [ -z "${JIOTV_TEST_UCI_TLS:-}" ] || echo "$JIOTV_TEST_UCI_TLS" ;;
+  *jiotv.main.host) [ -z "${JIOTV_TEST_UCI_HOST:-}" ] || echo "$JIOTV_TEST_UCI_HOST" ;;
+  *network.lan.ipaddr) echo "${JIOTV_TEST_LAN_IP:-192.168.8.1/24}" ;;
 esac
 exit 0
 EOF
@@ -146,7 +148,7 @@ grep -F "del jiotv-slim" "$tmp/openwrt-apk-package" >/dev/null
 grep -x "enable" "$tmp/openwrt-apk-init" >/dev/null
 grep -x "restart" "$tmp/openwrt-apk-init" >/dev/null
 grep -F "is installed and running" "$tmp/openwrt-apk-output" >/dev/null
-grep -F "http://<router-ip>:5001/" "$tmp/openwrt-apk-output" >/dev/null
+grep -F "http://192.168.8.1:5001/" "$tmp/openwrt-apk-output" >/dev/null
 grep -F "Checksum verified" "$tmp/openwrt-apk-output" >/dev/null
 grep -F "add --allow-untrusted" "$tmp/openwrt-apk-package" >/dev/null
 grep -F "/$openwrt_apk" "$tmp/openwrt-apk-downloads" >/dev/null
@@ -192,6 +194,27 @@ if grep -F "https://" "$tmp/openwrt-notls-output" >/dev/null; then
   exit 1
 fi
 grep -F "Browser UI : http://" "$tmp/openwrt-notls-output" >/dev/null
+# A service bound to one address advertises that address, a wildcard bind the LAN address.
+JIOTV_PLATFORM=openwrt JIOTV_TEST_UCI_HOST=127.0.0.1 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-host-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-host-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  PATH="$tmp/bin:$PATH" sh "$root/scripts/install.sh" >"$tmp/openwrt-host-output"
+grep -F "https://127.0.0.1:5443/" "$tmp/openwrt-host-output" >/dev/null
+if grep -F "192.168.8.1" "$tmp/openwrt-host-output" >/dev/null; then
+  echo "a loopback bind advertised the LAN address" >&2
+  exit 1
+fi
+# A slim install has no browser UI, so its steps are terminal-only.
+openwrt_slim_aarch64_apk=jiotv-slim-1.3.1-r1_aarch64_cortex-a53.apk
+JIOTV_PLATFORM=openwrt JIOTV_VARIANT=slim JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_slim_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-slim-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-slim-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  PATH="$tmp/bin:$PATH" sh "$root/scripts/install.sh" >"$tmp/openwrt-slim-output"
+if grep -E "Browser UI|browser UI|admin password" "$tmp/openwrt-slim-output" | grep -v "no browser UI" >/dev/null; then
+  echo "slim install printed browser steps" >&2
+  exit 1
+fi
+grep -F "stop; sleep 3; jiotv login otp" "$tmp/openwrt-slim-output" >/dev/null
 # The admin password comes before signing in, and terminal login stops the service.
 grep -n "Set the admin password" "$tmp/openwrt-apk-output" | grep -F "1." >/dev/null
 grep -F "stop; sleep 3; jiotv login otp" "$tmp/openwrt-apk-output" >/dev/null

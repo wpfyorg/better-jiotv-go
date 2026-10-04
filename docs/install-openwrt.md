@@ -43,7 +43,7 @@ https://<router-ip>:5443/
 
 The package enables HTTPS with a self-signed certificate (created on first start under `/etc/jiotv/tls/`). Browsers require HTTPS for protected playback, so accept the one-time certificate warning. IPTV apps should keep using the plain `http://<router-ip>:5001/` playlist. See [HTTPS in Usage](usage.md#https).
 
-The normal `full` package includes the web UI. Most people should use it.
+The normal `full` package includes the web UI. Most people should use it. The `slim` package has no web UI, so sign in from the terminal as shown above. If `option host` in `/etc/config/jiotv` is set to a specific address, the service listens only there and the installer prints that address instead of the LAN address.
 
 ## Update
 

@@ -189,7 +189,15 @@ if [ "$openwrt" = true ]; then
     fi
   fi
 
-  ip=$(router_ip)
+  # The service binds the configured host; only a wildcard bind is reachable at
+  # the router's LAN address, so any other host is advertised as configured.
+  bind_host=$(uci_opt host 0.0.0.0)
+  case "$bind_host" in
+    0.0.0.0|::|'[::]') ip=$(router_ip) ;;
+    \[*) ip=$bind_host ;;
+    *:*) ip="[$bind_host]" ;;
+    *) ip=$bind_host ;;
+  esac
   tls_on=$(uci_flag tls 1)
   http_port=$(uci_opt port 5001)
   tls_port=$(uci_opt tls_port 5443)
@@ -200,7 +208,9 @@ if [ "$openwrt" = true ]; then
   else echo "JioTV ($variant, ${tag#v}) is installed (not started: JIOTV_START_SERVICE=0)."
   fi
   echo
-  if [ "$install_tls" = 1 ] && [ "$tls_on" = 1 ]; then
+  if [ "$variant" = slim ]; then
+    echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist; the slim build has no browser UI)"
+  elif [ "$install_tls" = 1 ] && [ "$tls_on" = 1 ]; then
     echo "  Browser UI : https://${ip}:${tls_port}/  (HTTPS, self-signed certificate; accept the one-time warning)"
     echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist)"
   else
@@ -211,17 +221,22 @@ if [ "$openwrt" = true ]; then
   echo "Next steps:"
   step=1
   if [ "$disabled" = true ]; then
-    echo "  $step. Enable the service: uci set jiotv.main.enabled=1 && uci commit jiotv && $init_script start"
+    echo "  $step. Enable the service: uci set jiotv.main.enabled=1 && uci commit jiotv"
     step=$((step + 1))
   elif [ "$running" != true ]; then
     echo "  $step. Start the service: $init_script start  (then check: logread -e jiotv)"
     step=$((step + 1))
   fi
-  echo "  $step. Set the admin password: jiotv admin password"
-  step=$((step + 1))
-  echo "  $step. Open the browser UI, log in with that password, then sign in to JioTV (you enter the OTP yourself)."
-  echo "  To sign in to JioTV from the terminal instead, stop the service first so it cannot overwrite the login:"
-  echo "    $init_script stop; sleep 3; jiotv login otp; $init_script start"
+  if [ "$variant" = slim ]; then
+    echo "  $step. Sign in to JioTV from the terminal (you enter the OTP yourself). Stop the service first so it cannot overwrite the login:"
+    echo "       $init_script stop; sleep 3; jiotv login otp; $init_script start"
+  else
+    echo "  $step. Set the admin password: jiotv admin password"
+    step=$((step + 1))
+    echo "  $step. Open the browser UI, log in with that password, then sign in to JioTV (you enter the OTP yourself)."
+    echo "  To sign in to JioTV from the terminal instead, stop the service first so it cannot overwrite the login:"
+    echo "    $init_script stop; sleep 3; jiotv login otp; $init_script start"
+  fi
   echo
   echo "Service control: $init_script start|stop|restart    Logs: logread -e jiotv"
   [ "$start_service" = 0 ] || [ "$disabled" = true ] || [ "$running" = true ] || exit 1

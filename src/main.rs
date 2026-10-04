@@ -357,8 +357,9 @@ async fn serve(
     if epg_enabled || std::path::Path::new(&epg_path).exists() {
         let state = state.clone();
         tokio::spawn(async move {
+            let epoch = state.context_epoch();
             if let Err(e) = epg::prepare_cache_for_state(&state).await {
-                state.epg_state.invalidate();
+                epg::invalidate_if_current(&state, epoch);
                 tracing::warn!("cannot validate the EPG cache for the active account: {e}");
             }
             if epg_enabled {

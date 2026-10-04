@@ -33,8 +33,14 @@ pub struct VodState {
 }
 
 impl VodState {
-    fn get_playback(&self, id: &str, fresh: bool) -> Option<PlaybackData> {
+    /// A hit is served only in the generation it was captured for: `clear`
+    /// bumps the generation under this same lock, so a request that crossed an
+    /// account switch gets a miss, never the previous account's entry.
+    fn get_playback(&self, id: &str, fresh: bool, generation: u64) -> Option<PlaybackData> {
         let map = self.playback.lock().unwrap();
+        if self.generation() != generation {
+            return None;
+        }
         let (data, at) = map.get(id)?;
         if fresh || at.elapsed() > PLAYBACK_TTL {
             return None;
@@ -55,6 +61,14 @@ impl VodState {
         map.retain(|_, (_, at)| at.elapsed() <= PLAYBACK_TTL);
         map.insert(id.to_string(), (data, Instant::now()));
         true
+    }
+
+    fn get_playlist(&self, generation: u64) -> Option<(String, Instant)> {
+        let slot = self.playlist.lock().unwrap();
+        if self.generation() != generation {
+            return None;
+        }
+        slot.clone()
     }
 
     /// Returns whether the playlist was stored (false: the context changed).
@@ -93,7 +107,7 @@ async fn vod_playback(
     fresh: bool,
 ) -> anyhow::Result<PlaybackData> {
     let generation = state.vod_state.generation();
-    if let Some(cached) = state.vod_state.get_playback(content_id, fresh) {
+    if let Some(cached) = state.vod_state.get_playback(content_id, fresh, generation) {
         return Ok(cached);
     }
     if let Err(e) = state.extras.ensure_token(false, &state.store).await {
@@ -412,7 +426,7 @@ pub async fn vod_playlist_handler(
     // host of the *current* request are substituted on every response, so
     // an http client and an https client never see each other's links.
     let generation = state.vod_state.generation();
-    let cached = { state.vod_state.playlist.lock().unwrap().clone() };
+    let cached = state.vod_state.get_playlist(generation);
     let template = match cached {
         Some((xml, at)) if at.elapsed() <= PLAYLIST_TTL => xml,
         _ => {
@@ -489,6 +503,20 @@ fn render_vod_playlist(entries: &[(VodItem, String)], base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_hits_are_served_only_in_the_generation_they_were_captured_for() {
+        let state = VodState::default();
+        let old = state.generation();
+        state.clear();
+        let current = state.generation();
+        assert!(state.set_playlist("<new/>".into(), current));
+        // A request that captured the old generation and read after the switch
+        // must see a miss, never the new (or the previous) account's entry.
+        assert!(state.get_playlist(old).is_none());
+        assert!(state.get_playlist(current).is_some());
+        assert!(state.get_playback("title", false, old).is_none());
+    }
 
     #[test]
     fn playback_and_playlist_writes_from_before_a_clear_are_dropped() {

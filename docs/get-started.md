@@ -52,9 +52,12 @@ jiotv serve --host 0.0.0.0 --port 5001 --tls
 
 Enter the OTP yourself when prompted.
 
-For OpenWrt, run the first two commands above and then start the service:
+For OpenWrt, the installer already started the service. Set the admin password, then sign in from the browser UI. To sign in from the terminal instead, stop the service around the login so it cannot overwrite it:
 
 ```sh
+jiotv admin password
+/etc/init.d/jiotv stop; while pidof jiotv >/dev/null; do sleep 1; done
+jiotv login otp
 /etc/init.d/jiotv start
 ```
 

@@ -15,17 +15,27 @@ That is the recommended installation method. The script automatically:
 - downloads the matching `jiotv` package from the latest release;
 - verifies it with `SHA256SUMS`;
 - installs it with the router package manager;
-- enables the JioTV service at boot.
+- enables the JioTV service at boot;
+- stops a running service and waits for it to exit, starts the new one, and checks that jiotv itself is listening on its port, unless `option enabled '0'` is set in `/etc/config/jiotv`;
+- prints the browser and playlist addresses for your router.
 
-After installation, run:
+Set `JIOTV_START_SERVICE=0` to install and enable without starting the service. `JIOTV_READY_TIMEOUT=<seconds>` sets how long the installer waits for the service to stop and to start listening (default 15, minimum 2); raise it on a slow router. The package's own hook starts the service on a fresh install, so the installer stops it again in that case; a service that was already running is left as it was.
+
+After installation, set the admin password, then open the web UI and sign in; you enter the OTP yourself:
 
 ```sh
-jiotv login otp
 jiotv admin password
+```
+
+To sign in to JioTV from the terminal instead, stop the service first so it cannot overwrite the new login:
+
+```sh
+/etc/init.d/jiotv stop; while pidof jiotv >/dev/null; do sleep 1; done
+jiotv login otp
 /etc/init.d/jiotv start
 ```
 
-Enter the OTP yourself when prompted. Then open the web UI over HTTPS:
+Open the web UI over HTTPS:
 
 ```text
 https://<router-ip>:5443/
@@ -33,7 +43,7 @@ https://<router-ip>:5443/
 
 The package enables HTTPS with a self-signed certificate (created on first start under `/etc/jiotv/tls/`). Browsers require HTTPS for protected playback, so accept the one-time certificate warning. IPTV apps should keep using the plain `http://<router-ip>:5001/` playlist. See [HTTPS in Usage](usage.md#https).
 
-The normal `full` package includes the web UI. Most people should use it.
+The normal `full` package includes the web UI. Most people should use it. The `slim` package has no web UI, so sign in from the terminal as shown above. If `option host` in `/etc/config/jiotv` is set to a specific address, the service listens only there and the installer prints that address instead of the LAN address.
 
 ## Update
 

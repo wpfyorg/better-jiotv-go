@@ -325,6 +325,9 @@ pub async fn jiotv_verify_otp(
     state.invalidate_context();
     state.tv.set_credentials(creds);
     state.extras.invalidate_account_context();
+    // A request that entered after the first rotation still used the old
+    // credentials; rotate again now that the new ones are installed.
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": "success"})).into_response()
 }
@@ -337,6 +340,7 @@ pub async fn jiotv_logout(State(state): State<SharedState>) -> Response {
     state.invalidate_context();
     state.tv.clear_credentials();
     state.extras.invalidate_account_context();
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true})).into_response()
 }
@@ -409,6 +413,8 @@ pub async fn extras_verify_otp(
         .extras
         .verify_otp(&body.number, &body.otp, &state.store)
         .await;
+    // Anything resolved while the exchange was in flight used the old account.
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     match result {
         Ok(ok) => Json(json!({"status": ok})).into_response(),
@@ -425,6 +431,7 @@ pub async fn extras_logout(State(state): State<SharedState>) -> Response {
     state.invalidate_context();
     match state.extras.logout(&state.store) {
         Ok(()) => {
+            state.invalidate_context();
             crate::epg::trigger_regeneration(&state);
             Json(json!({"status": true})).into_response()
         }
@@ -478,6 +485,7 @@ pub async fn extras_unlock(
     }
     state.invalidate_context();
     state.extras.set_unlocked(true, &state.http, &state.store);
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
@@ -491,6 +499,7 @@ pub async fn extras_lock(State(state): State<SharedState>) -> Response {
     }
     state.invalidate_context();
     state.extras.set_unlocked(false, &state.http, &state.store);
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
@@ -815,5 +824,17 @@ mod tests {
             assert!(source.ends_with("/auto.m3u8"), "channel {id}");
             assert_eq!(q, "", "channel {id}");
         }
+    }
+
+    #[tokio::test]
+    async fn account_transitions_rotate_again_after_the_new_state_is_installed() {
+        let s = state();
+        let before = s.secure.current_epoch();
+        jiotv_logout(State(s.clone())).await;
+        assert_eq!(s.secure.current_epoch(), before + 2, "logout");
+
+        let before = s.secure.current_epoch();
+        extras_lock(State(s.clone())).await;
+        assert_eq!(s.secure.current_epoch(), before + 2, "extras lock");
     }
 }

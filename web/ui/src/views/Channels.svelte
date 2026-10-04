@@ -92,7 +92,7 @@
         {#if unlockNotice.connected}
           The extra source is connected; its channels are listed below.
         {:else}
-          Connect the extra source in Settings to load its channels.
+          Login with number with access to the extra in Settings to be able to play its channels.
         {/if}
       </span>
     </div>

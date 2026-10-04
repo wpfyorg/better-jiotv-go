@@ -26,11 +26,21 @@ const PLAYLIST_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 pub struct VodState {
     playback: Mutex<HashMap<String, (PlaybackData, Instant)>>,
     playlist: Mutex<Option<(String, Instant)>>,
+    /// Bumped by `clear` (account/product switch). A fetch captures it first
+    /// and stores its result only if it is unchanged, so a request that
+    /// outlived the switch cannot repopulate the cleared caches.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl VodState {
-    fn get_playback(&self, id: &str, fresh: bool) -> Option<PlaybackData> {
+    /// A hit is served only in the generation it was captured for: `clear`
+    /// bumps the generation under this same lock, so a request that crossed an
+    /// account switch gets a miss, never the previous account's entry.
+    fn get_playback(&self, id: &str, fresh: bool, generation: u64) -> Option<PlaybackData> {
         let map = self.playback.lock().unwrap();
+        if self.generation() != generation {
+            return None;
+        }
         let (data, at) = map.get(id)?;
         if fresh || at.elapsed() > PLAYBACK_TTL {
             return None;
@@ -38,15 +48,48 @@ impl VodState {
         Some(data.clone())
     }
 
-    fn set_playback(&self, id: &str, data: PlaybackData) {
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Returns whether the entry was stored (false: the context changed).
+    fn set_playback(&self, id: &str, data: PlaybackData, generation: u64) -> bool {
         let mut map = self.playback.lock().unwrap();
+        if self.generation() != generation {
+            return false;
+        }
         map.retain(|_, (_, at)| at.elapsed() <= PLAYBACK_TTL);
         map.insert(id.to_string(), (data, Instant::now()));
+        true
+    }
+
+    fn get_playlist(&self, generation: u64) -> Option<(String, Instant)> {
+        let slot = self.playlist.lock().unwrap();
+        if self.generation() != generation {
+            return None;
+        }
+        slot.clone()
+    }
+
+    /// Returns whether the playlist was stored (false: the context changed).
+    fn set_playlist(&self, xml: String, generation: u64) -> bool {
+        let mut slot = self.playlist.lock().unwrap();
+        if self.generation() != generation {
+            return false;
+        }
+        *slot = Some((xml, Instant::now()));
+        true
     }
 
     pub fn clear(&self) {
-        self.playback.lock().unwrap().clear();
-        *self.playlist.lock().unwrap() = None;
+        // The bump happens while holding both locks, so every generation check
+        // (made under the playback or the playlist lock) is atomic with it.
+        let mut map = self.playback.lock().unwrap();
+        let mut playlist = self.playlist.lock().unwrap();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        map.clear();
+        *playlist = None;
     }
 }
 
@@ -63,7 +106,8 @@ async fn vod_playback(
     content_id: &str,
     fresh: bool,
 ) -> anyhow::Result<PlaybackData> {
-    if let Some(cached) = state.vod_state.get_playback(content_id, fresh) {
+    let generation = state.vod_state.generation();
+    if let Some(cached) = state.vod_state.get_playback(content_id, fresh, generation) {
         return Ok(cached);
     }
     if let Err(e) = state.extras.ensure_token(false, &state.store).await {
@@ -73,7 +117,12 @@ async fn vod_playback(
         anyhow::anyhow!("connect the extra source in Settings to watch on-demand titles")
     })?;
     let resp = client.playback(content_id).await?;
-    state.vod_state.set_playback(content_id, resp.data.clone());
+    if !state
+        .vod_state
+        .set_playback(content_id, resp.data.clone(), generation)
+    {
+        anyhow::bail!("the active account changed while resolving this title; retry");
+    }
     Ok(resp.data)
 }
 
@@ -376,18 +425,34 @@ pub async fn vod_playlist_handler(
     // The cache holds the playlist with a placeholder base; the scheme and
     // host of the *current* request are substituted on every response, so
     // an http client and an https client never see each other's links.
-    let cached = { state.vod_state.playlist.lock().unwrap().clone() };
+    let generation = state.vod_state.generation();
+    let cached = state.vod_state.get_playlist(generation);
     let template = match cached {
         Some((xml, at)) if at.elapsed() <= PLAYLIST_TTL => xml,
         _ => {
             let entries = build_vod_playlist(&client).await;
             let xml = render_vod_playlist(&entries, BASE_PLACEHOLDER);
-            if !entries.is_empty() {
-                *state.vod_state.playlist.lock().unwrap() = Some((xml.clone(), Instant::now()));
+            // A playlist built for the previous account is neither cached nor
+            // returned if the context changed while it was being built.
+            let stored =
+                entries.is_empty() || state.vod_state.set_playlist(xml.clone(), generation);
+            if !stored {
+                return err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The active account changed while this request was running; retry",
+                );
             }
             xml
         }
     };
+    // Final synchronized check: a playlist cloned from the cache or built for the
+    // previous account must not be returned once a switch has completed.
+    if state.vod_state.generation() != generation {
+        return err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The active account changed while this request was running; retry",
+        );
+    }
     let scheme = if https.is_some() { "https" } else { "http" };
     let base = headers
         .get(header::HOST)
@@ -446,6 +511,34 @@ fn render_vod_playlist(entries: &[(VodItem, String)], base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_hits_are_served_only_in_the_generation_they_were_captured_for() {
+        let state = VodState::default();
+        let old = state.generation();
+        state.clear();
+        let current = state.generation();
+        assert!(state.set_playlist("<new/>".into(), current));
+        // A request that captured the old generation and read after the switch
+        // must see a miss, never the new (or the previous) account's entry.
+        assert!(state.get_playlist(old).is_none());
+        assert!(state.get_playlist(current).is_some());
+        assert!(state.get_playback("title", false, old).is_none());
+    }
+
+    #[test]
+    fn playback_and_playlist_writes_from_before_a_clear_are_dropped() {
+        let state = VodState::default();
+        let started = state.generation();
+        assert!(state.set_playlist("<xml/>".into(), started));
+        state.clear();
+        assert!(state.playlist.lock().unwrap().is_none());
+        // Fetches that began before the clear must not repopulate the caches.
+        assert!(!state.set_playlist("<old/>".into(), started));
+        assert!(state.playlist.lock().unwrap().is_none());
+        assert!(state.playback.lock().unwrap().is_empty());
+        assert!(state.set_playlist("<new/>".into(), state.generation()));
+    }
 
     #[test]
     fn valid_content_id_rejects_bad_input() {

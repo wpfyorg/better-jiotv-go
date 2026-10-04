@@ -36,6 +36,17 @@ pub async fn catchup_stream_handler(
     State(state): State<Arc<AppState>>,
     prefix: Option<axum::Extension<crate::api::KeyPrefix>>,
 ) -> Response {
+    let epoch = state.secure.current_epoch();
+    let response = catchup_stream_inner(id, q, state.clone(), prefix).await;
+    state.stable_since(epoch, response)
+}
+
+async fn catchup_stream_inner(
+    id: String,
+    q: CatchupQuery,
+    state: Arc<AppState>,
+    prefix: Option<axum::Extension<crate::api::KeyPrefix>>,
+) -> Response {
     let id = id.trim_end_matches(".m3u8").to_string();
     if !state.channel_allowed(&id).await || crate::extras::content_id::content_id(&id).is_some() {
         return (

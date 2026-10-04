@@ -153,6 +153,17 @@ fn invalidate_cache_files(path: &str) {
     }
 }
 
+/// Clears the current fingerprint only if no context change happened since
+/// `epoch` was captured. The check runs under the context guard, which every
+/// context change also holds while it rotates the epoch, so a failed or
+/// obsolete validation cannot erase the fingerprint a newer context installed.
+pub(crate) fn invalidate_if_current(state: &AppState, epoch: u64) {
+    let _guard = state.epg_state.context_guard();
+    if state.context_epoch() == epoch {
+        state.epg_state.invalidate();
+    }
+}
+
 /// Establishes the current stable XMLTV context before the HTTP server can
 /// expose a cached guide. A legacy/missing sidecar or a mismatched context
 /// invalidates the artifact regardless of mtime.
@@ -915,6 +926,28 @@ mod tests {
             epg_handler(State(account_b)).await.status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[tokio::test]
+    async fn stale_startup_validation_cannot_clear_a_newer_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(&dir, "account-a", vec![tv_channel("101", "TV")], None);
+        let started = state.context_epoch();
+
+        // The context changes while the background validation is running, and
+        // the new context installs its own fingerprint.
+        state.invalidate_context();
+        state.epg_state.set_current_fingerprint("newer".into());
+        invalidate_if_current(&state, started);
+        assert_eq!(
+            state.epg_state.current_fingerprint().as_deref(),
+            Some("newer"),
+            "an obsolete validation erased the newer context's fingerprint"
+        );
+
+        // A validation that still owns the current context may invalidate it.
+        invalidate_if_current(&state, state.context_epoch());
+        assert!(state.epg_state.current_fingerprint().is_none());
     }
 
     #[tokio::test]

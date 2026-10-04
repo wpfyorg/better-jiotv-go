@@ -28,9 +28,18 @@ pub struct RenderCaches {
     /// channel (mirrors `refreshChannelToken`'s `singleflight.Group`); the
     /// extras path has its own dedup in `extras_state`.
     refresh_locks: crate::keyed_locks::KeyedLocks,
+    /// Bumped, under both map locks, by `clear` (account/product switch). A
+    /// request captures it before touching the caches and its writes are
+    /// dropped if it changed, so a request that outlived the switch cannot
+    /// write the previous account's token or dead-channel state back.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl RenderCaches {
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     fn hdnea_key(channel_id: &str, stream_url: &str) -> String {
         if stream_url.to_lowercase().contains("catchup") {
             format!("{channel_id}|catchup")
@@ -48,14 +57,17 @@ impl RenderCaches {
         Some(token.clone())
     }
 
-    pub fn set_hdnea(&self, key: &str, token: &str) {
+    /// Stores `token` unless the caches were cleared since `generation` was
+    /// captured.
+    pub fn set_hdnea(&self, generation: u64, key: &str, token: &str) {
         if token.is_empty() {
             return;
         }
-        self.hdnea
-            .write()
-            .unwrap()
-            .insert(key.to_string(), (token.to_string(), Instant::now()));
+        let mut map = self.hdnea.write().unwrap();
+        if self.generation() != generation {
+            return;
+        }
+        map.insert(key.to_string(), (token.to_string(), Instant::now()));
     }
 
     pub fn clear_hdnea(&self, key: &str) {
@@ -72,13 +84,17 @@ impl RenderCaches {
         }
     }
 
-    pub fn mark_dead(&self, channel_id: &str) {
-        if !channel_id.is_empty() {
-            self.dead
-                .write()
-                .unwrap()
-                .insert(channel_id.to_string(), Instant::now());
+    /// Marks the channel dead unless the caches were cleared since
+    /// `generation` was captured.
+    pub fn mark_dead(&self, generation: u64, channel_id: &str) {
+        if channel_id.is_empty() {
+            return;
         }
+        let mut map = self.dead.write().unwrap();
+        if self.generation() != generation {
+            return;
+        }
+        map.insert(channel_id.to_string(), Instant::now());
     }
 
     pub fn clear_dead(&self, channel_id: &str) {
@@ -86,8 +102,12 @@ impl RenderCaches {
     }
 
     pub fn clear(&self) {
-        self.hdnea.write().unwrap().clear();
-        self.dead.write().unwrap().clear();
+        let mut hdnea = self.hdnea.write().unwrap();
+        let mut dead = self.dead.write().unwrap();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        hdnea.clear();
+        dead.clear();
     }
 }
 
@@ -244,6 +264,19 @@ async fn live_impl(
     quality: &str,
     prefix: &Option<axum::Extension<crate::api::KeyPrefix>>,
 ) -> Response {
+    let epoch = state.secure.current_epoch();
+    let response = live_impl_inner(state, id, quality, prefix).await;
+    state.stable_since(epoch, response)
+}
+
+async fn live_impl_inner(
+    state: &Arc<AppState>,
+    id: &str,
+    quality: &str,
+    prefix: &Option<axum::Extension<crate::api::KeyPrefix>>,
+) -> Response {
+    // Captured before any cache read: writes from before an account switch are dropped.
+    let cache_gen = state.render_caches.generation();
     if !state.channel_allowed(id).await {
         return (
             StatusCode::NOT_FOUND,
@@ -281,7 +314,7 @@ async fn live_impl(
     }
     live_url = to_absolute_stream_url(&live_url, absolute_base_from_live(&live).as_deref());
     if !live.hdnea.is_empty() {
-        state.render_caches.set_hdnea(id, &live.hdnea);
+        state.render_caches.set_hdnea(cache_gen, id, &live.hdnea);
     }
 
     let encrypted = state.secure.encrypt(&live_url);
@@ -541,6 +574,14 @@ pub async fn render_m3u8_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<RenderQuery>,
 ) -> Response {
+    let epoch = state.secure.current_epoch();
+    let response = render_m3u8_inner(state.clone(), q).await;
+    state.stable_since(epoch, response)
+}
+
+async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
+    // Captured before any cache read: writes from before an account switch are dropped.
+    let cache_gen = state.render_caches.generation();
     let (Some(auth), Some(channel_id)) = (q.auth, q.channel_key_id) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -550,13 +591,6 @@ pub async fn render_m3u8_handler(
     };
     if channel_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
-    }
-    if !state.channel_allowed(&channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
     }
     let decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
@@ -576,7 +610,7 @@ pub async fn render_m3u8_handler(
 
     let (mut body, mut status, new_hdnea) = state.tv.render(&render_url, &token).await;
     if !new_hdnea.is_empty() {
-        state.render_caches.set_hdnea(&hdnea_key, &new_hdnea);
+        state.render_caches.set_hdnea(cache_gen, &hdnea_key, &new_hdnea);
         token = new_hdnea.clone();
     }
 
@@ -588,7 +622,7 @@ pub async fn render_m3u8_handler(
         if !recently_dead && !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
                 if !refreshed.hdnea.is_empty() {
-                    state.render_caches.set_hdnea(&hdnea_key, &refreshed.hdnea);
+                    state.render_caches.set_hdnea(cache_gen, &hdnea_key, &refreshed.hdnea);
                     token = refreshed.hdnea.clone();
                 }
                 render_url = strip_hdnea_from_url(&decoded);
@@ -596,7 +630,7 @@ pub async fn render_m3u8_handler(
                 body = b;
                 status = s;
                 if !h.is_empty() {
-                    state.render_caches.set_hdnea(&hdnea_key, &h);
+                    state.render_caches.set_hdnea(cache_gen, &hdnea_key, &h);
                     token = h;
                 }
 
@@ -620,7 +654,7 @@ pub async fn render_m3u8_handler(
                         body = b;
                         status = s;
                         if !h.is_empty() {
-                            state.render_caches.set_hdnea(&hdnea_key, &h);
+                            state.render_caches.set_hdnea(cache_gen, &hdnea_key, &h);
                             token = h;
                         }
                         if status == 200 {
@@ -628,7 +662,7 @@ pub async fn render_m3u8_handler(
                         }
                     }
                     if status == 404 {
-                        state.render_caches.mark_dead(&channel_id);
+                        state.render_caches.mark_dead(cache_gen, &channel_id);
                     } else {
                         state.render_caches.clear_dead(&channel_id);
                     }
@@ -697,19 +731,14 @@ pub async fn render_ts_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SegmentQuery>,
 ) -> Response {
+    // Captured before any cache read: writes from before an account switch are dropped.
+    let cache_gen = state.render_caches.generation();
     let Some(auth) = q.auth else {
         return (StatusCode::BAD_REQUEST, "auth is required").into_response();
     };
     let Some(channel_id) = q.channel_key_id.filter(|id| !id.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
     };
-    if !state.channel_allowed(&channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
-    }
     let mut decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
@@ -736,7 +765,7 @@ pub async fn render_ts_handler(
         if !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
                 if !refreshed.hdnea.is_empty() {
-                    state.render_caches.set_hdnea(&hdnea_key, &refreshed.hdnea);
+                    state.render_caches.set_hdnea(cache_gen, &hdnea_key, &refreshed.hdnea);
                     fresh_token = Some(refreshed.hdnea);
                 }
             }
@@ -796,13 +825,6 @@ pub async fn render_key_handler(
     let Some(channel_id) = q.channel_key_id.clone().filter(|id| !id.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
     };
-    if !state.channel_allowed(&channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
-    }
     let decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
@@ -853,6 +875,28 @@ pub async fn render_key_handler(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn render_cache_writes_from_before_a_clear_are_dropped() {
+        let caches = RenderCaches::default();
+        let started = caches.generation();
+        caches.set_hdnea(started, "154", "old-token");
+        assert_eq!(caches.get_hdnea("154").as_deref(), Some("old-token"));
+
+        // An account switch clears the caches; the request that captured
+        // `started` is still running and tries to write afterwards.
+        caches.clear();
+        caches.set_hdnea(started, "154", "old-token");
+        caches.mark_dead(started, "154");
+        assert!(caches.get_hdnea("154").is_none());
+        assert!(!caches.is_dead("154"));
+
+        let current = caches.generation();
+        caches.set_hdnea(current, "154", "new-token");
+        caches.mark_dead(current, "154");
+        assert_eq!(caches.get_hdnea("154").as_deref(), Some("new-token"));
+        assert!(caches.is_dead("154"));
+    }
+
     use super::*;
 
     #[test]

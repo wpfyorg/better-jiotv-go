@@ -26,7 +26,7 @@ impl ActiveProduct {
 
 pub struct AppState {
     pub config: Config,
-    /// The resolved data directory (`config.path_prefix`, or `~/.jiotv_go`),
+    /// The resolved data directory (`config.path_prefix`, or `~/.jiotv_go`; `/etc/jiotv` on OpenWrt),
     /// always ending in `/`. Used for `epg.xml.gz` and similar data files.
     pub path_prefix: String,
     pub access: Arc<Access>,

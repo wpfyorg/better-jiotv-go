@@ -5,7 +5,9 @@
 export function plainHttpOrigin(loc, status) {
   const http = status?.httpPort;
   const tls = status?.tlsPort;
-  if (loc.protocol === "https:" && http && tls && String(loc.port) === String(tls)) {
+  // Browsers report an empty port for the scheme's default (443 for HTTPS).
+  const port = loc.port || (loc.protocol === "https:" ? "443" : "");
+  if (loc.protocol === "https:" && http && tls && port === String(tls)) {
     return `http://${loc.hostname}:${http}`;
   }
   return loc.origin;

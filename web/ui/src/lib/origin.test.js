@@ -21,3 +21,9 @@ test("keeps the page origin when the server does not report ports", () => {
   assert.equal(plainHttpOrigin(new URL("https://h:5443/"), null), "https://h:5443");
   assert.equal(plainHttpOrigin(new URL("https://h:5443/"), { httpPort: 5001, tlsPort: null }), "https://h:5443");
 });
+
+test("recognizes the default HTTPS port, which browsers report as empty", () => {
+  assert.equal(plainHttpOrigin(new URL("https://192.168.1.10:443/"), { httpPort: 5001, tlsPort: 443 }), "http://192.168.1.10:5001");
+  assert.equal(plainHttpOrigin(new URL("https://192.168.1.10/"), { httpPort: 5001, tlsPort: 443 }), "http://192.168.1.10:5001");
+  assert.equal(plainHttpOrigin(new URL("https://192.168.1.10/"), status), "https://192.168.1.10");
+});

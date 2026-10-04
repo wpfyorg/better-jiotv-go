@@ -254,24 +254,14 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     })
 }
 
-const OPENWRT_DATA_DIR: &str = "/etc/jiotv";
-const STORE_FILE: &str = "store_v4.toml";
-
 fn default_path_prefix() -> anyhow::Result<String> {
+    if is_openwrt() {
+        return Ok("/etc/jiotv".to_string());
+    }
+
     let home =
         home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve the user profile directory"))?;
-    let legacy = format!("{home}/.jiotv_go");
-    if is_openwrt() && !keeps_legacy_store(OPENWRT_DATA_DIR, &legacy) {
-        return Ok(OPENWRT_DATA_DIR.to_string());
-    }
-    Ok(legacy)
-}
-
-/// A raw-binary install that predates the OpenWrt data directory keeps using
-/// its existing store instead of silently starting from an empty one.
-fn keeps_legacy_store(managed: &str, legacy: &str) -> bool {
-    let has_store = |dir: &str| std::path::Path::new(dir).join(STORE_FILE).is_file();
-    !has_store(managed) && has_store(legacy)
+    Ok(format!("{home}/.jiotv_go"))
 }
 
 fn is_openwrt() -> bool {
@@ -673,29 +663,6 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn touch_store(dir: &std::path::Path) {
-        std::fs::write(dir.join(STORE_FILE), "").unwrap();
-    }
-
-    #[test]
-    fn existing_legacy_store_is_kept_until_the_managed_one_exists() {
-        let managed = tempfile::tempdir().unwrap();
-        let legacy = tempfile::tempdir().unwrap();
-        let (m, l) = (
-            managed.path().to_str().unwrap(),
-            legacy.path().to_str().unwrap(),
-        );
-
-        assert!(
-            !keeps_legacy_store(m, l),
-            "fresh install uses the managed dir"
-        );
-        touch_store(legacy.path());
-        assert!(keeps_legacy_store(m, l), "upgrade keeps the legacy store");
-        touch_store(managed.path());
-        assert!(!keeps_legacy_store(m, l), "managed store wins once present");
-    }
 
     #[cfg(unix)]
     mod service {

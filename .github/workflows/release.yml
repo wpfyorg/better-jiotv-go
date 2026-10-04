@@ -15,6 +15,11 @@ on:
 permissions:
   contents: write
 
+# A newer push to a pull request supersedes its dry run; tag releases are never cancelled.
+concurrency:
+  group: release-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     if: >-
@@ -127,13 +132,23 @@ jobs:
         run: chmod 0755 dist/bin/jiotv-*
       - name: Install SDK archive support
         run: sudo apt-get update && sudo apt-get install -y zstd
+      # A tag names the version; a dry run has no tag, and its ref name (for example
+      # "15/merge") is not usable as a package version, so it comes from Cargo.toml.
+      - name: Package version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version=${GITHUB_REF_NAME#v}
+          else version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
       - name: Build packages with the OpenWrt SDK
         env:
+          APP_VERSION: ${{ steps.version.outputs.value }}
           PACKAGE_FORMAT: ${{ matrix.format }}
           PACKAGE_TARGET: ${{ matrix.target }}
           SDK_VERSION: ${{ matrix.sdk_version }}
           PACKAGE_ARCH: ${{ matrix.arch }}
-        run: scripts/ci-openwrt-packages.sh "$PACKAGE_FORMAT" "$PACKAGE_TARGET" "$SDK_VERSION" "$PACKAGE_ARCH" "${GITHUB_REF_NAME#v}"
+        run: scripts/ci-openwrt-packages.sh "$PACKAGE_FORMAT" "$PACKAGE_TARGET" "$SDK_VERSION" "$PACKAGE_ARCH" "$APP_VERSION"
       - uses: actions/upload-artifact@v4
         with:
           name: openwrt-${{ matrix.format }}-${{ matrix.arch }}

@@ -59,8 +59,16 @@ chmod +x "$tmp/bin/id"
 
 cat >"$tmp/bin/jiotv-init" <<'EOF'
 #!/bin/sh
+# Stateful stand-in for the procd init script: JIOTV_TEST_INIT_STATE exists while "running".
+state=${JIOTV_TEST_INIT_STATE:?}
 [ -z "${JIOTV_TEST_INIT_LOG:-}" ] || printf '%s\n' "${1:-}" >>"$JIOTV_TEST_INIT_LOG"
-case "${1:-}" in enable|restart|running) ;; *) exit 1 ;; esac
+case "${1:-}" in
+  enable) ;;
+  running) [ -f "$state" ] ;;
+  start|restart) : >"$state" ;;
+  stop) rm -f "$state" ;;
+  *) exit 1 ;;
+esac
 EOF
 chmod +x "$tmp/bin/jiotv-init"
 
@@ -81,6 +89,8 @@ esac
 exit 0
 EOF
 chmod +x "$tmp/bin/netstat" "$tmp/bin/uci"
+
+export JIOTV_TEST_INIT_STATE="$tmp/init-state"
 
 run_case() {
   expected=$1
@@ -128,6 +138,7 @@ if [ "${1:-}" = --print-arch ]; then
   exit 0
 fi
 printf '%s\n' "$*" >>"$JIOTV_TEST_PACKAGE_LOG"
+[ "${1:-}" != add ] || [ -z "${JIOTV_TEST_POSTINST_STARTS:-}" ] || : >"$JIOTV_TEST_INIT_STATE"
 if [ "${1:-}" = info ] && [ "${2:-}" = -e ]; then
   [ "${3:-}" = "${JIOTV_TEST_INSTALLED_PACKAGE:-}" ]
   exit
@@ -146,7 +157,7 @@ JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 \
   sh "$root/scripts/install.sh" >"$tmp/openwrt-apk-output"
 grep -F "del jiotv-slim" "$tmp/openwrt-apk-package" >/dev/null
 grep -x "enable" "$tmp/openwrt-apk-init" >/dev/null
-grep -x "restart" "$tmp/openwrt-apk-init" >/dev/null
+grep -x "start" "$tmp/openwrt-apk-init" >/dev/null
 grep -F "is installed and running" "$tmp/openwrt-apk-output" >/dev/null
 grep -F "http://192.168.8.1:5001/" "$tmp/openwrt-apk-output" >/dev/null
 grep -F "Checksum verified" "$tmp/openwrt-apk-output" >/dev/null
@@ -162,24 +173,47 @@ JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-aarch64-apk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >/dev/null
 grep -F "/$openwrt_aarch64_apk" "$tmp/openwrt-aarch64-apk-downloads" >/dev/null
-JIOTV_PLATFORM=openwrt JIOTV_START_SERVICE=0 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+# The package hook starts the service on install; JIOTV_START_SERVICE=0 must not leave it running.
+rm -f "$JIOTV_TEST_INIT_STATE"
+JIOTV_PLATFORM=openwrt JIOTV_START_SERVICE=0 JIOTV_TEST_POSTINST_STARTS=1 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-nostart-downloads" \
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-nostart-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
   JIOTV_TEST_INIT_LOG="$tmp/openwrt-nostart-init" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >"$tmp/openwrt-nostart-output"
 grep -x "enable" "$tmp/openwrt-nostart-init" >/dev/null
-if grep -x "restart" "$tmp/openwrt-nostart-init" >/dev/null; then
+grep -x "stop" "$tmp/openwrt-nostart-init" >/dev/null
+if grep -x "start" "$tmp/openwrt-nostart-init" >/dev/null || [ -e "$JIOTV_TEST_INIT_STATE" ]; then
   echo "JIOTV_START_SERVICE=0 still started the service" >&2
   exit 1
 fi
+# A service that was already running is left as it was.
+: >"$JIOTV_TEST_INIT_STATE"
+JIOTV_PLATFORM=openwrt JIOTV_START_SERVICE=0 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-keep-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-keep-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  JIOTV_TEST_INIT_LOG="$tmp/openwrt-keep-init" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >/dev/null
+[ -e "$JIOTV_TEST_INIT_STATE" ]
+if grep -x "stop" "$tmp/openwrt-keep-init" >/dev/null; then
+  echo "an already running service was stopped by JIOTV_START_SERVICE=0" >&2
+  exit 1
+fi
 grep -F "not started" "$tmp/openwrt-nostart-output" >/dev/null
+# An upgrade stops the running service, waits for it, and only then starts it again.
+: >"$JIOTV_TEST_INIT_STATE"
+JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-upgrade-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-upgrade-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  JIOTV_TEST_INIT_LOG="$tmp/openwrt-upgrade-init" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >/dev/null
+awk '$1 == "stop" && !s { s = NR } $1 == "start" && !g { g = NR } END { exit !(s && g && s < g) }' "$tmp/openwrt-upgrade-init"
 # A service disabled in /etc/config/jiotv stays stopped and is not an install failure.
 JIOTV_PLATFORM=openwrt JIOTV_TEST_UCI_ENABLED=off JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-disabled-downloads" \
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-disabled-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
   JIOTV_TEST_INIT_LOG="$tmp/openwrt-disabled-init" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >"$tmp/openwrt-disabled-output"
-if grep -x "restart" "$tmp/openwrt-disabled-init" >/dev/null; then
+if grep -x "start" "$tmp/openwrt-disabled-init" >/dev/null; then
   echo "a disabled service was started" >&2
   exit 1
 fi

@@ -6,6 +6,7 @@ variant=${JIOTV_VARIANT:-full}
 version=${JIOTV_VERSION:-latest}
 install_tls=${JIOTV_INSTALL_TLS:-1}
 start_service=${JIOTV_START_SERVICE:-1}
+ready_timeout=${JIOTV_READY_TIMEOUT:-15}
 
 case "$install_tls" in 0|1) ;; *) echo "JIOTV_INSTALL_TLS must be 0 or 1" >&2; exit 2 ;; esac
 case "$start_service" in 0|1) ;; *) echo "JIOTV_START_SERVICE must be 0 or 1" >&2; exit 2 ;; esac
@@ -62,6 +63,23 @@ port_listening() {
   if printf '%s\n' "$owners" | grep -Eq '[0-9]+/[^ ]+|pid='; then
     printf '%s\n' "$owners" | grep -q jiotv
   fi
+}
+
+# Process IDs of running jiotv servers (empty when pidof is unavailable).
+jiotv_pids() { pidof jiotv 2>/dev/null || true; }
+
+# Stop the service and wait until the process has really exited: procd only
+# signals it on stop, so a lingering old process could otherwise be mistaken for
+# a new one or overwrite state. Fails when it does not exit in time.
+stop_service() {
+  "$init_script" stop || return 1
+  waited=0
+  while [ "$waited" -lt "$ready_timeout" ]; do
+    if [ -z "$(jiotv_pids)" ] && ! "$init_script" running >/dev/null 2>&1; then return 0; fi
+    waited=$((waited + 1))
+    sleep 1
+  done
+  return 1
 }
 
 # Print one uci option of the jiotv service, or the default when unavailable.
@@ -158,6 +176,11 @@ if [ "$openwrt" = true ]; then
 
   other_package=jiotv-slim
   [ "$variant" = slim ] && other_package=jiotv
+  init_script=${JIOTV_INIT_SCRIPT:-/etc/init.d/jiotv}
+  # Remember whether the service was already running: the package's own hook
+  # starts it on install, which JIOTV_START_SERVICE=0 must not leave behind.
+  was_running=false
+  if [ -x "$init_script" ] && "$init_script" running >/dev/null 2>&1; then was_running=true; fi
   say "Installing with $package_manager"
   if [ "$package_manager" = apk ]; then
     if apk info -e "$other_package" >/dev/null 2>&1; then apk del "$other_package"; fi
@@ -166,24 +189,31 @@ if [ "$openwrt" = true ]; then
     if opkg status "$other_package" 2>/dev/null | grep -q '^Status: .* installed$'; then opkg remove "$other_package"; fi
     opkg install "$tmp/$asset"
   fi
-  init_script=${JIOTV_INIT_SCRIPT:-/etc/init.d/jiotv}
   say "Enabling the service at boot"
   "$init_script" enable
 
   running=false
   disabled=false
   [ "$(uci_flag enabled 1)" = 1 ] || disabled=true
-  if [ "$start_service" = 1 ] && [ "$disabled" = true ]; then
+  if [ "$start_service" = 0 ]; then
+    if [ "$was_running" != true ] && "$init_script" running >/dev/null 2>&1; then
+      say "Stopping the service the package started (JIOTV_START_SERVICE=0)"
+      stop_service || echo "warning: the service did not stop; run '$init_script stop'" >&2
+    fi
+  elif [ "$disabled" = true ]; then
     say "The service is disabled in /etc/config/jiotv (option enabled '0'); leaving it stopped"
-  elif [ "$start_service" = 1 ]; then
-    # restart, not start: an upgrade must replace a process that is already running.
+  else
+    # Stop and wait before starting: an upgrade must replace the old process, and
+    # only a process started after the old one is gone proves the new binary runs.
     say "Starting the service"
-    if "$init_script" restart; then
-      http_port=$(uci_opt port 5001)
+    http_port=$(uci_opt port 5001)
+    if stop_service && "$init_script" start; then
       tries=0
-      ready_timeout=${JIOTV_READY_TIMEOUT:-15}
+      stable=0
       while [ "$tries" -lt "$ready_timeout" ]; do
-        if "$init_script" running >/dev/null 2>&1 && port_listening "$http_port"; then running=true; break; fi
+        if "$init_script" running >/dev/null 2>&1 && port_listening "$http_port"; then stable=$((stable + 1)); else stable=0; fi
+        # Ready only once it has stayed up across two checks, not just bound the port once.
+        if [ "$stable" -ge 2 ]; then running=true; break; fi
         tries=$((tries + 1))
         sleep 1
       done
@@ -191,7 +221,7 @@ if [ "$openwrt" = true ]; then
       else echo "warning: the service is not listening on port $http_port after $ready_timeout seconds" >&2
       fi
     else
-      echo "warning: '$init_script restart' failed" >&2
+      echo "warning: could not restart the service with '$init_script'" >&2
     fi
   fi
 

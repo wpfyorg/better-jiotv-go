@@ -605,6 +605,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn media_paths_reject_by_url_not_by_catalogue_lookup() {
+        // No channel is primed: a catalogue lookup would fail upstream and
+        // answer "not available" (404). The encrypted, epoch-bound URL is what
+        // authorizes media requests, so a bad one is rejected as such, with no
+        // per-segment catalogue fetch.
+        let state = test_state();
+        for uri in [
+            "/render.m3u8?auth=bogus&channel_key_id=154",
+            "/render.ts?auth=bogus&channel_key_id=154",
+            "/render.key?auth=bogus&channel_key_id=154",
+            "/drm?auth=bogus&channel_id=154",
+        ] {
+            let resp = send(state.clone(), uri).await;
+            assert_ne!(resp.status(), StatusCode::NOT_FOUND, "{uri}");
+            let text = body_text(resp).await;
+            assert!(!text.contains("not available for the active account"), "{uri}: {text}");
+        }
+    }
+
+    #[tokio::test]
     async fn rotated_epoch_preserves_stale_manifest_and_license_rejections() {
         let state = test_state();
         prime_tv_channel(&state, "154");

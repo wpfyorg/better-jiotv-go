@@ -26,6 +26,10 @@ const PLAYLIST_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 pub struct VodState {
     playback: Mutex<HashMap<String, (PlaybackData, Instant)>>,
     playlist: Mutex<Option<(String, Instant)>>,
+    /// Bumped by `clear` (account/product switch). A fetch captures it first
+    /// and stores its result only if it is unchanged, so a request that
+    /// outlived the switch cannot repopulate the cleared caches.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl VodState {
@@ -38,14 +42,39 @@ impl VodState {
         Some(data.clone())
     }
 
-    fn set_playback(&self, id: &str, data: PlaybackData) {
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Returns whether the entry was stored (false: the context changed).
+    fn set_playback(&self, id: &str, data: PlaybackData, generation: u64) -> bool {
         let mut map = self.playback.lock().unwrap();
+        if self.generation() != generation {
+            return false;
+        }
         map.retain(|_, (_, at)| at.elapsed() <= PLAYBACK_TTL);
         map.insert(id.to_string(), (data, Instant::now()));
+        true
+    }
+
+    /// Returns whether the playlist was stored (false: the context changed).
+    fn set_playlist(&self, xml: String, generation: u64) -> bool {
+        let mut slot = self.playlist.lock().unwrap();
+        if self.generation() != generation {
+            return false;
+        }
+        *slot = Some((xml, Instant::now()));
+        true
     }
 
     pub fn clear(&self) {
-        self.playback.lock().unwrap().clear();
+        // The bump happens under the playback lock that `set_playback` checks
+        // under, and before the playlist is cleared under its own lock.
+        let mut map = self.playback.lock().unwrap();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        map.clear();
+        drop(map);
         *self.playlist.lock().unwrap() = None;
     }
 }
@@ -63,6 +92,7 @@ async fn vod_playback(
     content_id: &str,
     fresh: bool,
 ) -> anyhow::Result<PlaybackData> {
+    let generation = state.vod_state.generation();
     if let Some(cached) = state.vod_state.get_playback(content_id, fresh) {
         return Ok(cached);
     }
@@ -73,7 +103,12 @@ async fn vod_playback(
         anyhow::anyhow!("connect the extra source in Settings to watch on-demand titles")
     })?;
     let resp = client.playback(content_id).await?;
-    state.vod_state.set_playback(content_id, resp.data.clone());
+    if !state
+        .vod_state
+        .set_playback(content_id, resp.data.clone(), generation)
+    {
+        anyhow::bail!("the active account changed while resolving this title; retry");
+    }
     Ok(resp.data)
 }
 
@@ -376,14 +411,22 @@ pub async fn vod_playlist_handler(
     // The cache holds the playlist with a placeholder base; the scheme and
     // host of the *current* request are substituted on every response, so
     // an http client and an https client never see each other's links.
+    let generation = state.vod_state.generation();
     let cached = { state.vod_state.playlist.lock().unwrap().clone() };
     let template = match cached {
         Some((xml, at)) if at.elapsed() <= PLAYLIST_TTL => xml,
         _ => {
             let entries = build_vod_playlist(&client).await;
             let xml = render_vod_playlist(&entries, BASE_PLACEHOLDER);
-            if !entries.is_empty() {
-                *state.vod_state.playlist.lock().unwrap() = Some((xml.clone(), Instant::now()));
+            // A playlist built for the previous account is neither cached nor
+            // returned if the context changed while it was being built.
+            let stored =
+                entries.is_empty() || state.vod_state.set_playlist(xml.clone(), generation);
+            if !stored {
+                return err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "The active account changed while this request was running; retry",
+                );
             }
             xml
         }
@@ -446,6 +489,20 @@ fn render_vod_playlist(entries: &[(VodItem, String)], base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_and_playlist_writes_from_before_a_clear_are_dropped() {
+        let state = VodState::default();
+        let started = state.generation();
+        assert!(state.set_playlist("<xml/>".into(), started));
+        state.clear();
+        assert!(state.playlist.lock().unwrap().is_none());
+        // Fetches that began before the clear must not repopulate the caches.
+        assert!(!state.set_playlist("<old/>".into(), started));
+        assert!(state.playlist.lock().unwrap().is_none());
+        assert!(state.playback.lock().unwrap().is_empty());
+        assert!(state.set_playlist("<new/>".into(), state.generation()));
+    }
 
     #[test]
     fn valid_content_id_rejects_bad_input() {

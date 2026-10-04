@@ -347,15 +347,24 @@ async fn serve(
         );
     }
 
+    // Validating the XMLTV cache needs the active channel catalogue, which can
+    // mean remote API calls with no timeout, so it runs off the startup path:
+    // the server must listen even if an upstream stalls. `/epg.xml.gz` answers
+    // 503 until validation has set the current fingerprint, so nothing stale is
+    // served in the meantime.
     let epg_path = format!("{path_prefix}epg.xml.gz");
-    if cfg.epg || std::path::Path::new(&epg_path).exists() {
-        if let Err(e) = epg::prepare_cache_for_state(&state).await {
-            state.epg_state.invalidate();
-            tracing::warn!("cannot validate the EPG cache for the active account: {e}");
-        }
-    }
-    if cfg.epg {
-        tokio::spawn(epg_task_loop(state.clone()));
+    let epg_enabled = cfg.epg;
+    if epg_enabled || std::path::Path::new(&epg_path).exists() {
+        let state = state.clone();
+        tokio::spawn(async move {
+            if let Err(e) = epg::prepare_cache_for_state(&state).await {
+                state.epg_state.invalidate();
+                tracing::warn!("cannot validate the EPG cache for the active account: {e}");
+            }
+            if epg_enabled {
+                epg_task_loop(state).await;
+            }
+        });
     }
 
     if !cfg.disable_auth {

@@ -244,6 +244,17 @@ async fn live_impl(
     quality: &str,
     prefix: &Option<axum::Extension<crate::api::KeyPrefix>>,
 ) -> Response {
+    let epoch = state.secure.current_epoch();
+    let response = live_impl_inner(state, id, quality, prefix).await;
+    state.stable_since(epoch, response)
+}
+
+async fn live_impl_inner(
+    state: &Arc<AppState>,
+    id: &str,
+    quality: &str,
+    prefix: &Option<axum::Extension<crate::api::KeyPrefix>>,
+) -> Response {
     if !state.channel_allowed(id).await {
         return (
             StatusCode::NOT_FOUND,
@@ -541,6 +552,12 @@ pub async fn render_m3u8_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<RenderQuery>,
 ) -> Response {
+    let epoch = state.secure.current_epoch();
+    let response = render_m3u8_inner(state.clone(), q).await;
+    state.stable_since(epoch, response)
+}
+
+async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
     let (Some(auth), Some(channel_id)) = (q.auth, q.channel_key_id) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -550,13 +567,6 @@ pub async fn render_m3u8_handler(
     };
     if channel_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
-    }
-    if !state.channel_allowed(&channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
     }
     let decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
@@ -703,13 +713,6 @@ pub async fn render_ts_handler(
     let Some(channel_id) = q.channel_key_id.filter(|id| !id.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
     };
-    if !state.channel_allowed(&channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
-    }
     let mut decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
@@ -796,13 +799,6 @@ pub async fn render_key_handler(
     let Some(channel_id) = q.channel_key_id.clone().filter(|id| !id.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
     };
-    if !state.channel_allowed(&channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
-    }
     let decoded = match state.secure.decrypt(&auth) {
         Ok(d) => d,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),

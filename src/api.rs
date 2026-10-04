@@ -414,16 +414,19 @@ pub async fn extras_verify_otp(
     if !state.extras.enabled() {
         return err(StatusCode::BAD_REQUEST, "extras is not enabled");
     }
-    // Block every old account-scoped artifact before the Extras client can
-    // install credentials returned by the OTP exchange.
-    state.invalidate_context();
     let result = state
         .extras
         .verify_otp(&body.number, &body.otp, &state.store)
         .await;
-    // Anything resolved while the exchange was in flight used the old account.
-    state.invalidate_context();
-    crate::epg::trigger_regeneration(&state);
+    // A wrong or mistyped OTP leaves the active account untouched, so it must
+    // not rotate the context and cut off existing viewers. Only a successful
+    // exchange installs new credentials; rotating then also discards anything
+    // resolved while it was in flight (the Extras and VOD caches are guarded by
+    // a generation, and URL-minting handlers re-check the epoch).
+    if matches!(result, Ok(true)) {
+        state.invalidate_context();
+        crate::epg::trigger_regeneration(&state);
+    }
     match result {
         Ok(ok) => Json(json!({"status": ok})).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
@@ -623,6 +626,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
         std::mem::forget(dir);
+        let extras = Arc::new(crate::extras_state::ExtrasState::new(false, None));
+        state_with(store, extras)
+    }
+
+    fn state_with(
+        store: Arc<Store>,
+        extras: Arc<crate::extras_state::ExtrasState>,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             config: Config::default(),
             path_prefix: String::new(),
@@ -636,12 +647,36 @@ mod tests {
             render_caches: Default::default(),
             dash_state: Default::default(),
             epg_state: Default::default(),
-            extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
+            extras,
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
             listen: Default::default(),
         })
+    }
+
+    #[tokio::test]
+    async fn failed_extras_otp_does_not_rotate_the_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
+        let extras = Arc::new(crate::extras_state::ExtrasState::new(true, None));
+        extras.init(&reqwest::Client::new(), &store);
+        let s = state_with(store, extras);
+        assert!(s.extras.enabled());
+        let before = s.secure.current_epoch();
+
+        // No OTP was sent first, so verification fails without changing the
+        // active account; existing viewers' URLs must keep working.
+        let resp = extras_verify_otp(
+            State(s.clone()),
+            Json(ExtrasVerifyOtpBody {
+                number: "9876543210".into(),
+                otp: "123456".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(s.secure.current_epoch(), before);
     }
 
     #[tokio::test]

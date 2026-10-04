@@ -62,6 +62,12 @@ pub struct ExtrasState {
     dash: RwLock<HashMap<String, bool>>,
     pending: Mutex<PendingLogin>,
     locks: KeyedLocks,
+    /// Bumped, under `commit`, every time the account-scoped caches are
+    /// cleared. A fetch captures it first and commits its result only if it is
+    /// unchanged, so a request that outlived an account switch cannot write the
+    /// previous account's catalogue or stream URLs back into the cleared caches.
+    generation: std::sync::atomic::AtomicU64,
+    commit: Mutex<()>,
 }
 
 impl ExtrasState {
@@ -88,6 +94,8 @@ impl ExtrasState {
             dash: RwLock::new(HashMap::new()),
             pending: Mutex::new(PendingLogin::default()),
             locks: KeyedLocks::default(),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            commit: Mutex::new(()),
         }
     }
 
@@ -111,7 +119,29 @@ impl ExtrasState {
         self.init(http, store);
     }
 
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Runs `commit` only if no clear happened since `generation` was read.
+    /// The check and the writes share the lock `clear_catalogue_state` holds
+    /// while it bumps the generation, so they cannot interleave.
+    fn commit_if_current<R>(&self, generation: u64, commit: impl FnOnce() -> R) -> Option<R> {
+        let _guard = self.commit.lock().unwrap();
+        (self.generation() == generation).then(commit)
+    }
+
+    fn clear_live(&self) {
+        let _guard = self.commit.lock().unwrap();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.live.write().unwrap().clear();
+    }
+
     fn clear_catalogue_state(&self) {
+        let _guard = self.commit.lock().unwrap();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.catalogue.write().unwrap().clear();
         *self.catalogue_fetched_at.write().unwrap() = None;
         *self.subscriptions.write().unwrap() = None;
@@ -154,7 +184,7 @@ impl ExtrasState {
         if let Some(client) = self.client.read().unwrap().as_ref() {
             client.set_credentials(creds.clone());
         }
-        self.live.write().unwrap().clear();
+        self.clear_live();
         // `extras_stream_kinds` is the current store key; `tvplus_dash` is
         // read as a fallback so an existing store's learned map survives
         // the rename, and gets migrated forward on the next save below.
@@ -221,6 +251,7 @@ impl ExtrasState {
         {
             return;
         }
+        let generation = self.generation();
         let fresh = self
             .catalogue_fetched_at
             .read()
@@ -252,10 +283,15 @@ impl ExtrasState {
                 (None, EntitlementStatus::UpstreamFailure)
             }
         };
-        *self.subscriptions.write().unwrap() = subscriptions.clone();
-        *self.entitlement_status.write().unwrap() = entitlement_status;
-        self.entitlements_applied
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let stored = self.commit_if_current(generation, || {
+            *self.subscriptions.write().unwrap() = subscriptions.clone();
+            *self.entitlement_status.write().unwrap() = entitlement_status;
+            self.entitlements_applied
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        });
+        if stored.is_none() {
+            return;
+        }
         match client.channels().await {
             Ok(mut fetched) => {
                 if let Some(map) = subscriptions.as_ref() {
@@ -270,18 +306,20 @@ impl ExtrasState {
                         None
                     }
                 };
-                let mut ext_ids = self.ext_ids.write().unwrap();
-                for ch in &fetched {
-                    if !ch.ext_id.is_empty() {
-                        ext_ids.insert(ch.content_id.clone(), ch.ext_id.clone());
+                self.commit_if_current(generation, || {
+                    let mut ext_ids = self.ext_ids.write().unwrap();
+                    for ch in &fetched {
+                        if !ch.ext_id.is_empty() {
+                            ext_ids.insert(ch.content_id.clone(), ch.ext_id.clone());
+                        }
                     }
-                }
-                drop(ext_ids);
-                if let Some(m) = mirrors {
-                    *self.mirrors.write().unwrap() = m;
-                }
-                *self.catalogue.write().unwrap() = fetched;
-                *self.catalogue_fetched_at.write().unwrap() = Some(Instant::now());
+                    drop(ext_ids);
+                    if let Some(m) = mirrors {
+                        *self.mirrors.write().unwrap() = m;
+                    }
+                    *self.catalogue.write().unwrap() = fetched;
+                    *self.catalogue_fetched_at.write().unwrap() = Some(Instant::now());
+                });
             }
             Err(e) => tracing::warn!("extras: cannot fetch channels: {e}"),
         }
@@ -419,6 +457,7 @@ impl ExtrasState {
         let client = self
             .client()
             .ok_or_else(|| anyhow::anyhow!("extras is not enabled"))?;
+        let generation = self.generation();
         if let Some((result, at)) = self.live.read().unwrap().get(content_id).cloned() {
             if at.elapsed() < LIVE_TTL {
                 return Ok(result);
@@ -444,23 +483,30 @@ impl ExtrasState {
         };
         let result = resp.to_live_url_output();
 
-        if !resp.data.ext_id.is_empty() {
-            self.ext_ids
-                .write()
-                .unwrap()
-                .insert(content_id.to_string(), resp.data.ext_id.clone());
-        }
-        for stream in [&result.mpd.auto, &result.result] {
-            if let Ok(u) = url::Url::parse(stream) {
-                if let Some(host) = u.host_str() {
-                    self.cdn_hosts.write().unwrap().insert(host.to_string());
+        // An account switch during the fetch leaves `result` belonging to the
+        // previous account: do not cache it and do not hand it to the caller.
+        let stored = self.commit_if_current(generation, || {
+            if !resp.data.ext_id.is_empty() {
+                self.ext_ids
+                    .write()
+                    .unwrap()
+                    .insert(content_id.to_string(), resp.data.ext_id.clone());
+            }
+            for stream in [&result.mpd.auto, &result.result] {
+                if let Ok(u) = url::Url::parse(stream) {
+                    if let Some(host) = u.host_str() {
+                        self.cdn_hosts.write().unwrap().insert(host.to_string());
+                    }
                 }
             }
+            self.live
+                .write()
+                .unwrap()
+                .insert(content_id.to_string(), (result.clone(), Instant::now()));
+        });
+        if stored.is_none() {
+            anyhow::bail!("the active account changed while resolving {content_id}; retry");
         }
-        self.live
-            .write()
-            .unwrap()
-            .insert(content_id.to_string(), (result.clone(), Instant::now()));
 
         let has_dash = has_dash(&result);
         let mut dash_map = self.dash.write().unwrap();
@@ -725,6 +771,29 @@ use crate::television::has_dash;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commits_apply_only_in_the_generation_they_started_in() {
+        let s = ExtrasState::new(false, None);
+        let started = s.generation();
+        assert_eq!(s.commit_if_current(started, || 7), Some(7));
+        // An account switch clears the caches and bumps the generation.
+        s.invalidate_account_context();
+        assert_ne!(s.generation(), started);
+        assert_eq!(
+            s.commit_if_current(started, || unreachable!("stale fetch must not commit")),
+            None
+        );
+        assert_eq!(s.commit_if_current(s.generation(), || 1), Some(1));
+    }
+
+    #[test]
+    fn clearing_the_live_cache_also_invalidates_in_flight_fetches() {
+        let s = ExtrasState::new(false, None);
+        let started = s.generation();
+        s.clear_live();
+        assert_eq!(s.commit_if_current(started, || ()), None);
+    }
 
     #[test]
     fn disabled_state_reports_not_connected() {

@@ -100,6 +100,15 @@ export function classifyPlaybackFailure({ dashError = null, hlsError = null, had
   return "generic";
 }
 
+// `/api/live/play` answers 404 "No stream found..." when the provider returned no
+// usable DASH or HLS source; that is the same provider-side outage a 404 from
+// the player reports. Other 404s (e.g. a channel not available for the active
+// account) stay generic.
+export function sourceResolutionFailure(error) {
+  const noStream = Number(error?.status) === 404 && /no stream found/i.test(error?.message ?? "");
+  return noStream ? "provider_unavailable" : "generic";
+}
+
 export async function loadLiveSource({ player, video, source, drmCapability = null, isCurrent = () => true, onTerminalError = () => {} }) {
   let fallbackPromise = null;
   let usingHls = false;

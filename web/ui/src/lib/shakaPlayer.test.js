@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyPlaybackFailure, loadLiveSource } from "./shakaPlayer.js";
+import { classifyPlaybackFailure, loadLiveSource, sourceResolutionFailure } from "./shakaPlayer.js";
 
 function deferred() {
   let resolve;
@@ -339,4 +339,11 @@ test("falls back to HLS on a critical Shaka error", async () => {
   dash.resolve();
   await loading;
   assert.deepEqual(player.loads, ["dash", "hls"]);
+});
+
+test("classifies a no-stream 404 from source resolution as provider_unavailable", () => {
+  assert.equal(sourceResolutionFailure({ status: 404, message: "No stream found for channel id: 154" }), "provider_unavailable");
+  assert.equal(sourceResolutionFailure({ status: 404, message: "Channel 154 is not available for the active account" }), "generic");
+  assert.equal(sourceResolutionFailure({ status: 500, message: "No stream found" }), "generic");
+  assert.equal(sourceResolutionFailure(new Error("network down")), "generic");
 });

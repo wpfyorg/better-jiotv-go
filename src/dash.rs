@@ -71,11 +71,19 @@ impl DashState {
     /// cache's write lock, which `clear` also takes after the context epoch
     /// rotates, so a fetch started before an account switch cannot repopulate
     /// the cleared cache.
-    fn set_live(&self, channel_id: &str, out: LiveUrlOutput, still_current: impl FnOnce() -> bool) {
+    /// Returns whether the entry was stored.
+    fn set_live(
+        &self,
+        channel_id: &str,
+        out: LiveUrlOutput,
+        still_current: impl FnOnce() -> bool,
+    ) -> bool {
         let mut map = self.live_cache.write().unwrap();
-        if still_current() {
-            map.insert(channel_id.to_string(), (out, Instant::now()));
+        if !still_current() {
+            return false;
         }
+        map.insert(channel_id.to_string(), (out, Instant::now()));
+        true
     }
 
     fn record_publish_time(&self, t: SystemTime) {
@@ -141,12 +149,19 @@ pub(crate) async fn get_live_cached(
     if let Some(cached) = state.dash_state.get_live(channel_id) {
         return Ok(cached);
     }
-    let epoch = state.secure.current_epoch();
-    let live = crate::stream::fetch_live(state, channel_id).await?;
-    state.dash_state.set_live(channel_id, live.clone(), || {
-        state.secure.current_epoch() == epoch
-    });
-    Ok(live)
+    // A result fetched before an account/product switch must not reach the
+    // caller either: it would be re-encrypted under the new epoch. Retry once,
+    // then give up and let the viewer reload.
+    for _ in 0..2 {
+        let epoch = state.secure.current_epoch();
+        let live = crate::stream::fetch_live(state, channel_id).await?;
+        if state.dash_state.set_live(channel_id, live.clone(), || {
+            state.secure.current_epoch() == epoch
+        }) {
+            return Ok(live);
+        }
+    }
+    anyhow::bail!("the active account changed while resolving channel {channel_id}; retry")
 }
 
 pub(crate) async fn get_drm_mpd(
@@ -903,7 +918,7 @@ mod tests {
     #[test]
     fn live_cache_discards_fetches_that_outlived_their_context() {
         let state = DashState::default();
-        state.set_live("154", LiveUrlOutput::default(), || false);
+        assert!(!state.set_live("154", LiveUrlOutput::default(), || false));
         assert!(state.get_live("154").is_none());
     }
 

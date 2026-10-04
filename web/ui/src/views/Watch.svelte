@@ -1,7 +1,7 @@
 <script>
   import { onDestroy } from "svelte";
   import { api, loadChannels, formatTime } from "../lib/api.js";
-  import { createShakaPlayer, loadLiveSource, widevineCapability } from "../lib/shakaPlayer.js";
+  import { createShakaPlayer, loadLiveSource, sourceResolutionFailure, widevineCapability } from "../lib/shakaPlayer.js";
 
   let { id } = $props();
 
@@ -86,7 +86,10 @@
         },
       });
     } catch (err) {
-      if (isCurrent()) playerError = err.message || String(err);
+      if (isCurrent()) {
+        playerError = err.message || String(err);
+        playerFailure = sourceResolutionFailure(err);
+      }
     }
   }
 

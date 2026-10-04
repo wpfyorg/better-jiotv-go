@@ -45,11 +45,11 @@ try {
     }
     Write-Output "Installed jiotv ($Variant, $target) to $destination"
     if ($NoTls) {
-        Write-Output 'Next: jiotv login otp; jiotv admin password; jiotv serve'
+        Write-Output 'Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0'
         Write-Output 'Browser UI: http://<host>:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)'
     }
     else {
-        Write-Output 'Next: jiotv login otp; jiotv admin password; jiotv serve --tls'
+        Write-Output 'Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0 --tls'
         Write-Output 'Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<host>:5443/'
         Write-Output 'IPTV apps (plain HTTP playlist): http://<host>:5001/'
     }

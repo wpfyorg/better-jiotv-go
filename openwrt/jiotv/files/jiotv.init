@@ -30,9 +30,11 @@ start_service() {
 	procd_set_param command /usr/bin/jiotv --skip-update-check serve --host "$host" --port "$port"
 	if [ "$tls" -eq 1 ]; then
 		procd_append_param command --tls --tls-port "$tls_port"
-		if [ -n "$tls_cert" ] && [ -n "$tls_key" ]; then
-			procd_append_param command --tls-cert "$tls_cert" --tls-key "$tls_key"
-		fi
+		# Pass each option through on its own: a lone cert or key must reach the
+		# binary, which rejects an incomplete pair instead of silently falling
+		# back to a self-signed certificate.
+		[ -n "$tls_cert" ] && procd_append_param command --tls-cert "$tls_cert"
+		[ -n "$tls_key" ] && procd_append_param command --tls-key "$tls_key"
 	fi
 	procd_set_param env JIOTV_PATH_PREFIX=/etc/jiotv
 	procd_set_param env "JIOTV_EPG=$epg" "JIOTV_EXTRAS=$extras" "JIOTV_DEBUG=$debug" "JIOTV_DRM=$drm" "JIOTV_DISABLE_AUTH=$disable_auth"

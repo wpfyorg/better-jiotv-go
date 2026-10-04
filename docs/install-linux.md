@@ -8,7 +8,7 @@ curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/script
 
 The default is `full`. Set `JIOTV_VARIANT=slim` for a headless installation. Set `JIOTV_INSTALL_TLS=0` to omit the HTTPS instructions from the installer output. Set `JIOTV_VERSION`, `JIOTV_REPO`, or `JIOTV_INSTALL_DIR` to select a release or install location. Without an override, the installer uses `/usr/local/bin` when run as root and writable, otherwise `$HOME/.local/bin`.
 
-Data defaults to `$HOME/.jiotv_go`; set `JIOTV_PATH_PREFIX` for a service-managed location. Run `jiotv login otp`, then `jiotv admin password`, and start with `jiotv serve --tls`. For systemd use `jiotv autostart --args "--host 0.0.0.0 --port 5001 --tls"`; see [Homelab / VM / LXC](install-homelab.md) for a dedicated service user example.
+Data defaults to `$HOME/.jiotv_go`; set `JIOTV_PATH_PREFIX` for a service-managed location. Run `jiotv login otp`, then `jiotv admin password`, and start with `jiotv serve --host 0.0.0.0 --tls`. For systemd use `jiotv autostart --args "--host 0.0.0.0 --port 5001 --tls"`; see [Homelab / VM / LXC](install-homelab.md) for a dedicated service user example.
 
 Open the UI at `https://<host>:5443/` (self-signed certificate; accept the one-time browser warning) because browsers need HTTPS for protected playback, and give IPTV apps the `http://<host>:5001/` playlist. See [HTTPS in Usage](usage.md#https).
 

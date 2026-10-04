@@ -25,7 +25,7 @@ Confirm the account is logged in and the upstream content is available in the of
 The browser blocks Widevine (EME) and Web Crypto on plain HTTP pages that are not `localhost`, so protected or AES-encrypted channels fail to start.
 
 1. Open the UI over HTTPS: `https://<host>:5443/`, or use the `--tunnel` URL.
-2. If the server was started without `--tls`, add it (`jiotv serve --tls`); on OpenWrt set `option tls '1'` in `/etc/config/jiotv` and restart the service; in Docker publish port 5443 with `-p 5443:5443`.
+2. If the server was started without `--tls`, add it (for example `jiotv serve --host 0.0.0.0 --tls`); on OpenWrt set `option tls '1'` in `/etc/config/jiotv` and restart the service; in Docker publish port 5443 with `-p 5443:5443`.
 3. Accept the one-time self-signed certificate warning (Advanced, then proceed). Compare the SHA-256 fingerprint printed at server startup if you want to verify it.
 4. Allow port 5443 through the host or LAN firewall.
 

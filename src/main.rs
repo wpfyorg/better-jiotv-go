@@ -18,8 +18,8 @@ mod state;
 mod store;
 mod stream;
 mod television;
-mod token_refresh;
 mod tls;
+mod token_refresh;
 mod tunnel;
 mod unlock;
 mod update;
@@ -368,11 +368,14 @@ async fn serve(
         #[cfg(feature = "full")]
         if !access.has_password() {
             let setup = playlist.trim_end_matches("playlist.m3u").to_string();
-            println!(
-                "Web setup: http://{}:{}{setup} (or run: jiotv admin password)",
-                display_host(&args.host),
-                args.port
-            );
+            // The setup link carries the access key and takes the new admin
+            // password, so with TLS enabled it must be the HTTPS one.
+            let origin = if args.tls {
+                format!("https://{}:{}", reachable_host(&args.host), args.tls_port)
+            } else {
+                format!("http://{}:{}", display_host(&args.host), args.port)
+            };
+            println!("Web setup: {origin}{setup} (or run: jiotv admin password)");
         }
     } else {
         println!("Auth is disabled: playlist at /playlist.m3u");
@@ -388,8 +391,7 @@ async fn serve(
             tls::load_or_create(&args.tls_cert, &args.tls_key, &path_prefix, &args.host)?;
         let tls_listener =
             tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.tls_port)).await?;
-        let host = display_host(&args.host);
-        let origin = format!("https://{host}:{}", args.tls_port);
+        let origin = format!("https://{}:{}", reachable_host(&args.host), args.tls_port);
         if material.generated {
             println!("Generated a self-signed TLS certificate in {path_prefix}tls/");
         }
@@ -519,6 +521,15 @@ fn build_app_state(
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// The host to print in a URL meant to be opened from another device. A
+/// wildcard bind address names no machine, so it becomes a placeholder.
+fn reachable_host(host: &str) -> String {
+    match host {
+        "0.0.0.0" | "[::]" | "::" | "[::0]" | "0:0:0:0:0:0:0:0" => "<server-ip>".to_string(),
+        other => display_host(other),
+    }
 }
 
 fn display_host(host: &str) -> String {
@@ -825,7 +836,10 @@ mod tests {
             })
             .unwrap_err();
             assert!(err.to_string().contains("did not stop in time"));
-            assert!(!changed, "must not touch the store while the service lingers");
+            assert!(
+                !changed,
+                "must not touch the store while the service lingers"
+            );
             assert!(!actions(dir.path()).contains(&"start".to_string()));
         }
 
@@ -851,9 +865,20 @@ mod tests {
         fn failed_change_still_restores_a_running_service() {
             let dir = tempfile::tempdir().unwrap();
             let init = fake_init(dir.path(), true);
-            let err = with_service_stopped(&init, TIMEOUT, || anyhow::bail!("disk full")).unwrap_err();
+            let err =
+                with_service_stopped(&init, TIMEOUT, || anyhow::bail!("disk full")).unwrap_err();
             assert!(err.to_string().contains("disk full"));
             assert_eq!(actions(dir.path()), ["stop", "start"]);
         }
+    }
+
+    #[test]
+    fn wildcard_binds_print_a_placeholder_instead_of_the_bind_address() {
+        for wildcard in ["0.0.0.0", "[::]", "::"] {
+            assert_eq!(reachable_host(wildcard), "<server-ip>", "{wildcard}");
+        }
+        assert_eq!(reachable_host("localhost"), "localhost");
+        assert_eq!(reachable_host(""), "localhost");
+        assert_eq!(reachable_host("192.168.1.10"), "192.168.1.10");
     }
 }

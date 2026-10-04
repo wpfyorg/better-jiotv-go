@@ -121,8 +121,8 @@ if [ "$openwrt" = true ]; then
     echo "Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<router-ip>:5443/"
     echo "IPTV apps (plain HTTP playlist): http://<router-ip>:5001/"
   else
-    echo "HTTPS is off for this install: set 'option tls 0' in /etc/config/jiotv. Browser UI: http://<router-ip>:5001/"
-    echo "Note: browsers need HTTPS or localhost for DRM and encrypted HLS playback."
+    echo "HTTPS instructions are off for this install (JIOTV_INSTALL_TLS=0); the service setting is unchanged, so HTTPS stays on unless you set 'option tls 0' in /etc/config/jiotv."
+    echo "Browser UI over plain HTTP: http://<router-ip>:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback)."
   fi
   exit 0
 fi
@@ -174,10 +174,10 @@ fi
 echo "Installed jiotv ($variant, $target) to $install_dir/jiotv"
 case ":${PATH:-}:" in *":$install_dir:"*) ;; *) echo "Add $install_dir to PATH to run jiotv directly." ;; esac
 if [ "$install_tls" = 1 ]; then
-  echo "Next: jiotv login otp; jiotv admin password; jiotv serve --tls"
+  echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0 --tls"
   echo "Browser UI (HTTPS, self-signed certificate; accept the one-time warning): https://<host>:5443/"
   echo "IPTV apps (plain HTTP playlist): http://<host>:5001/"
 else
-  echo "Next: jiotv login otp; jiotv admin password; jiotv serve"
+  echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0"
   echo "Browser UI: http://<host>:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)"
 fi

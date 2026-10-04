@@ -8,7 +8,7 @@ irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/insta
 
 The default location is `%LOCALAPPDATA%\Programs\JioTV`. The installer verifies `SHA256SUMS` and adds that directory to the user `PATH` idempotently. Parameters include `-Variant slim`, `-Version 1.1.0`, `-InstallDir`, `-Repo owner/name`, and `-NoTls` (or `JIOTV_INSTALL_TLS=0`) to omit the HTTPS instructions from the installer output. Open a new terminal if the updated PATH is not available in the current session.
 
-Release binaries are unsigned; Windows SmartScreen may show a warning. No built-in Windows service manager is provided. Start `jiotv serve --tls` from a terminal or use a separately configured service wrapper.
+Release binaries are unsigned; Windows SmartScreen may show a warning. No built-in Windows service manager is provided. Start `jiotv serve --host 0.0.0.0 --tls` from a terminal or use a separately configured service wrapper.
 
 Data uses the Windows profile directory when `HOME` is unavailable. Run `jiotv login otp`, then `jiotv admin password`. Update with `jiotv update`; the updater stages the new executable and replaces it after the current process exits. Uninstall by removing `jiotv.exe` and, if desired, the application data directory.
 

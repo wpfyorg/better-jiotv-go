@@ -186,6 +186,14 @@ if grep -x "start" "$tmp/openwrt-nostart-init" >/dev/null || [ -e "$JIOTV_TEST_I
   echo "JIOTV_START_SERVICE=0 still started the service" >&2
   exit 1
 fi
+# A package that registered a respawning service which is momentarily "not running" is stopped too.
+rm -f "$JIOTV_TEST_INIT_STATE"
+JIOTV_PLATFORM=openwrt JIOTV_START_SERVICE=0 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-respawn-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-respawn-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  JIOTV_TEST_INIT_LOG="$tmp/openwrt-respawn-init" PATH="$tmp/bin:$PATH" \
+  sh "$root/scripts/install.sh" >/dev/null
+grep -x "stop" "$tmp/openwrt-respawn-init" >/dev/null
 # If the package-started service cannot be stopped the install must fail, not claim success.
 rm -f "$JIOTV_TEST_INIT_STATE"
 if JIOTV_PLATFORM=openwrt JIOTV_START_SERVICE=0 JIOTV_TEST_POSTINST_STARTS=1 JIOTV_TEST_STOP_FAILS=1 JIOTV_READY_TIMEOUT=1 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
@@ -257,6 +265,13 @@ if grep -F "https://" "$tmp/openwrt-notls-output" >/dev/null; then
   exit 1
 fi
 grep -F "Browser UI : http://" "$tmp/openwrt-notls-output" >/dev/null
+# Every IPv6 wildcard spelling advertises the router address, and a one-second timeout still succeeds.
+JIOTV_PLATFORM=openwrt JIOTV_TEST_UCI_HOST='[::0]' JIOTV_READY_TIMEOUT=1 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-wild-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-wild-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  PATH="$tmp/bin:$PATH" sh "$root/scripts/install.sh" >"$tmp/openwrt-wild-output"
+grep -F "https://192.168.8.1:5443/" "$tmp/openwrt-wild-output" >/dev/null
+grep -F "is installed and running" "$tmp/openwrt-wild-output" >/dev/null
 # A service bound to one address advertises that address, a wildcard bind the LAN address.
 JIOTV_PLATFORM=openwrt JIOTV_TEST_UCI_HOST=127.0.0.1 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-host-downloads" \
@@ -277,10 +292,10 @@ if grep -E "Browser UI|browser UI|admin password" "$tmp/openwrt-slim-output" | g
   echo "slim install printed browser steps" >&2
   exit 1
 fi
-grep -F "stop; sleep 3; jiotv login otp" "$tmp/openwrt-slim-output" >/dev/null
+grep -F "stop; while pidof jiotv >/dev/null; do sleep 1; done; jiotv login otp" "$tmp/openwrt-slim-output" >/dev/null
 # The admin password comes before signing in, and terminal login stops the service.
 grep -n "Set the admin password" "$tmp/openwrt-apk-output" | grep -F "1." >/dev/null
-grep -F "stop; sleep 3; jiotv login otp" "$tmp/openwrt-apk-output" >/dev/null
+grep -F "stop; while pidof jiotv >/dev/null; do sleep 1; done; jiotv login otp" "$tmp/openwrt-apk-output" >/dev/null
 if JIOTV_PLATFORM=openwrt JIOTV_TEST_PACKAGE_ARCH=aarch64_cortex-a72 \
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-unsupported-package" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >/dev/null 2>&1; then

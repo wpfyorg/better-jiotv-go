@@ -30,7 +30,7 @@ jiotv admin password
 To sign in to JioTV from the terminal instead, stop the service first so it cannot overwrite the new login:
 
 ```sh
-/etc/init.d/jiotv stop; sleep 3
+/etc/init.d/jiotv stop; while pidof jiotv >/dev/null; do sleep 1; done
 jiotv login otp
 /etc/init.d/jiotv start
 ```

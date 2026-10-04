@@ -7,6 +7,9 @@ version=${JIOTV_VERSION:-latest}
 install_tls=${JIOTV_INSTALL_TLS:-1}
 start_service=${JIOTV_START_SERVICE:-1}
 ready_timeout=${JIOTV_READY_TIMEOUT:-15}
+case "$ready_timeout" in ''|*[!0-9]*) echo "JIOTV_READY_TIMEOUT must be a number of seconds" >&2; exit 2 ;; esac
+# Readiness needs two consecutive good checks, so fewer than two seconds can never succeed.
+[ "$ready_timeout" -ge 2 ] || ready_timeout=2
 
 case "$install_tls" in 0|1) ;; *) echo "JIOTV_INSTALL_TLS must be 0 or 1" >&2; exit 2 ;; esac
 case "$start_service" in 0|1) ;; *) echo "JIOTV_START_SERVICE must be 0 or 1" >&2; exit 2 ;; esac
@@ -198,8 +201,10 @@ if [ "$openwrt" = true ]; then
   disabled=false
   [ "$(uci_flag enabled 1)" = 1 ] || disabled=true
   if [ "$start_service" = 0 ]; then
-    if [ "$was_running" != true ] && "$init_script" running >/dev/null 2>&1; then
-      say "Stopping the service the package started (JIOTV_START_SERVICE=0)"
+    if [ "$was_running" != true ]; then
+      # The package hook may have started it, or left it between procd respawns where
+      # "running" is briefly false, so stop unconditionally rather than only if running.
+      say "Making sure the service is stopped (JIOTV_START_SERVICE=0)"
       stop_service || stop_failed=true
     fi
     # What is left running now was running before and is deliberately untouched.
@@ -239,7 +244,7 @@ if [ "$openwrt" = true ]; then
   # the router's LAN address, so any other host is advertised as configured.
   bind_host=$(uci_opt host 0.0.0.0)
   case "$bind_host" in
-    0.0.0.0|::|'[::]') ip=$(router_ip) ;;
+    0.0.0.0|::|'[::]'|'[::0]'|::0|0:0:0:0:0:0:0:0) ip=$(router_ip) ;;
     \[*) ip=$bind_host ;;
     *:*) ip="[$bind_host]" ;;
     *) ip=$bind_host ;;
@@ -277,13 +282,13 @@ if [ "$openwrt" = true ]; then
   fi
   if [ "$variant" = slim ]; then
     echo "  $step. Sign in to JioTV from the terminal (you enter the OTP yourself). Stop the service first so it cannot overwrite the login:"
-    echo "       $init_script stop; sleep 3; jiotv login otp; $init_script start"
+    echo "       $init_script stop; while pidof jiotv >/dev/null; do sleep 1; done; jiotv login otp; $init_script start"
   else
     echo "  $step. Set the admin password: jiotv admin password"
     step=$((step + 1))
     echo "  $step. Open the browser UI, log in with that password, then sign in to JioTV (you enter the OTP yourself)."
     echo "  To sign in to JioTV from the terminal instead, stop the service first so it cannot overwrite the login:"
-    echo "    $init_script stop; sleep 3; jiotv login otp; $init_script start"
+    echo "    $init_script stop; while pidof jiotv >/dev/null; do sleep 1; done; jiotv login otp; $init_script start"
   fi
   echo
   echo "Service control: $init_script start|stop|restart    Logs: logread -e jiotv"

@@ -56,7 +56,7 @@ For OpenWrt, the installer already started the service. Set the admin password, 
 
 ```sh
 jiotv admin password
-/etc/init.d/jiotv stop; sleep 3
+/etc/init.d/jiotv stop; while pidof jiotv >/dev/null; do sleep 1; done
 jiotv login otp
 /etc/init.d/jiotv start
 ```

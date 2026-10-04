@@ -82,8 +82,16 @@ export function playbackErrorMessage(error, capability = null) {
   return error?.message || String(error || "Playback failed");
 }
 
+// Shaka reports a failed license request as LICENSE_REQUEST_FAILED (6007) with
+// the underlying network error in data[0]; the HTTP status lives on that one.
+function unwrapLicenseError(error) {
+  const inner = Number(error?.code) === 6007 ? error?.data?.[0] : null;
+  return inner && typeof inner === "object" ? inner : error;
+}
+
 // Shaka BAD_HTTP_STATUS (1001) carries [uri, status, ...] in error.data.
 export function playbackHttpStatus(error) {
+  error = unwrapLicenseError(error);
   const status = error?.httpStatus ?? error?.data?.httpStatus ?? (Number(error?.code) === 1001 ? error?.data?.[1] : undefined);
   const n = Number(status);
   return Number.isFinite(n) ? n : null;
@@ -101,7 +109,9 @@ export function classifyPlaybackFailure({ dashError = null, hlsError = null, had
   const drmCause = (error) =>
     !!error && isDrmPlaybackError(error) && (Number(error.code) === 6001 || (!!capability && !capability.usable));
   if (drmCause(dashError) && (!hadHls || hlsError)) return "browser_unsupported";
-  if (playbackHttpStatus(hlsError ?? dashError) === 404) return "provider_unavailable";
+  const status = playbackHttpStatus(hlsError ?? dashError);
+  if (status === 404) return "provider_unavailable";
+  if (status === 401 || status === 403) return "provider_denied";
   return "generic";
 }
 
@@ -111,7 +121,24 @@ export function classifyPlaybackFailure({ dashError = null, hlsError = null, had
 // account) stay generic.
 export function sourceResolutionFailure(error) {
   const noStream = Number(error?.status) === 404 && /no stream found/i.test(error?.message ?? "");
-  return noStream ? "provider_unavailable" : "generic";
+  if (noStream) return "provider_unavailable";
+  return sourceDenialStatus(error) ? "provider_denied" : "generic";
+}
+
+// The provider's own refusal (HTTP 401/403) behind a failed source request.
+// `/api/live/play` reports an upstream refusal as a server error whose message
+// carries the provider's status line, e.g. "HTTP status client error (403
+// Forbidden) for url (...)"; a proper 403 from this server counts too. Returns
+// the status, or null when the failure is anything else.
+export function sourceDenialStatus(error) {
+  if (Number(error?.status) === 403) return 403;
+  const message = error?.message ?? "";
+  const m = /\((40[13])\s+[A-Za-z ]+\)/.exec(message);
+  if (m) return Number(m[1]);
+  // The extra source's playback API answers an unsubscribed channel with a 401
+  // that the server turns into this sentence, dropping the status line.
+  if (/is not in your extras plan/i.test(message)) return 401;
+  return null;
 }
 
 export async function loadLiveSource({ player, video, source, drmCapability = null, secureContext = globalThis.isSecureContext ?? true, isCurrent = () => true, onTerminalError = () => {} }) {

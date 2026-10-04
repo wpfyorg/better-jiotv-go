@@ -1,7 +1,14 @@
 <script>
   import { onDestroy } from "svelte";
   import { api, loadChannels, formatTime } from "../lib/api.js";
-  import { createShakaPlayer, loadLiveSource, sourceResolutionFailure, widevineCapability } from "../lib/shakaPlayer.js";
+  import {
+    createShakaPlayer,
+    loadLiveSource,
+    playbackHttpStatus,
+    sourceDenialStatus,
+    sourceResolutionFailure,
+    widevineCapability,
+  } from "../lib/shakaPlayer.js";
 
   let { id } = $props();
 
@@ -13,6 +20,8 @@
   let video = $state();
   let playerError = $state("");
   let playerFailure = $state("generic");
+  // The provider's HTTP status behind a denial, shown as a small technical detail.
+  let playerStatus = $state(null);
   let cleanup = null;
   let playbackGeneration = 0;
 
@@ -50,6 +59,7 @@
     cleanup = null;
     playerError = "";
     playerFailure = "generic";
+    playerStatus = null;
 
     try {
       const d = await api(`/api/live/play/${encodeURIComponent(channelID)}?q=${q}`);
@@ -83,12 +93,14 @@
         onTerminalError: (message, info) => {
           playerError = message;
           playerFailure = info?.kind ?? "generic";
+          playerStatus = playbackHttpStatus(info?.hlsError ?? info?.dashError);
         },
       });
     } catch (err) {
       if (isCurrent()) {
         playerError = err.message || String(err);
         playerFailure = sourceResolutionFailure(err);
+        playerStatus = sourceDenialStatus(err);
       }
     }
   }
@@ -145,8 +157,36 @@
         <a class="overlay-action" href="#/">All channels</a>
         <small>{playerError}</small>
       </div>
+    {:else if playerError && playerFailure === "provider_denied"}
+      <div class="player-error player-overlay" role="alert" data-playback-state="provider_denied">
+        {#if channel?.requiresSubscription}
+          <h2>Subscription required</h2>
+          <p>
+            This is a premium channel and the provider refused to play it. Your account most likely does not include a
+            subscription for it.
+          </p>
+        {:else}
+          <h2>The provider refused playback</h2>
+          <p>
+            The provider denied this request. Your account may not have access to this channel, or its session needs
+            refreshing. Try again, or pick another channel.
+          </p>
+        {/if}
+        <div class="overlay-actions">
+          <a class="overlay-action" href="#/">All channels</a>
+          <button class="overlay-action secondary" onclick={() => start(id, quality)}>Try again</button>
+        </div>
+        {#if playerStatus}<small>Provider response: HTTP {playerStatus}</small>{/if}
+      </div>
     {:else if playerError}
-      <p class="player-error" role="alert" data-playback-state="generic">{playerError}</p>
+      <div class="player-error player-overlay" role="alert" data-playback-state="generic">
+        <h2>Playback failed</h2>
+        <p>{playerError}</p>
+        <div class="overlay-actions">
+          <button class="overlay-action" onclick={() => start(id, quality)}>Try again</button>
+          <a class="overlay-action secondary" href="#/">All channels</a>
+        </div>
+      </div>
     {/if}
   </div>
 
@@ -160,7 +200,6 @@
           {#if channel?.extras}<span class="badge extras">Extra</span>{/if}
           {#if channel?.requiresSubscription}<span class="badge premium">Premium</span>{/if}
         </p>
-        {#if channel?.requiresSubscription}<p class="subscription-notice" role="note">A subscription may be required to play this channel.</p>{/if}
       </div>
     </div>
 
@@ -295,6 +334,9 @@
     font-weight: 650;
   }
   .overlay-action:hover { filter: brightness(1.08); }
+  button.overlay-action { border: 0; cursor: pointer; font-family: inherit; }
+  .overlay-action.secondary { color: #fff; background: rgba(255, 255, 255, .14); }
+  .overlay-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 4px; }
   .overlay-action:focus-visible { outline: 0; box-shadow: var(--focus); }
 
   /* Shaka UI theme: builds on the shared overrides in app.css using app tokens. */
@@ -379,7 +421,6 @@
   .channel-copy { min-width: 0; }
   h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; line-height: 1.2; letter-spacing: -.02em; }
   .badge.premium { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
-  .subscription-notice { margin: 8px 0 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); border-radius: 8px; color: var(--danger); font-size: 13px; }
   h1 + p { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; font-size: 12px; }
   .section-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; font-weight: 750; letter-spacing: .035em; }
   .section-title > span { color: var(--text); }

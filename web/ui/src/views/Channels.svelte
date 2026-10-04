@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { api, loadChannels, looksLikeUnlockCode } from "../lib/api.js";
+  import { latestOnly } from "../lib/latest.js";
 
   const saved = (() => {
     try {
@@ -31,13 +32,52 @@
   // If (and only if) the search box holds something shaped like the extras
   // unlock code, try it against the server. An ordinary search never
   // matches this shape, so it never leaves the browser.
+  // The initial load and the reload after an unlock can overlap; only the one
+  // started last may publish, so a late pre-unlock result cannot overwrite the
+  // extras catalogue (or restore an error the reload cleared).
+  const loads = latestOnly();
   let triedCode = "";
+  // Set once a code is accepted. A wrong code stays silent on purpose: it must
+  // not reveal that this box does anything other than search.
+  let unlockNotice = $state(null);
   $effect(() => {
     const q = query.trim();
+    // A rejected or failed attempt is remembered only while the box still holds
+    // that value, so it is not resent on every edit but can be tried again once
+    // the viewer has cleared or changed it.
+    if (triedCode && q !== triedCode) triedCode = "";
     if (q && q !== triedCode && looksLikeUnlockCode(q)) {
       triedCode = q;
       api("/api/extras/unlock", { method: "POST", body: { code: q } })
-        .then(() => window.dispatchEvent(new CustomEvent("jiotv:extras-changed")))
+        .then(async (d) => {
+          // The code is not a search term; clear it so the list is not empty,
+          // unless the viewer has meanwhile typed something else.
+          if (query.trim() === q) query = "";
+          triedCode = "";
+          unlockNotice = { connected: !!d?.extras?.connected };
+          window.dispatchEvent(new CustomEvent("jiotv:extras-changed"));
+          const isLatest = loads.start();
+          try {
+            const list = await loadChannels(true);
+            if (isLatest()) {
+              channels = list;
+              // A failed first load must not keep hiding a list that now loaded,
+              // and this refresh may finish before the older request does.
+              error = "";
+              loading = false;
+            }
+          } catch (err) {
+            // The code was accepted but the list could not be refreshed: keep what
+            // is shown and say so, instead of claiming extra channels are listed.
+            if (isLatest()) {
+              if (unlockNotice) unlockNotice = { ...unlockNotice, refreshFailed: true };
+              // The older initial request can no longer publish, so end the loading
+              // state here; with nothing to show, report the failure instead.
+              if (!channels.length && !error) error = err.message;
+              loading = false;
+            }
+          }
+        })
         .catch(() => {});
     }
   });
@@ -59,15 +99,38 @@
   });
 
   onMount(async () => {
+    const isLatest = loads.start();
     try {
-      channels = await loadChannels();
+      const list = await loadChannels();
+      if (isLatest()) channels = list;
     } catch (err) {
-      error = err.message;
+      if (isLatest()) error = err.message;
     } finally {
-      loading = false;
+      // An unlock refresh that started meanwhile owns the loading state.
+      if (isLatest()) loading = false;
     }
   });
 </script>
+
+{#if unlockNotice}
+  <div class="unlock-notice" role="status">
+    <span class="unlock-icon" aria-hidden="true">✓</span>
+    <div class="unlock-copy">
+      <strong>Extra channels unlocked</strong>
+      <span>
+        {#if unlockNotice.refreshFailed}
+          The channel list could not be refreshed. Reload the page to see the extra channels.
+        {:else if unlockNotice.connected}
+          The extra source is connected; its channels are listed below.
+        {:else}
+          Login with number with access to the extra in Settings to be able to play its channels.
+        {/if}
+      </span>
+    </div>
+    {#if !unlockNotice.connected}<a class="unlock-link" href="#/settings">Open Settings</a>{/if}
+    <button class="unlock-dismiss" aria-label="Dismiss" onclick={() => (unlockNotice = null)}>×</button>
+  </div>
+{/if}
 
 <section class="filters" aria-label="Filters">
   <input class="input search" type="search" placeholder="Search channels" bind:value={query} aria-label="Search channels" />
@@ -113,6 +176,44 @@
 {/if}
 
 <style>
+  .unlock-notice {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--extras) 45%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--extras) 12%, var(--surface));
+  }
+  .unlock-icon {
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    color: #0b1020;
+    background: var(--extras);
+    font-size: 14px;
+    font-weight: 800;
+  }
+  .unlock-copy { display: grid; gap: 2px; min-width: 0; flex: 1 1 auto; font-size: 13px; }
+  .unlock-copy span { color: var(--muted); }
+  .unlock-link { color: var(--extras); font-size: 13px; font-weight: 650; white-space: nowrap; }
+  .unlock-dismiss {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 8px;
+    color: var(--muted);
+    background: transparent;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .unlock-dismiss:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
   .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
   .filters .input { width: auto; }
   .search { flex: 1 1 240px; }

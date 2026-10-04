@@ -48,15 +48,20 @@ verify_asset() {
 
 size_kib() { echo $(( $(wc -c <"$1") / 1024 )); }
 
-# True when something listens on the TCP port. Only when no socket listing tool
-# works is the answer "unknown", which counts as success so it never blocks.
+# True when JioTV listens on the TCP port. When the socket listing names the
+# owner it must be jiotv, so another daemon holding the port does not count;
+# without owner information, or without a listing tool, the port alone decides.
 port_listening() {
-  if command -v netstat >/dev/null 2>&1; then listing=$(netstat -ltn 2>/dev/null || true)
-  elif command -v ss >/dev/null 2>&1; then listing=$(ss -ltn 2>/dev/null || true)
+  if command -v netstat >/dev/null 2>&1; then listing=$(netstat -ltnp 2>/dev/null || true)
+  elif command -v ss >/dev/null 2>&1; then listing=$(ss -ltnp 2>/dev/null || true)
   else return 0
   fi
   [ -n "$listing" ] || return 0
-  printf '%s\n' "$listing" | grep -Eq "[:.]$1[[:space:]]"
+  owners=$(printf '%s\n' "$listing" | grep -E "[:.]$1[[:space:]]" || true)
+  [ -n "$owners" ] || return 1
+  if printf '%s\n' "$owners" | grep -Eq '[0-9]+/[^ ]+|pid='; then
+    printf '%s\n' "$owners" | grep -q jiotv
+  fi
 }
 
 # Print one uci option of the jiotv service, or the default when unavailable.
@@ -176,13 +181,14 @@ if [ "$openwrt" = true ]; then
     if "$init_script" restart; then
       http_port=$(uci_opt port 5001)
       tries=0
-      while [ "$tries" -lt 15 ]; do
+      ready_timeout=${JIOTV_READY_TIMEOUT:-15}
+      while [ "$tries" -lt "$ready_timeout" ]; do
         if "$init_script" running >/dev/null 2>&1 && port_listening "$http_port"; then running=true; break; fi
         tries=$((tries + 1))
         sleep 1
       done
       if [ "$running" = true ]; then note "listening on port $http_port"
-      else echo "warning: the service is not listening on port $http_port after 15 seconds" >&2
+      else echo "warning: the service is not listening on port $http_port after $ready_timeout seconds" >&2
       fi
     else
       echo "warning: '$init_script restart' failed" >&2
@@ -221,7 +227,7 @@ if [ "$openwrt" = true ]; then
   echo "Next steps:"
   step=1
   if [ "$disabled" = true ]; then
-    echo "  $step. Enable the service: uci set jiotv.main.enabled=1 && uci commit jiotv"
+    echo "  $step. Enable the service: uci set jiotv.main.enabled=1 && uci commit jiotv && $init_script start"
     step=$((step + 1))
   elif [ "$running" != true ]; then
     echo "  $step. Start the service: $init_script start  (then check: logread -e jiotv)"

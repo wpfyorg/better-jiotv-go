@@ -68,7 +68,7 @@ chmod +x "$tmp/bin/jiotv-init"
 cat >"$tmp/bin/netstat" <<'EOF'
 #!/bin/sh
 echo 'Active Internet connections (only servers)'
-echo 'tcp        0      0 0.0.0.0:5001            0.0.0.0:*               LISTEN'
+echo "tcp        0      0 0.0.0.0:5001            0.0.0.0:*               LISTEN      123/${JIOTV_TEST_PORT_OWNER:-jiotv}"
 EOF
 cat >"$tmp/bin/uci" <<'EOF'
 #!/bin/sh
@@ -184,6 +184,17 @@ if grep -x "restart" "$tmp/openwrt-disabled-init" >/dev/null; then
   exit 1
 fi
 grep -F "disabled in /etc/config/jiotv" "$tmp/openwrt-disabled-output" >/dev/null
+# Another daemon holding the port is not JioTV being ready.
+if JIOTV_PLATFORM=openwrt JIOTV_TEST_PORT_OWNER=uhttpd JIOTV_READY_TIMEOUT=1 JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-owner-downloads" \
+  JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-owner-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+  PATH="$tmp/bin:$PATH" sh "$root/scripts/install.sh" >"$tmp/openwrt-owner-output" 2>/dev/null; then
+  echo "a port held by another daemon was reported as JioTV running" >&2
+  exit 1
+fi
+grep -F "not listening yet" "$tmp/openwrt-owner-output" >/dev/null
+# The enable hint must also start the service.
+grep -F "uci commit jiotv && " "$tmp/openwrt-disabled-output" | grep -F "start" >/dev/null
 # Every uci spelling of false turns the HTTPS address off, as the init script does.
 JIOTV_PLATFORM=openwrt JIOTV_TEST_UCI_TLS=off JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-notls-downloads" \

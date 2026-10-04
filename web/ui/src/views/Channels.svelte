@@ -62,10 +62,16 @@
               error = "";
               loading = false;
             }
-          } catch {
+          } catch (err) {
             // The code was accepted but the list could not be refreshed: keep what
             // is shown and say so, instead of claiming extra channels are listed.
-            if (isLatest() && unlockNotice) unlockNotice = { ...unlockNotice, refreshFailed: true };
+            if (isLatest()) {
+              if (unlockNotice) unlockNotice = { ...unlockNotice, refreshFailed: true };
+              // The older initial request can no longer publish, so end the loading
+              // state here; with nothing to show, report the failure instead.
+              if (!channels.length && !error) error = err.message;
+              loading = false;
+            }
           }
         })
         .catch(() => {});

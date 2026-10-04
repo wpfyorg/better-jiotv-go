@@ -32,12 +32,24 @@
   // unlock code, try it against the server. An ordinary search never
   // matches this shape, so it never leaves the browser.
   let triedCode = "";
+  // Set once a code is accepted. A wrong code stays silent on purpose: it must
+  // not reveal that this box does anything other than search.
+  let unlockNotice = $state(null);
   $effect(() => {
     const q = query.trim();
     if (q && q !== triedCode && looksLikeUnlockCode(q)) {
       triedCode = q;
       api("/api/extras/unlock", { method: "POST", body: { code: q } })
-        .then(() => window.dispatchEvent(new CustomEvent("jiotv:extras-changed")))
+        .then(async (d) => {
+          // The code is not a search term; clear it so the list is not empty.
+          query = "";
+          triedCode = "";
+          unlockNotice = { connected: !!d?.extras?.connected };
+          window.dispatchEvent(new CustomEvent("jiotv:extras-changed"));
+          try {
+            channels = await loadChannels(true);
+          } catch {}
+        })
         .catch(() => {});
     }
   });
@@ -68,6 +80,24 @@
     }
   });
 </script>
+
+{#if unlockNotice}
+  <div class="unlock-notice" role="status">
+    <span class="unlock-icon" aria-hidden="true">✓</span>
+    <div class="unlock-copy">
+      <strong>Extra channels unlocked</strong>
+      <span>
+        {#if unlockNotice.connected}
+          The extra source is connected; its channels are listed below.
+        {:else}
+          Connect the extra source in Settings to load its channels.
+        {/if}
+      </span>
+    </div>
+    {#if !unlockNotice.connected}<a class="unlock-link" href="#/settings">Open Settings</a>{/if}
+    <button class="unlock-dismiss" aria-label="Dismiss" onclick={() => (unlockNotice = null)}>×</button>
+  </div>
+{/if}
 
 <section class="filters" aria-label="Filters">
   <input class="input search" type="search" placeholder="Search channels" bind:value={query} aria-label="Search channels" />
@@ -113,6 +143,44 @@
 {/if}
 
 <style>
+  .unlock-notice {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--extras) 45%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--extras) 12%, var(--surface));
+  }
+  .unlock-icon {
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    color: #0b1020;
+    background: var(--extras);
+    font-size: 14px;
+    font-weight: 800;
+  }
+  .unlock-copy { display: grid; gap: 2px; min-width: 0; flex: 1 1 auto; font-size: 13px; }
+  .unlock-copy span { color: var(--muted); }
+  .unlock-link { color: var(--extras); font-size: 13px; font-weight: 650; white-space: nowrap; }
+  .unlock-dismiss {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 8px;
+    color: var(--muted);
+    background: transparent;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .unlock-dismiss:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
   .filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
   .filters .input { width: auto; }
   .search { flex: 1 1 240px; }

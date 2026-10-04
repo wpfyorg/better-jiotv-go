@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyPlaybackFailure, loadLiveSource, sourceResolutionFailure } from "./shakaPlayer.js";
+import { classifyPlaybackFailure, loadLiveSource, sourceDenialStatus, sourceResolutionFailure } from "./shakaPlayer.js";
 
 function deferred() {
   let resolve;
@@ -367,4 +367,28 @@ test("plain-HTTP failures are classified as insecure_context before codec causes
   assert.equal(classifyPlaybackFailure({ hlsError: { code: 4042, category: 4 }, secureContext: false }), "insecure_context");
   assert.equal(classifyPlaybackFailure({ dashError: { code: 6001, category: 6 }, hadHls: false, secureContext: true }), "browser_unsupported");
   assert.equal(classifyPlaybackFailure({ hlsError: { code: 1001, data: ["u", 404] }, secureContext: false }), "provider_unavailable");
+});
+
+test("classifies a provider 401/403 from the player as provider_denied", () => {
+  const denied = (status) => ({ code: 1001, data: ["https://cdn.example/seg.ts", status] });
+  assert.equal(classifyPlaybackFailure({ hlsError: denied(403), secureContext: true }), "provider_denied");
+  assert.equal(classifyPlaybackFailure({ dashError: denied(401), secureContext: true }), "provider_denied");
+  assert.equal(classifyPlaybackFailure({ hlsError: denied(404), secureContext: true }), "provider_unavailable");
+  assert.equal(classifyPlaybackFailure({ hlsError: denied(500), secureContext: true }), "generic");
+});
+
+test("recognizes the provider's refusal behind a failed /api/live/play request", () => {
+  const reqwest403 = {
+    status: 500,
+    message: "HTTP status client error (403 Forbidden) for url (https://jiotvapi.media.jio.com/playback/apis/v1.1/geturl?langId=6)",
+  };
+  assert.equal(sourceDenialStatus(reqwest403), 403);
+  assert.equal(sourceResolutionFailure(reqwest403), "provider_denied");
+  assert.equal(sourceDenialStatus({ status: 500, message: "HTTP status client error (401 Unauthorized) for url (x)" }), 401);
+  assert.equal(sourceDenialStatus({ status: 403, message: "denied" }), 403);
+  // Unrelated failures are not mistaken for a denial.
+  assert.equal(sourceDenialStatus({ status: 500, message: "HTTP status server error (503 Service Unavailable) for url (x)" }), null);
+  assert.equal(sourceDenialStatus({ status: 500, message: "connection reset by peer" }), null);
+  assert.equal(sourceDenialStatus(new Error("network down")), null);
+  assert.equal(sourceResolutionFailure({ status: 404, message: "No stream found for channel id: 144" }), "provider_unavailable");
 });

@@ -101,7 +101,9 @@ export function classifyPlaybackFailure({ dashError = null, hlsError = null, had
   const drmCause = (error) =>
     !!error && isDrmPlaybackError(error) && (Number(error.code) === 6001 || (!!capability && !capability.usable));
   if (drmCause(dashError) && (!hadHls || hlsError)) return "browser_unsupported";
-  if (playbackHttpStatus(hlsError ?? dashError) === 404) return "provider_unavailable";
+  const status = playbackHttpStatus(hlsError ?? dashError);
+  if (status === 404) return "provider_unavailable";
+  if (status === 401 || status === 403) return "provider_denied";
   return "generic";
 }
 
@@ -111,7 +113,19 @@ export function classifyPlaybackFailure({ dashError = null, hlsError = null, had
 // account) stay generic.
 export function sourceResolutionFailure(error) {
   const noStream = Number(error?.status) === 404 && /no stream found/i.test(error?.message ?? "");
-  return noStream ? "provider_unavailable" : "generic";
+  if (noStream) return "provider_unavailable";
+  return sourceDenialStatus(error) ? "provider_denied" : "generic";
+}
+
+// The provider's own refusal (HTTP 401/403) behind a failed source request.
+// `/api/live/play` reports an upstream refusal as a server error whose message
+// carries the provider's status line, e.g. "HTTP status client error (403
+// Forbidden) for url (...)"; a proper 403 from this server counts too. Returns
+// the status, or null when the failure is anything else.
+export function sourceDenialStatus(error) {
+  if (Number(error?.status) === 403) return 403;
+  const m = /\((40[13])\s+[A-Za-z ]+\)/.exec(error?.message ?? "");
+  return m ? Number(m[1]) : null;
 }
 
 export async function loadLiveSource({ player, video, source, drmCapability = null, secureContext = globalThis.isSecureContext ?? true, isCurrent = () => true, onTerminalError = () => {} }) {

@@ -38,6 +38,7 @@ pub struct DrmMpdOutput {
 #[derive(Default)]
 pub struct DashState {
     drm_mpd_cache: RwLock<std::collections::HashMap<String, (DrmMpdOutput, Instant)>>,
+    live_cache: RwLock<std::collections::HashMap<String, (LiveUrlOutput, Instant)>>,
     cdn_clock: Mutex<Option<(SystemTime, Instant)>>,
 }
 
@@ -58,6 +59,19 @@ impl DashState {
             .insert(key.to_string(), (out, Instant::now()));
     }
 
+    fn get_live(&self, channel_id: &str) -> Option<LiveUrlOutput> {
+        let map = self.live_cache.read().unwrap();
+        let (out, at) = map.get(channel_id)?;
+        (at.elapsed() <= DRM_MPD_CACHE_TTL).then(|| out.clone())
+    }
+
+    fn set_live(&self, channel_id: &str, out: LiveUrlOutput) {
+        self.live_cache
+            .write()
+            .unwrap()
+            .insert(channel_id.to_string(), (out, Instant::now()));
+    }
+
     fn record_publish_time(&self, t: SystemTime) {
         *self.cdn_clock.lock().unwrap() = Some((t, Instant::now()));
     }
@@ -71,6 +85,7 @@ impl DashState {
 
     pub fn clear(&self) {
         self.drm_mpd_cache.write().unwrap().clear();
+        self.live_cache.write().unwrap().clear();
         *self.cdn_clock.lock().unwrap() = None;
     }
 }
@@ -103,6 +118,21 @@ fn cdn_host_and_dir(url_str: &str) -> Option<(String, String)> {
         None => "/".to_string(),
     };
     Some((host, dir))
+}
+
+/// The full playback response for the in-app player, cached for the same
+/// short window as the DASH output so reloads and concurrent viewers do not
+/// each hit the playback API.
+pub(crate) async fn get_live_cached(
+    state: &AppState,
+    channel_id: &str,
+) -> anyhow::Result<LiveUrlOutput> {
+    if let Some(cached) = state.dash_state.get_live(channel_id) {
+        return Ok(cached);
+    }
+    let live = crate::stream::fetch_live(state, channel_id).await?;
+    state.dash_state.set_live(channel_id, live.clone());
+    Ok(live)
 }
 
 pub(crate) async fn get_drm_mpd(
@@ -837,6 +867,23 @@ mod httpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_cache_serves_recent_entries_and_clears_with_the_context() {
+        let state = DashState::default();
+        assert!(state.get_live("154").is_none());
+        state.set_live(
+            "154",
+            LiveUrlOutput {
+                hdnea: "token".into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(state.get_live("154").unwrap().hdnea, "token");
+        assert!(state.get_live("155").is_none());
+        state.clear();
+        assert!(state.get_live("154").is_none());
+    }
 
     #[test]
     fn parses_rfc3339_publish_time() {

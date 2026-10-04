@@ -218,18 +218,23 @@ pub async fn live_handler(
     live_impl(&state, &channel_and_quality(&id), "auto", &prefix).await
 }
 
+/// Channels 1349/1322 output audio-only m3u8 when a quality is forced, so every
+/// HLS source selection for them must stay on `auto`.
+pub(crate) fn hls_quality_for_channel<'a>(id: &str, quality: &'a str) -> &'a str {
+    if id == "1349" || id == "1322" {
+        "auto"
+    } else {
+        quality
+    }
+}
+
 pub async fn live_quality_handler(
     axum::extract::Path((quality, id)): axum::extract::Path<(String, String)>,
     State(state): State<Arc<AppState>>,
     prefix: Option<axum::Extension<crate::api::KeyPrefix>>,
 ) -> Response {
     let id = channel_and_quality(&id);
-    // Channels 1349/1322 output audio-only m3u8 when a quality is forced.
-    let quality = if id == "1349" || id == "1322" {
-        "auto".to_string()
-    } else {
-        quality
-    };
+    let quality = hls_quality_for_channel(&id, &quality).to_string();
     live_impl(&state, &id, &quality, &prefix).await
 }
 

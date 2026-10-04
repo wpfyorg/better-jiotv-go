@@ -521,7 +521,7 @@ pub async fn live_play(
         return Json(json!({"dash": false, "url": ch.url, "license": null})).into_response();
     }
 
-    let live = match crate::stream::fetch_live(&state, &id).await {
+    let live = match crate::dash::get_live_cached(&state, &id).await {
         Ok(l) => l,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
@@ -534,7 +534,8 @@ fn live_play_response_from_live(
     id: &str,
     quality: &str,
 ) -> Response {
-    let live_url = crate::television::select_best_live_hls_url(live, quality);
+    let hls_quality = crate::stream::hls_quality_for_channel(id, quality);
+    let live_url = crate::television::select_best_live_hls_url(live, hls_quality);
     let hls = if live_url.is_empty() {
         serde_json::Value::Null
     } else {
@@ -543,7 +544,15 @@ fn live_play_response_from_live(
             crate::stream::absolute_base_from_live(live).as_deref(),
         );
         let encrypted = state.secure.encrypt(&abs);
-        serde_json::Value::String(format!("/render.m3u8?auth={encrypted}&channel_key_id={id}"))
+        // Carry a forced quality so a 404 recovery retries it before `auto`.
+        let q = if hls_quality == "auto" {
+            String::new()
+        } else {
+            format!("&q={hls_quality}")
+        };
+        serde_json::Value::String(format!(
+            "/render.m3u8?auth={encrypted}&channel_key_id={id}{q}"
+        ))
     };
 
     if let Ok(out) = crate::dash::build_drm_mpd_output(state, live, id, quality) {
@@ -739,5 +748,60 @@ mod tests {
         assert!(json["url"].as_str().unwrap().starts_with("/render.m3u8?"));
         assert!(json["license"].is_null());
         assert!(json["hls"].is_null());
+    }
+
+    fn two_quality_hls() -> crate::television::LiveUrlOutput {
+        crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/auto.m3u8".into(),
+                high: "https://media.example/live/high.m3u8".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn decrypted_hls(s: &AppState, url: &str) -> (String, String) {
+        let query = url.split_once('?').unwrap().1;
+        let param = |name: &str| {
+            query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+                .unwrap_or_default()
+                .to_string()
+        };
+        (s.secure.decrypt(&param("auth")).unwrap(), param("q"))
+    }
+
+    #[tokio::test]
+    async fn live_play_response_carries_forced_quality_into_the_hls_url() {
+        let s = state();
+        let json = response_json(live_play_response_from_live(
+            &s,
+            &two_quality_hls(),
+            "ex_hls",
+            "high",
+        ))
+        .await;
+        let (source, q) = decrypted_hls(&s, json["url"].as_str().unwrap());
+        assert!(source.ends_with("/high.m3u8"));
+        assert_eq!(q, "high");
+    }
+
+    #[tokio::test]
+    async fn live_play_response_keeps_audio_only_channels_on_auto() {
+        let s = state();
+        for id in ["1349", "1322"] {
+            let json = response_json(live_play_response_from_live(
+                &s,
+                &two_quality_hls(),
+                id,
+                "high",
+            ))
+            .await;
+            let (source, q) = decrypted_hls(&s, json["url"].as_str().unwrap());
+            assert!(source.ends_with("/auto.m3u8"), "channel {id}");
+            assert_eq!(q, "", "channel {id}");
+        }
     }
 }

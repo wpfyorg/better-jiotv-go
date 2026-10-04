@@ -13,7 +13,6 @@ jiotv_credentials.json
 # Node (web/ui)
 web/ui/node_modules/
 web/node_modules/
-/web/ui/dist/
 
 # Local playback / QA artifacts
 /qa-results/

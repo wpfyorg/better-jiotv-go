@@ -128,6 +128,31 @@ if grep -F "<host>" "$tmp/desktop-output" >/dev/null; then
   echo "the installer still prints the <host> placeholder" >&2
   exit 1
 fi
+# On Linux the address of the default route is used unless that route is a tunnel,
+# in which case the first address on a physical-looking interface is.
+mkdir "$tmp/linux-bin"
+cat >"$tmp/linux-bin/ip" <<'EOF'
+#!/bin/sh
+case "$*" in
+  *"route get"*) echo "1.1.1.1 via 10.0.0.1 dev ${JIOTV_TEST_ROUTE_DEV:-eth0} src ${JIOTV_TEST_ROUTE_SRC:-192.168.1.50} uid 0" ;;
+  *"addr show"*)
+    echo "2: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0"
+    echo "3: wg0    inet 10.8.0.2/24 scope global wg0"
+    echo "4: eth0    inet 192.168.1.50/24 brd 192.168.1.255 scope global eth0" ;;
+esac
+EOF
+chmod +x "$tmp/linux-bin/ip"
+for route in "eth0 192.168.1.50" "wg0 10.8.0.2"; do
+  JIOTV_TEST_ROUTE_DEV=${route% *} JIOTV_TEST_ROUTE_SRC=${route#* } \
+    JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 JIOTV_TEST_ASSET_NAME=jiotv-full-x86_64-unknown-linux-musl \
+    JIOTV_TEST_LOG="$tmp/log-linux-ip" JIOTV_INSTALL_DIR="$tmp/install-linux-ip" PATH="$tmp/linux-bin:$tmp/bin:$PATH" \
+    sh "$root/scripts/install.sh" >"$tmp/linux-ip-output"
+  grep -F "https://192.168.1.50:5443/" "$tmp/linux-ip-output" >/dev/null
+  if grep -E "10\.8\.0\.2|172\.17\.0\.1" "$tmp/linux-ip-output" >/dev/null; then
+    echo "a tunnel or container address was advertised as the LAN address" >&2
+    exit 1
+  fi
+done
 JIOTV_TEST_OS=Darwin JIOTV_TEST_MACHINE=arm64 JIOTV_VARIANT=slim JIOTV_TEST_ASSET_NAME=jiotv-slim-aarch64-apple-darwin \
   JIOTV_TEST_LOG="$tmp/log-desktop-slim" JIOTV_INSTALL_DIR="$tmp/install-desktop-slim" PATH="$tmp/bin:$PATH" \
   sh "$root/scripts/install.sh" >"$tmp/desktop-slim-output"

@@ -111,13 +111,14 @@ router_ip() {
   if [ -n "$addr" ]; then echo "$addr"; else echo "<router-ip>"; fi
 }
 
-# This machine's LAN address, for other devices on the network (best effort): the
-# address of the interface that carries the default route, since a machine with
-# Docker, a VPN or several adapters has more than one and their order is arbitrary.
+# This machine's LAN address, for other devices on the network (best effort). A
+# machine with Docker, a VPN or several adapters has more than one address, and the
+# default route may point into a tunnel, so tunnel and container interfaces are skipped.
 local_ip() {
   addr=
   if [ "$sys" = Darwin ]; then
     ifc=$(route -n get default 2>/dev/null | awk '/interface:/ { print $2; exit }' || true)
+    case "$ifc" in utun*|ppp*|ipsec*|gif*|stf*) ifc= ;; esac
     if [ -n "$ifc" ]; then addr=$(ipconfig getifaddr "$ifc" 2>/dev/null || true); fi
     if [ -z "$addr" ]; then
       for ifc in en0 en1; do
@@ -127,7 +128,16 @@ local_ip() {
     fi
   else
     if command -v ip >/dev/null 2>&1; then
-      addr=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1 || true)
+      route_line=$(ip -4 route get 1.1.1.1 2>/dev/null | head -n 1 || true)
+      route_dev=$(printf '%s\n' "$route_line" | sed -n 's/.* dev \([^ ]*\).*/\1/p')
+      route_src=$(printf '%s\n' "$route_line" | sed -n 's/.* src \([0-9.]*\).*/\1/p')
+      case "$route_dev" in
+        ''|tun*|tap*|wg*|tailscale*|ppp*|ipsec*|zt*|utun*) ;;
+        *) addr=$route_src ;;
+      esac
+      if [ -z "$addr" ]; then
+        addr=$(ip -4 -o addr show scope global 2>/dev/null | awk '$2 !~ /^(lo|docker|br-|veth|virbr|tun|tap|wg|tailscale|ppp|ipsec|zt|utun)/ { split($4, a, "/"); print a[1]; exit }' || true)
+      fi
     fi
     if [ -z "$addr" ] && command -v hostname >/dev/null 2>&1; then
       # Only a dotted IPv4 address is usable unbracketed in a URL.
@@ -377,7 +387,7 @@ if [ "$install_tls" = 1 ]; then
     echo "IPTV apps (plain HTTP playlist): http://localhost:5001/ on this machine, http://${ip}:5001/ from other devices. The slim build has no browser UI."
   else
     echo "Browser UI on this machine (HTTPS, self-signed certificate; accept the one-time warning): https://localhost:5443/"
-    echo "From other devices on your network: https://${ip}:5443/ (browser), http://${ip}:5001/ (IPTV apps, plain HTTP playlist)"
+    echo "From other devices on your network: https://${ip}:5443/ (browser), http://${ip}:5001/ (IPTV apps, plain HTTP playlist). The address is detected automatically; if it does not work, use the one your network assigned to this machine."
   fi
 else
   echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0"

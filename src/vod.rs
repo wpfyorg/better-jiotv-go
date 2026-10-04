@@ -360,9 +360,12 @@ async fn build_vod_playlist(client: &crate::extras::Client) -> Vec<(VodItem, Str
     out
 }
 
+const BASE_PLACEHOLDER: &str = "@@JIOTV_BASE@@";
+
 /// `GET /vod.m3u` — on-demand titles as an M3U playlist, cached 6h.
 pub async fn vod_playlist_handler(
     State(state): State<Arc<AppState>>,
+    https: Option<axum::Extension<crate::tls::Https>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let client = match require_client(&state) {
@@ -370,23 +373,28 @@ pub async fn vod_playlist_handler(
         Err(r) => return *r,
     };
 
+    // The cache holds the playlist with a placeholder base; the scheme and
+    // host of the *current* request are substituted on every response, so
+    // an http client and an https client never see each other's links.
     let cached = { state.vod_state.playlist.lock().unwrap().clone() };
-    let entries_xml = match cached {
+    let template = match cached {
         Some((xml, at)) if at.elapsed() <= PLAYLIST_TTL => xml,
         _ => {
             let entries = build_vod_playlist(&client).await;
-            let base = headers
-                .get(header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .map(|h| format!("http://{h}"))
-                .unwrap_or_default();
-            let xml = render_vod_playlist(&entries, &base);
+            let xml = render_vod_playlist(&entries, BASE_PLACEHOLDER);
             if !entries.is_empty() {
                 *state.vod_state.playlist.lock().unwrap() = Some((xml.clone(), Instant::now()));
             }
             xml
         }
     };
+    let scheme = if https.is_some() { "https" } else { "http" };
+    let base = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .map(|h| format!("{scheme}://{h}"))
+        .unwrap_or_default();
+    let entries_xml = template.replace(BASE_PLACEHOLDER, &base);
 
     Response::builder()
         .header(header::CONTENT_TYPE, "audio/x-mpegurl; charset=utf-8")

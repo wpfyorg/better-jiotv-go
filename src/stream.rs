@@ -1002,6 +1002,7 @@ mod tests {
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+            listen: Default::default(),
         };
         let body = "#EXTM3U\nseg1.ts\n";
         let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");
@@ -1083,6 +1084,7 @@ mod tests {
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+            listen: Default::default(),
         };
         let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nchild.m3u8\n";
         let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");

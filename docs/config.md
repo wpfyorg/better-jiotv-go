@@ -63,3 +63,15 @@ default_languages = [1, 6]
 
 Never commit or share this directory: it holds your access key, your admin
 password hash, and (once you've logged in) your JioTV tokens.
+
+## HTTPS options
+
+These are command-line flags of `jiotv serve`; see [HTTPS in Usage](usage.md#https).
+
+| Flag | Default | Meaning |
+| ---- | ------- | ------- |
+| `--tls` | off | Add an HTTPS listener next to the plain HTTP listener. |
+| `--tls-port` | `5443` | HTTPS port. |
+| `--tls-cert`, `--tls-key` | self-signed in `<data dir>/tls/` | Your own PEM certificate and key; both are required together. |
+
+The plain HTTP listener (`--port`, default `5001`) stays on for IPTV apps. On OpenWrt the same settings are the `tls`, `tls_port`, `tls_cert` and `tls_key` options in `/etc/config/jiotv`.

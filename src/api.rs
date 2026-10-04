@@ -17,12 +17,15 @@ use std::time::SystemTime;
 
 pub type SharedState = Arc<AppState>;
 
-fn session_cookie_header(_state: &AppState, value: &str) -> String {
+/// `secure` is true for sessions created over the TLS listener, so the browser
+/// never replays an HTTPS-authenticated session over the plain-HTTP listener.
+fn session_cookie_header(value: &str, secure: bool) -> String {
     format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
         crate::access::SESSION_COOKIE,
         value,
         crate::access::SESSION_TTL.as_secs(),
+        if secure { "; Secure" } else { "" },
     )
 }
 
@@ -82,6 +85,7 @@ pub struct PasswordBody {
 pub async fn auth_setup(
     State(state): State<SharedState>,
     prefix: Option<axum::Extension<KeyPrefix>>,
+    https: Option<axum::Extension<crate::tls::Https>>,
     Json(body): Json<PasswordBody>,
 ) -> Response {
     if state.access.has_password() {
@@ -95,7 +99,7 @@ pub async fn auth_setup(
         );
     }
     match state.access.set_password(&body.password) {
-        Ok(()) => login_response(&state),
+        Ok(()) => login_response(&state, https.is_some()),
         Err(crate::access::AccessError::WeakPassword(n)) => err(
             StatusCode::BAD_REQUEST,
             format!("the password needs at least {n} characters"),
@@ -110,13 +114,14 @@ pub async fn auth_setup(
 pub async fn auth_login(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    https: Option<axum::Extension<crate::tls::Https>>,
     Json(body): Json<PasswordBody>,
 ) -> Response {
     match state
         .access
         .login(&addr.ip().to_string(), &body.password, SystemTime::now())
     {
-        Ok(true) => login_response(&state),
+        Ok(true) => login_response(&state, https.is_some()),
         Ok(false) => err(StatusCode::UNAUTHORIZED, "wrong password"),
         Err(crate::access::AccessError::TooManyAttempts) => err(
             StatusCode::TOO_MANY_REQUESTS,
@@ -126,7 +131,7 @@ pub async fn auth_login(
     }
 }
 
-fn login_response(state: &AppState) -> Response {
+fn login_response(state: &AppState, secure: bool) -> Response {
     let session = match state.access.new_session(SystemTime::now()) {
         Ok(s) => s,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot start a session"),
@@ -134,7 +139,7 @@ fn login_response(state: &AppState) -> Response {
     let mut resp = Json(json!({"status": true})).into_response();
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        session_cookie_header(state, &session).parse().unwrap(),
+        session_cookie_header(&session, secure).parse().unwrap(),
     );
     resp
 }
@@ -155,6 +160,7 @@ pub struct ChangePasswordBody {
 pub async fn account_password(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    https: Option<axum::Extension<crate::tls::Https>>,
     Json(body): Json<ChangePasswordBody>,
 ) -> Response {
     match state
@@ -172,7 +178,7 @@ pub async fn account_password(
         Err(_) => return err(StatusCode::UNAUTHORIZED, "the current password is wrong"),
     }
     match state.access.set_password(&body.new) {
-        Ok(()) => login_response(&state),
+        Ok(()) => login_response(&state, https.is_some()),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
@@ -209,6 +215,8 @@ pub async fn status(State(state): State<SharedState>) -> Response {
         },
         "playlistPath": playlist,
         "epgPath": epg_path,
+        "httpPort": state.listen.get().map(|l| l.http),
+        "tlsPort": state.listen.get().and_then(|l| l.tls),
         "epg": state.config.epg,
         "drm": state.config.drm,
         "logoutDisabled": state.config.disable_logout,
@@ -632,6 +640,7 @@ mod tests {
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+            listen: Default::default(),
         })
     }
 
@@ -640,6 +649,7 @@ mod tests {
         let s = state();
         let resp = auth_setup(
             State(s.clone()),
+            None,
             None,
             Json(PasswordBody {
                 password: "longenough".into(),
@@ -656,6 +666,7 @@ mod tests {
         let resp = auth_setup(
             State(s.clone()),
             prefix,
+            None,
             Json(PasswordBody {
                 password: "longenough".into(),
             }),
@@ -663,6 +674,30 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(s.access.has_password());
+        let cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(
+            !cookie.contains("Secure"),
+            "plain-HTTP setup keeps a non-Secure cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_over_tls_issues_a_secure_session_cookie() {
+        let s = state();
+        let prefix = Some(axum::Extension(KeyPrefix("/k/abc/".to_string())));
+        let https = Some(axum::Extension(crate::tls::Https));
+        let resp = auth_setup(
+            State(s.clone()),
+            prefix,
+            https,
+            Json(PasswordBody {
+                password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.ends_with("; Secure"), "{cookie}");
     }
 
     #[tokio::test]
@@ -674,6 +709,24 @@ mod tests {
         assert_eq!(json["catalogue"]["extrasEntitlementStatus"], "unknown");
         assert_eq!(json["catalogue"]["extrasEntitlementsAvailable"], false);
         assert_eq!(json["catalogue"]["extrasEntitlementsApplied"], false);
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_listen_ports_once_serve_has_chosen_them() {
+        let s = state();
+        let json = response_json(status(State(s.clone())).await).await;
+        assert!(json["httpPort"].is_null());
+        assert!(json["tlsPort"].is_null());
+
+        s.listen
+            .set(crate::state::ListenPorts {
+                http: 5001,
+                tls: Some(5443),
+            })
+            .unwrap();
+        let json = response_json(status(State(s)).await).await;
+        assert_eq!(json["httpPort"], 5001);
+        assert_eq!(json["tlsPort"], 5443);
     }
 
     #[tokio::test]
@@ -836,5 +889,12 @@ mod tests {
         let before = s.secure.current_epoch();
         extras_lock(State(s.clone())).await;
         assert_eq!(s.secure.current_epoch(), before + 2, "extras lock");
+    }
+
+    #[test]
+    fn session_cookie_is_secure_only_for_tls_logins() {
+        assert!(session_cookie_header("abc", true).ends_with("; Secure"));
+        assert!(!session_cookie_header("abc", false).contains("Secure"));
+        assert!(session_cookie_header("abc", true).contains("HttpOnly; SameSite=Strict"));
     }
 }

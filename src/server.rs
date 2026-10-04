@@ -217,10 +217,7 @@ where
 
     fn call(&mut self, target: axum::serve::IncomingStream<'a>) -> Self::Future {
         let addr = target.remote_addr();
-        std::future::ready(Ok(ConnectInfoService {
-            inner: self.inner.clone(),
-            addr,
-        }))
+        std::future::ready(Ok(connection_service(self.inner.clone(), addr, false)))
     }
 }
 
@@ -228,6 +225,18 @@ where
 pub struct ConnectInfoService<S> {
     inner: S,
     addr: std::net::SocketAddr,
+    https: bool,
+}
+
+/// Wraps `inner` for one connection: inserts `ConnectInfo` and, for TLS
+/// connections, the [`crate::tls::Https`] marker used to render `https://`
+/// links.
+pub fn connection_service<S>(
+    inner: S,
+    addr: std::net::SocketAddr,
+    https: bool,
+) -> ConnectInfoService<S> {
+    ConnectInfoService { inner, addr, https }
 }
 
 impl<S> Service<Request> for ConnectInfoService<S>
@@ -245,6 +254,9 @@ where
     fn call(&mut self, mut req: Request) -> Self::Future {
         req.extensions_mut()
             .insert(axum::extract::ConnectInfo(self.addr));
+        if self.https {
+            req.extensions_mut().insert(crate::tls::Https);
+        }
         self.inner.call(req)
     }
 }
@@ -330,6 +342,7 @@ async fn channels_or_playlist(
     State(state): State<Arc<AppState>>,
     Query(q): Query<HashMap<String, String>>,
     prefix: Option<axum::Extension<KeyPrefix>>,
+    https: Option<axum::Extension<crate::tls::Https>>,
     headers: axum::http::HeaderMap,
 ) -> Response {
     let channels = match state.effective_channels().await {
@@ -341,7 +354,7 @@ async fn channels_or_playlist(
         return axum::Json(channels).into_response();
     }
 
-    let host_url = base_url(&state, &prefix, &headers);
+    let host_url = base_url(&https, &prefix, &headers);
     let empty = String::new();
     let opts = crate::television::PlaylistOptions {
         host_url: &host_url,
@@ -369,17 +382,15 @@ async fn channels_or_playlist(
 }
 
 fn base_url(
-    state: &AppState,
+    https: &Option<axum::Extension<crate::tls::Https>>,
     prefix: &Option<axum::Extension<KeyPrefix>>,
     headers: &axum::http::HeaderMap,
 ) -> String {
-    // TLS termination is handled by the `--tls` flag on `serve`, not by
-    // config; this always renders http:// because the gate and playlist
-    // links are meant to be followed from the same connection they came in
-    // on (a reverse proxy or `--tunnel` in front changes the effective
-    // scheme, which isn't visible here without trusting X-Forwarded-Proto).
-    let _ = state;
-    let scheme = "http";
+    // The scheme is a property of the listener the request arrived on (the
+    // `Https` extension is set by the TLS accept loop), never of a header a
+    // client or proxy could supply. Behind `--tunnel` or a reverse proxy the
+    // connection to this server is plain HTTP, so links stay http://.
+    let scheme = if https.is_some() { "https" } else { "http" };
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
@@ -487,6 +498,7 @@ mod tests {
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+            listen: Default::default(),
         })
     }
 
@@ -519,6 +531,77 @@ mod tests {
                 name: "Test".into(),
                 ..Default::default()
             }]);
+    }
+
+    #[tokio::test]
+    async fn https_listener_serves_the_same_router_and_renders_https_links() {
+        let state = test_state();
+        prime_tv_channel(&state, "154");
+        let key = state.access.key().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let material = crate::tls::load_or_create("", "", dir.path().to_str().unwrap(), "127.0.0.1")
+            .unwrap();
+        let cert_pem = std::fs::read(dir.path().join("tls/cert.pem")).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let svc = GatedService::new(state.clone());
+        let task = tokio::spawn(crate::tls::serve(
+            listener,
+            material.config,
+            move |peer| connection_service(svc.clone(), peer, true),
+            stop_rx,
+        ));
+
+        let client = reqwest::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(&cert_pem).unwrap())
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+
+        // A garbage connection must not break the accept loop.
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut raw = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            raw.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        }
+
+        // Keyed route over TLS: gate passes, links are https and keep the prefix.
+        let url = format!("https://127.0.0.1:{port}/k/{key}/channels?type=m3u");
+        let resp = client.get(&url).send().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.unwrap();
+        let want = format!("https://127.0.0.1:{port}/k/{key}/live/mpd/154");
+        assert!(body.contains(&want), "missing {want} in {body}");
+        assert!(!body.contains("http://127.0.0.1"));
+
+        // The gate still applies: no key, no session.
+        let resp = client
+            .get(format!("https://127.0.0.1:{port}/playlist.m3u"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 401);
+
+        // The same request over the plain-HTTP service renders http://.
+        let mut svc = GatedService::new(state);
+        let req = Request::builder()
+            .uri(format!("/k/{key}/channels?type=m3u"))
+            .header(header::HOST, "h:5001")
+            .body(Body::empty())
+            .unwrap();
+        svc.ready().await.unwrap();
+        let plain = body_text(svc.call(req).await.unwrap()).await;
+        assert!(plain.contains(&format!("http://h:5001/k/{key}/live/mpd/154")));
+
+        stop_tx.send(true).unwrap();
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

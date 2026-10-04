@@ -57,7 +57,7 @@ Group=jiotv
 Environment=HOME=/var/lib/jiotv
 Environment=JIOTV_PATH_PREFIX=/var/lib/jiotv
 Environment=JIOTV_EPG=true
-ExecStart=/usr/local/bin/jiotv --skip-update-check serve --host 0.0.0.0 --port 5001
+ExecStart=/usr/local/bin/jiotv --skip-update-check serve --host 0.0.0.0 --port 5001 --tls --tls-port 5443
 Restart=on-failure
 RestartSec=5
 
@@ -95,7 +95,7 @@ ExecStart=/usr/local/bin/jiotv --skip-update-check serve --host 127.0.0.1 --port
 
 Then proxy to `127.0.0.1:5001` from Caddy, nginx, Traefik, HAProxy, or another frontend.
 
-The Rust server currently serves plain HTTP. Although `--tls`, `--tls-cert`, and `--tls-key` are parsed by the CLI, native TLS is not wired into the Axum listener yet, so terminate HTTPS at the reverse proxy rather than relying on those flags.
+Native HTTPS is also available without a proxy: the unit above passes `--tls --tls-port 5443`, which adds an HTTPS listener with a self-signed certificate stored under `/var/lib/jiotv/tls/` (reused across restarts; the SHA-256 fingerprint is printed in `journalctl -u jiotv`). Browsers need HTTPS for protected playback, so open `https://<host>:5443/` and accept the one-time warning. Add `--tls-cert <cert.pem> --tls-key <key.pem>` to use a certificate from your own CA or ACME client. IPTV apps should keep using the `http://<host>:5001/` playlist. When a reverse proxy terminates HTTPS instead, drop `--tls` and keep the loopback bind shown above.
 
 There is one more current limitation: generated playlist URLs use the incoming `Host` but currently render an `http://` scheme. The web UI can still sit behind an HTTPS reverse proxy, but externally consumed M3U entries may need care until forwarded-scheme handling is implemented.
 

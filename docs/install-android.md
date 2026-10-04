@@ -10,6 +10,6 @@ The installer detects the Android ABI under Termux and selects ARM64, ARMv7, or 
 
 UserLAnd runs a Linux userspace rather than Termux: use its Linux package tools and Linux binary target. Do not use the Termux Android binary in a UserLAnd distribution.
 
-Data defaults to `$HOME/.jiotv_go`. Run `jiotv login otp`, `jiotv admin password`, and `jiotv serve`. `jiotv autostart` adds startup to the Termux shell startup file. Android may stop background work under battery restrictions; exempt Termux from battery optimization for long-running use.
+Data defaults to `$HOME/.jiotv_go`. Run `jiotv login otp`, `jiotv admin password`, and `jiotv serve --host 0.0.0.0 --tls`; then open `https://<device-ip>:5443/` and accept the one-time self-signed certificate warning (see [HTTPS in Usage](usage.md#https)). `jiotv autostart --args "--host 0.0.0.0 --tls"` adds startup with the same options to the Termux shell startup file (a bare `jiotv autostart` would start without HTTPS). Android may stop background work under battery restrictions; exempt Termux from battery optimization for long-running use.
 
 Update with `jiotv update`. Remove the binary from `$PREFIX/bin/jiotv`; remove the data directory only if saved credentials and settings should also be deleted.

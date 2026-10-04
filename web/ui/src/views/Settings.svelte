@@ -4,6 +4,7 @@
   import CopyField from "../lib/CopyField.svelte";
   import JioTVLogin from "../lib/JioTVLogin.svelte";
   import ExtrasLogin from "../lib/ExtrasLogin.svelte";
+  import { plainHttpOrigin } from "../lib/origin.js";
 
   let status = $state(null);
   let error = $state("");
@@ -68,6 +69,10 @@
     }
   }
 
+  // IPTV clients often reject a self-signed certificate, so when this page was
+  // opened on the server's own HTTPS port, offer the plain-HTTP origin instead.
+  let iptvOrigin = $derived(plainHttpOrigin(location, status));
+
   onMount(refresh);
 </script>
 
@@ -78,8 +83,8 @@
     <section class="card">
       <h2>IPTV playlist</h2>
       <p class="muted">Add these to your TV's IPTV app. Anyone with the playlist URL can watch, so keep it private.</p>
-      <CopyField label="Playlist" value={location.origin + status.playlistPath} />
-      <CopyField label="EPG" value={location.origin + status.epgPath} />
+      <CopyField label="Playlist" value={iptvOrigin + status.playlistPath} />
+      <CopyField label="EPG" value={iptvOrigin + status.epgPath} />
       {#if !status.epg}<p class="muted small">The EPG file is off on this server (option <code>epg</code>).</p>{/if}
       <button class="btn danger" onclick={rotateKey}>Make a new key</button>
     </section>

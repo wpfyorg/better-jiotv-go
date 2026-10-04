@@ -13,10 +13,11 @@ jobs:
   test:
     # Pull requests run only after Codex review is clean: the `codex-clean` label
     # is added once the review has no open findings. Pushes to main always run.
+    # A "skipped" result on an unlabeled pull request means CI has not run, not
+    # that it passed; any label event on a labeled PR re-runs the real checks.
     if: >-
       github.event_name == 'push' ||
-      (contains(github.event.pull_request.labels.*.name, 'codex-clean') &&
-       (github.event.action != 'labeled' || github.event.label.name == 'codex-clean'))
+      contains(github.event.pull_request.labels.*.name, 'codex-clean')
     runs-on: ubuntu-latest
     strategy:
       matrix:

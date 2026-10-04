@@ -521,11 +521,23 @@ pub async fn live_play(
         return Json(json!({"dash": false, "url": ch.url, "license": null})).into_response();
     }
 
-    let live = match crate::dash::get_live_cached(&state, &id).await {
-        Ok(l) => l,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-    live_play_response_from_live(&state, &live, &id, &quality)
+    // The response URLs are encrypted under the current context epoch, so the
+    // data they carry must belong to that epoch from lookup until the last URL
+    // is generated. If an account switch lands in between, resolve again.
+    for _ in 0..2 {
+        let (live, epoch) = match crate::dash::get_live_cached(&state, &id).await {
+            Ok(l) => l,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+        let response = live_play_response_from_live(&state, &live, &id, &quality);
+        if state.secure.current_epoch() == epoch {
+            return response;
+        }
+    }
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "The active account changed while resolving the stream; retry",
+    )
 }
 
 fn live_play_response_from_live(

@@ -347,3 +347,17 @@ test("classifies a no-stream 404 from source resolution as provider_unavailable"
   assert.equal(sourceResolutionFailure({ status: 500, message: "No stream found" }), "generic");
   assert.equal(sourceResolutionFailure(new Error("network down")), "generic");
 });
+
+test("ignores recoverable Shaka errors on HLS-only and fallen-back playback", async () => {
+  for (const source of [{ dash: false, url: "hls" }, { dash: true, url: "dash", hls: "hls" }]) {
+    const settle = deferred();
+    const player = fakePlayer((url) => (url === "dash" ? Promise.reject({ code: 4032 }) : settle.promise));
+    const reports = [];
+    const loading = loadLiveSource({ player, video, source, onTerminalError: (message) => reports.push(message) });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    player.emitError({ code: 1002, severity: 1 });
+    settle.resolve();
+    await loading;
+    assert.deepEqual(reports, [], `source ${source.url}`);
+  }
+});

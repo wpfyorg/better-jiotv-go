@@ -166,9 +166,9 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
 
   player.addEventListener("error", (event) => {
     const detail = event.detail;
-    // Shaka RECOVERABLE (1) errors are reported while it keeps playing; only
-    // CRITICAL ones may abandon a DASH stream for its HLS alternative.
-    if (detail?.severity === 1 && source.dash && source.hls && !usingHls) return;
+    // Shaka RECOVERABLE (1) errors are reported while it keeps playing, for any
+    // source; only CRITICAL ones may fall back to HLS or end playback.
+    if (detail?.severity === 1) return;
     if (!usingHls) dashError = dashError ?? detail;
     if (source.dash && source.hls && !usingHls) {
       fallbackToHls().catch(reportTerminal);

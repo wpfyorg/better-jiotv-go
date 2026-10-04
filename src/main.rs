@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
         cli::Command::LoginReset => login_reset(&store),
         cli::Command::ExtrasLogin => runtime.block_on(extras_login_cli(&store)),
         cli::Command::ExtrasLogout => extras_logout_cli(&store),
-        cli::Command::AdminPassword => admin_password(&access),
+        cli::Command::AdminPassword => admin_password(&access, &path_prefix),
         cli::Command::KeyShow => show_key(&access),
         cli::Command::KeyRotate => rotate_key(&access),
         cli::Command::EpgGenerate => {
@@ -254,14 +254,24 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     })
 }
 
-fn default_path_prefix() -> anyhow::Result<String> {
-    if is_openwrt() {
-        return Ok("/etc/jiotv".to_string());
-    }
+const OPENWRT_DATA_DIR: &str = "/etc/jiotv";
+const STORE_FILE: &str = "store_v4.toml";
 
+fn default_path_prefix() -> anyhow::Result<String> {
     let home =
         home_dir().ok_or_else(|| anyhow::anyhow!("cannot resolve the user profile directory"))?;
-    Ok(format!("{home}/.jiotv_go"))
+    let legacy = format!("{home}/.jiotv_go");
+    if is_openwrt() && !keeps_legacy_store(OPENWRT_DATA_DIR, &legacy) {
+        return Ok(OPENWRT_DATA_DIR.to_string());
+    }
+    Ok(legacy)
+}
+
+/// A raw-binary install that predates the OpenWrt data directory keeps using
+/// its existing store instead of silently starting from an empty one.
+fn keeps_legacy_store(managed: &str, legacy: &str) -> bool {
+    let has_store = |dir: &str| std::path::Path::new(dir).join(STORE_FILE).is_file();
+    !has_store(managed) && has_store(legacy)
 }
 
 fn is_openwrt() -> bool {
@@ -571,30 +581,54 @@ fn login_reset(store: &store::Store) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn admin_password(access: &access::Access) -> anyhow::Result<()> {
+fn admin_password(access: &access::Access, path_prefix: &str) -> anyhow::Result<()> {
     let password = rpassword_prompt("New admin password: ")?;
-    access.set_password(&password)?;
-    if restart_openwrt_service()? {
-        println!("Admin password set. JioTV service restarted.");
-    } else {
-        println!("Admin password set.");
+    let init = std::path::Path::new("/etc/init.d/jiotv");
+    if is_openwrt() && init.exists() {
+        // The running service caches the store in memory and rewrites the whole
+        // file on every update, so the password must be written while it is
+        // stopped, through a freshly loaded store.
+        let restarted = with_service_stopped(init, || {
+            let store = Arc::new(store::Store::open(path_prefix)?);
+            access::Access::new(store).set_password(&password)?;
+            Ok(())
+        })?;
+        if restarted {
+            println!("Admin password set. JioTV service restarted.");
+        } else {
+            println!("Admin password set.");
+        }
+        return Ok(());
     }
+    access.set_password(&password)?;
+    println!("Admin password set.");
     Ok(())
 }
 
-fn restart_openwrt_service() -> anyhow::Result<bool> {
-    if !is_openwrt() {
-        return Ok(false);
+/// Runs `change` with the init-script service stopped, then starts it again
+/// only if it was running. Returns whether the service was restarted.
+fn with_service_stopped(
+    init: &std::path::Path,
+    change: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<bool> {
+    let was_running = std::process::Command::new(init)
+        .arg("running")
+        .status()?
+        .success();
+    if was_running {
+        let stop = std::process::Command::new(init).arg("stop").status()?;
+        if !stop.success() {
+            anyhow::bail!("could not stop the JioTV service ({stop}); nothing was changed");
+        }
     }
-    let init = std::path::Path::new("/etc/init.d/jiotv");
-    if !init.exists() {
-        return Ok(false);
+    let result = change();
+    if was_running {
+        let start = std::process::Command::new(init).arg("start").status()?;
+        if !start.success() {
+            anyhow::bail!("the change was applied, but starting the JioTV service failed: {start}");
+        }
     }
-    let status = std::process::Command::new(init).arg("restart").status()?;
-    if !status.success() {
-        anyhow::bail!("admin password was saved, but restarting the JioTV service failed: {status}");
-    }
-    Ok(true)
+    result.map(|()| was_running)
 }
 
 fn rpassword_prompt(prompt: &str) -> anyhow::Result<String> {
@@ -634,4 +668,102 @@ fn print_help() {
          update [--version vX.Y.Z]      (needs JIOTV_UPDATE_TOKEN for a private repo)\n  \
          autostart [--args \"...\"] | autostart remove   (systemd service; Termux: shell rc)\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch_store(dir: &std::path::Path) {
+        std::fs::write(dir.join(STORE_FILE), "").unwrap();
+    }
+
+    #[test]
+    fn existing_legacy_store_is_kept_until_the_managed_one_exists() {
+        let managed = tempfile::tempdir().unwrap();
+        let legacy = tempfile::tempdir().unwrap();
+        let (m, l) = (
+            managed.path().to_str().unwrap(),
+            legacy.path().to_str().unwrap(),
+        );
+
+        assert!(
+            !keeps_legacy_store(m, l),
+            "fresh install uses the managed dir"
+        );
+        touch_store(legacy.path());
+        assert!(keeps_legacy_store(m, l), "upgrade keeps the legacy store");
+        touch_store(managed.path());
+        assert!(!keeps_legacy_store(m, l), "managed store wins once present");
+    }
+
+    #[cfg(unix)]
+    mod service {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        /// A fake init script that logs each action and reports `running`
+        /// according to the presence of a `running` marker file.
+        fn fake_init(dir: &std::path::Path, running: bool) -> std::path::PathBuf {
+            let marker = dir.join("running");
+            if running {
+                std::fs::write(&marker, "").unwrap();
+            }
+            let script = dir.join("jiotv.init");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\necho \"$1\" >> '{log}'\ncase \"$1\" in\n running) [ -f '{m}' ] ;;\n stop) rm -f '{m}' ;;\n start) : > '{m}' ;;\nesac\n",
+                    log = dir.join("calls").display(),
+                    m = marker.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            script
+        }
+
+        fn calls(dir: &std::path::Path) -> Vec<String> {
+            std::fs::read_to_string(dir.join("calls"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        #[test]
+        fn running_service_is_stopped_for_the_change_then_started() {
+            let dir = tempfile::tempdir().unwrap();
+            let init = fake_init(dir.path(), true);
+            let marker = dir.path().join("running");
+            let restarted = with_service_stopped(&init, || {
+                assert!(
+                    !marker.exists(),
+                    "service must be stopped during the change"
+                );
+                Ok(())
+            })
+            .unwrap();
+            assert!(restarted);
+            assert_eq!(calls(dir.path()), ["running", "stop", "start"]);
+        }
+
+        #[test]
+        fn stopped_service_stays_stopped() {
+            let dir = tempfile::tempdir().unwrap();
+            let init = fake_init(dir.path(), false);
+            let restarted = with_service_stopped(&init, || Ok(())).unwrap();
+            assert!(!restarted);
+            assert_eq!(calls(dir.path()), ["running"]);
+        }
+
+        #[test]
+        fn failed_change_still_restores_a_running_service() {
+            let dir = tempfile::tempdir().unwrap();
+            let init = fake_init(dir.path(), true);
+            let err = with_service_stopped(&init, || anyhow::bail!("disk full")).unwrap_err();
+            assert!(err.to_string().contains("disk full"));
+            assert_eq!(calls(dir.path()), ["running", "stop", "start"]);
+        }
+    }
 }

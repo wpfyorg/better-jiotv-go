@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=jiotv
-PKG_VERSION?=1.1.0
+PKG_VERSION?=1.3.0
 PKG_RELEASE:=1
 PKGARCH:=$(ARCH_PACKAGES)
 

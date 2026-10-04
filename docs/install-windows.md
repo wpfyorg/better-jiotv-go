@@ -6,7 +6,7 @@ In PowerShell, install the x64, x86, or ARM64 build for the current user:
 irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.ps1 | iex
 ```
 
-The default location is `%LOCALAPPDATA%\Programs\JioTV`. The installer verifies `SHA256SUMS` and adds that directory to the user `PATH` idempotently. Parameters include `-Variant slim`, `-Version 1.1.0`, `-InstallDir`, `-Repo owner/name`, and `-NoTls` (or `JIOTV_INSTALL_TLS=0`) to omit the HTTPS instructions from the installer output. Open a new terminal if the updated PATH is not available in the current session.
+The default location is `%LOCALAPPDATA%\Programs\JioTV`. The installer verifies `SHA256SUMS` and adds that directory to the user `PATH` idempotently. Parameters include `-Variant slim`, `-Version 1.3.0`, `-InstallDir`, `-Repo owner/name`, and `-NoTls` (or `JIOTV_INSTALL_TLS=0`) to omit the HTTPS instructions from the installer output. Open a new terminal if the updated PATH is not available in the current session.
 
 Release binaries are unsigned; Windows SmartScreen may show a warning. No built-in Windows service manager is provided. Start `jiotv serve --host 0.0.0.0 --tls` from a terminal or use a separately configured service wrapper.
 

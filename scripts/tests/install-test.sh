@@ -29,7 +29,7 @@ case "$url" in
   https://api.github.com/*)
     {
       echo '{'
-      echo '  "tag_name": "v1.1.0",'
+      echo '  "tag_name": "v1.3.0",'
       echo '  "assets": ['
       if [ -n "${JIOTV_TEST_EXTRA_ASSET_NAME:-}" ]; then
         printf '    {"name": "%s"},\n' "$JIOTV_TEST_EXTRA_ASSET_NAME"
@@ -117,8 +117,8 @@ fi
 test -f "${3:-}"
 EOF
 chmod +x "$tmp/bin/apk"
-openwrt_apk=jiotv-1.1.0-r1_x86_64.apk
-openwrt_slim_apk=jiotv-slim-1.1.0-r1_x86_64.apk
+openwrt_apk=jiotv-1.3.0-r1_x86_64.apk
+openwrt_slim_apk=jiotv-slim-1.3.0-r1_x86_64.apk
 JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_apk JIOTV_TEST_EXTRA_ASSET_NAME=$openwrt_slim_apk \
   JIOTV_TEST_INSTALLED_PACKAGE=jiotv-slim JIOTV_TEST_LOG="$tmp/openwrt-apk-downloads" \
@@ -131,7 +131,7 @@ if grep -F "/$openwrt_slim_apk" "$tmp/openwrt-apk-downloads" >/dev/null; then
   echo "full OpenWrt install selected the slim package" >&2
   exit 1
 fi
-openwrt_aarch64_apk=jiotv-1.1.0-r1_aarch64_cortex-a53.apk
+openwrt_aarch64_apk=jiotv-1.3.0-r1_aarch64_cortex-a53.apk
 JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_aarch64_apk JIOTV_TEST_LOG="$tmp/openwrt-aarch64-apk-downloads" \
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-aarch64-apk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" PATH="$tmp/bin:$PATH" \
@@ -162,7 +162,7 @@ fi
 test -f "${2:-}"
 EOF
 chmod +x "$tmp/bin/opkg"
-openwrt_ipk=jiotv-slim_1.1.0-r1_aarch64_cortex-a53.ipk
+openwrt_ipk=jiotv-slim_1.3.0-r1_aarch64_cortex-a53.ipk
 JIOTV_PLATFORM=openwrt JIOTV_VARIANT=slim JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_ipk JIOTV_TEST_LOG="$tmp/openwrt-ipk-downloads" \
   JIOTV_TEST_PACKAGE_LOG="$tmp/openwrt-ipk-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" PATH="$tmp/bin:$PATH" \

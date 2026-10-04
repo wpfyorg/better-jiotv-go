@@ -1,6 +1,7 @@
 <script>
   import { onMount } from "svelte";
   import { api, loadChannels, looksLikeUnlockCode } from "../lib/api.js";
+  import { latestOnly } from "../lib/latest.js";
 
   const saved = (() => {
     try {
@@ -31,6 +32,10 @@
   // If (and only if) the search box holds something shaped like the extras
   // unlock code, try it against the server. An ordinary search never
   // matches this shape, so it never leaves the browser.
+  // The initial load and the reload after an unlock can overlap; only the one
+  // started last may publish, so a late pre-unlock result cannot overwrite the
+  // extras catalogue (or restore an error the reload cleared).
+  const loads = latestOnly();
   let triedCode = "";
   // Set once a code is accepted. A wrong code stays silent on purpose: it must
   // not reveal that this box does anything other than search.
@@ -41,15 +46,20 @@
       triedCode = q;
       api("/api/extras/unlock", { method: "POST", body: { code: q } })
         .then(async (d) => {
-          // The code is not a search term; clear it so the list is not empty.
-          query = "";
+          // The code is not a search term; clear it so the list is not empty,
+          // unless the viewer has meanwhile typed something else.
+          if (query.trim() === q) query = "";
           triedCode = "";
           unlockNotice = { connected: !!d?.extras?.connected };
           window.dispatchEvent(new CustomEvent("jiotv:extras-changed"));
+          const isLatest = loads.start();
           try {
-            channels = await loadChannels(true);
-            // A failed first load must not keep hiding a list that now loaded.
-            error = "";
+            const list = await loadChannels(true);
+            if (isLatest()) {
+              channels = list;
+              // A failed first load must not keep hiding a list that now loaded.
+              error = "";
+            }
           } catch {}
         })
         .catch(() => {});
@@ -73,10 +83,12 @@
   });
 
   onMount(async () => {
+    const isLatest = loads.start();
     try {
-      channels = await loadChannels();
+      const list = await loadChannels();
+      if (isLatest()) channels = list;
     } catch (err) {
-      error = err.message;
+      if (isLatest()) error = err.message;
     } finally {
       loading = false;
     }

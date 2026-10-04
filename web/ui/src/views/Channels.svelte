@@ -48,6 +48,8 @@
           window.dispatchEvent(new CustomEvent("jiotv:extras-changed"));
           try {
             channels = await loadChannels(true);
+            // A failed first load must not keep hiding a list that now loaded.
+            error = "";
           } catch {}
         })
         .catch(() => {});

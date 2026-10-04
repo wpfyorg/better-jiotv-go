@@ -26,7 +26,7 @@ export async function api(path, { method = "GET", body } = {}) {
     data = { message: text };
   }
   if (!res.ok) {
-    if (res.status === 401 && signsOutOn401(path)) {
+    if (res.status === 401 && signsOutOn401(path, data?.message)) {
       window.dispatchEvent(new CustomEvent("jiotv:signed-out"));
     }
     throw new ApiError(res.status, data?.message || res.statusText);

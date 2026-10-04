@@ -82,8 +82,16 @@ export function playbackErrorMessage(error, capability = null) {
   return error?.message || String(error || "Playback failed");
 }
 
+// Shaka reports a failed license request as LICENSE_REQUEST_FAILED (6007) with
+// the underlying network error in data[0]; the HTTP status lives on that one.
+function unwrapLicenseError(error) {
+  const inner = Number(error?.code) === 6007 ? error?.data?.[0] : null;
+  return inner && typeof inner === "object" ? inner : error;
+}
+
 // Shaka BAD_HTTP_STATUS (1001) carries [uri, status, ...] in error.data.
 export function playbackHttpStatus(error) {
+  error = unwrapLicenseError(error);
   const status = error?.httpStatus ?? error?.data?.httpStatus ?? (Number(error?.code) === 1001 ? error?.data?.[1] : undefined);
   const n = Number(status);
   return Number.isFinite(n) ? n : null;
@@ -124,8 +132,13 @@ export function sourceResolutionFailure(error) {
 // the status, or null when the failure is anything else.
 export function sourceDenialStatus(error) {
   if (Number(error?.status) === 403) return 403;
-  const m = /\((40[13])\s+[A-Za-z ]+\)/.exec(error?.message ?? "");
-  return m ? Number(m[1]) : null;
+  const message = error?.message ?? "";
+  const m = /\((40[13])\s+[A-Za-z ]+\)/.exec(message);
+  if (m) return Number(m[1]);
+  // The extra source's playback API answers an unsubscribed channel with a 401
+  // that the server turns into this sentence, dropping the status line.
+  if (/is not in your extras plan/i.test(message)) return 401;
+  return null;
 }
 
 export async function loadLiveSource({ player, video, source, drmCapability = null, secureContext = globalThis.isSecureContext ?? true, isCurrent = () => true, onTerminalError = () => {} }) {

@@ -402,7 +402,9 @@ async fn drm_license_impl(
     };
     let decoded_url = match state.secure.decrypt(auth) {
         Ok(u) => u,
-        Err(_) => return (StatusCode::FORBIDDEN, "invalid auth parameter").into_response(),
+        // A 400, like `/render.mpd`: 403 on a media request must mean the
+        // provider refused, which the player UI reports as a denial.
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
 
     // A extras channel's license is authorised by the token already in the

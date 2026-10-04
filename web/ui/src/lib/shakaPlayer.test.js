@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyPlaybackFailure, loadLiveSource, sourceDenialStatus, sourceResolutionFailure } from "./shakaPlayer.js";
+import { classifyPlaybackFailure, loadLiveSource, playbackHttpStatus, sourceDenialStatus, sourceResolutionFailure } from "./shakaPlayer.js";
 
 function deferred() {
   let resolve;
@@ -391,4 +391,20 @@ test("recognizes the provider's refusal behind a failed /api/live/play request",
   assert.equal(sourceDenialStatus({ status: 500, message: "connection reset by peer" }), null);
   assert.equal(sourceDenialStatus(new Error("network down")), null);
   assert.equal(sourceResolutionFailure({ status: 404, message: "No stream found for channel id: 144" }), "provider_unavailable");
+});
+
+test("looks through a wrapped license failure to the provider's status", () => {
+  // Shaka reports a refused license request as 6007 with the network error inside.
+  const wrapped = (status) => ({ code: 6007, category: 6, data: [{ code: 1001, data: ["https://x/drm", status] }] });
+  assert.equal(playbackHttpStatus(wrapped(403)), 403);
+  assert.equal(classifyPlaybackFailure({ dashError: wrapped(403), secureContext: true, capability: { usable: true } }), "provider_denied");
+  assert.equal(classifyPlaybackFailure({ dashError: wrapped(404), secureContext: true, capability: { usable: true } }), "provider_unavailable");
+  // A 6007 with no usable inner error stays what it was.
+  assert.equal(playbackHttpStatus({ code: 6007, data: [] }), null);
+});
+
+test("recognizes the server's normalized extras subscription denial", () => {
+  const notInPlan = { status: 500, message: "channel 301201 is not in your extras plan" };
+  assert.equal(sourceDenialStatus(notInPlan), 401);
+  assert.equal(sourceResolutionFailure(notInPlan), "provider_denied");
 });

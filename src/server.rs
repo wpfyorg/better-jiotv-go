@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(manifest.status(), StatusCode::BAD_REQUEST);
 
         let license = send(state, &format!("/drm?auth={stale_license}&channel_id=154")).await;
-        assert_eq!(license.status(), StatusCode::FORBIDDEN);
+        assert_eq!(license.status(), StatusCode::BAD_REQUEST);
     }
 
     /// Never again: a request rewritten to strip `/k/<key>` must reach the

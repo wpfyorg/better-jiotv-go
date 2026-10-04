@@ -17,6 +17,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request supersedes the run in progress.
+concurrency:
+  group: docs-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     # Pull requests run only after Codex review is clean: the `codex-clean` label

@@ -1363,7 +1363,7 @@ async fn proxy_segment(
         .and_then(|u| u.host_str().map(|h| state.extras.player_user_agent_for(h)))
         .unwrap_or(television::PLAYER_USER_AGENT);
     let mut req = state.http.get(url).header(header::USER_AGENT, ua);
-    if let Some(t) = hdnea {
+    if let Some(t) = hdnea.filter(|t| !t.is_empty()) {
         req = req.header(header::COOKIE, format!("__hdnea__={t}"));
     }
     match req.send().await {
@@ -1738,6 +1738,37 @@ mod tests {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/tokenless.ts"))
+            .and(|request: &wiremock::Request| !request.headers.contains_key("cookie"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(2)
+            .mount(&upstream)
+            .await;
+        let tokenless_segment = format!("{}/tokenless.ts", upstream.uri());
+        assert_eq!(proxy_segment(&state, &tokenless_segment, None).await.0, 200);
+        assert_eq!(
+            proxy_segment(&state, &tokenless_segment, Some("")).await.0,
+            200
+        );
+        Mock::given(method("GET"))
+            .and(path("/credential.ts"))
+            .and(header("cookie", "__hdnea__=valid"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        assert_eq!(
+            proxy_segment(
+                &state,
+                &format!("{}/credential.ts", upstream.uri()),
+                Some("valid")
+            )
+            .await
+            .0,
+            200
+        );
+
         Mock::given(method("GET"))
             .and(path("/direct.m3u8"))
             .and(header("cookie", "__hdnea__=direct-old"))

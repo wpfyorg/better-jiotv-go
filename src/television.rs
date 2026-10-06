@@ -814,6 +814,34 @@ fn live_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
     tokens
 }
 
+fn live_hls_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut urls = vec![
+        &result.bitrates.auto,
+        &result.bitrates.high,
+        &result.bitrates.medium,
+        &result.bitrates.low,
+        &result.m3u8.auto,
+        &result.m3u8.high,
+        &result.m3u8.medium,
+        &result.m3u8.low,
+    ];
+    if result.result.to_lowercase().contains(".m3u8") {
+        urls.push(&result.result);
+    }
+    if result.mpd.result.to_lowercase().contains(".m3u8") {
+        urls.push(&result.mpd.result);
+    }
+    for url in urls {
+        if let Some(token) = extract_hdnea_from_url(url) {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
 fn finish_live_result(result: &mut LiveUrlOutput) {
     let tokens = live_hdnea_tokens(result);
     let hdnea = if tokens.len() == 1 {
@@ -860,7 +888,7 @@ pub(crate) fn select_hls_hdnea_token(
             return token.clone();
         }
     }
-    if let Some(token) = live_hdnea_tokens(live)
+    if let Some(token) = live_hls_hdnea_tokens(live)
         .into_iter()
         .find(|token| token != rejected_token)
     {
@@ -868,7 +896,7 @@ pub(crate) fn select_hls_hdnea_token(
     }
     selected_token
         .filter(|token| !token.is_empty())
-        .unwrap_or_else(|| live.hdnea.clone())
+        .unwrap_or_default()
 }
 
 /// Picks the best available HLS URL for a quality, mirroring
@@ -1185,6 +1213,29 @@ mod tests {
             "rotated-token"
         );
         assert_eq!(live.bitrates.medium, "https://cdn.example/medium.m3u8");
+    }
+
+    #[test]
+    fn hls_recovery_does_not_fall_back_to_dash_token() {
+        let mut live = LiveUrlOutput {
+            bitrates: Bitrates {
+                auto: "https://cdn.example/auto.m3u8?hdnea=stale-hls-token".into(),
+                ..Default::default()
+            },
+            mpd: Mpd {
+                high: "https://cdn.example/high.mpd?hdnea=dash-only-token".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        finish_live_result(&mut live);
+
+        assert!(live.hdnea.is_empty());
+        assert_eq!(
+            select_hls_hdnea_token(&live, "auto", "stale-hls-token"),
+            "stale-hls-token"
+        );
     }
 
     #[tokio::test]

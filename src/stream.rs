@@ -40,11 +40,12 @@ impl RenderCaches {
         self.generation.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn hdnea_key(channel_id: &str, stream_url: &str) -> String {
+    fn hdnea_key(channel_id: &str, stream_url: &str, quality: &str) -> String {
+        let quality = if quality.is_empty() { "auto" } else { quality };
         if stream_url.to_lowercase().contains("catchup") {
-            format!("{channel_id}|catchup")
+            format!("{channel_id}|catchup|{quality}")
         } else {
-            format!("{channel_id}|{}", strip_hdnea_from_url(stream_url))
+            format!("{channel_id}|hls|{quality}")
         }
     }
 
@@ -315,7 +316,7 @@ async fn live_impl_inner(
     live_url = to_absolute_stream_url(&live_url, absolute_base_from_live(&live).as_deref());
     let live_hdnea = television::select_hls_hdnea_token(&live, quality, "");
     if !live_hdnea.is_empty() {
-        let hdnea_key = RenderCaches::hdnea_key(id, &live_url);
+        let hdnea_key = RenderCaches::hdnea_key(id, &live_url, quality);
         state
             .render_caches
             .set_hdnea(cache_gen, &hdnea_key, &live_hdnea);
@@ -604,7 +605,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
     let quality = q.q.unwrap_or_default();
     let nested = q.nested.unwrap_or(false);
 
-    let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded);
+    let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded, &quality);
     let cached = state.render_caches.get_hdnea(&hdnea_key);
     let url_token = extract_hdnea_from_url(&decoded);
     let (mut render_url, mut token) = match &cached {
@@ -782,7 +783,8 @@ pub async fn render_ts_handler(
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
 
-    let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded);
+    let quality = q.q.as_deref().filter(|q| !q.is_empty()).unwrap_or("auto");
+    let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded, quality);
     let mut token = q
         .hdnea
         .clone()
@@ -803,7 +805,6 @@ pub async fn render_ts_handler(
         if !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
                 let rejected_token = token.as_deref().unwrap_or_default();
-                let quality = q.q.as_deref().filter(|q| !q.is_empty()).unwrap_or("auto");
                 let refreshed_token =
                     television::select_hls_hdnea_token(&refreshed, quality, rejected_token);
                 if !refreshed_token.is_empty() {
@@ -944,16 +945,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hdnea_cache_key_is_scoped_to_stream_url() {
-        let auto_one =
-            RenderCaches::hdnea_key("154", "https://cdn.example/auto.m3u8?hdnea=token-one");
-        let auto_two =
-            RenderCaches::hdnea_key("154", "https://cdn.example/auto.m3u8?hdnea=token-two");
-        let high =
-            RenderCaches::hdnea_key("154", "https://cdn.example/high.m3u8?hdnea=token-three");
+    fn hdnea_cache_key_is_scoped_to_hls_quality() {
+        let high_segment_one = RenderCaches::hdnea_key(
+            "154",
+            "https://cdn.example/high/segment-001.ts?hdnea=token-one",
+            "high",
+        );
+        let high_segment_two = RenderCaches::hdnea_key(
+            "154",
+            "https://cdn.example/high/segment-002.ts?hdnea=token-two",
+            "high",
+        );
+        let auto_segment = RenderCaches::hdnea_key(
+            "154",
+            "https://cdn.example/auto/segment-001.ts?hdnea=token-three",
+            "auto",
+        );
 
-        assert_eq!(auto_one, auto_two);
-        assert_ne!(auto_one, high);
+        assert_eq!(high_segment_one, high_segment_two);
+        assert_ne!(high_segment_one, auto_segment);
     }
 
     #[test]

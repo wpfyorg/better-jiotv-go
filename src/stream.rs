@@ -627,7 +627,11 @@ fn decrypt_render_auth(state: &AppState, auth: &str) -> Option<(String, Option<S
 }
 
 fn valid_hls_quality(quality: &str) -> bool {
-    quality.is_empty() || matches!(quality, "auto" | "high" | "medium" | "low")
+    quality.is_empty()
+        || matches!(
+            quality,
+            "auto" | "high" | "h" | "medium" | "med" | "m" | "low" | "l"
+        )
 }
 
 pub async fn render_m3u8_handler(
@@ -1096,7 +1100,7 @@ mod tests {
 
     #[test]
     fn hls_quality_is_bounded_to_known_values() {
-        for quality in ["", "auto", "high", "medium", "low"] {
+        for quality in ["", "auto", "high", "h", "medium", "med", "m", "low", "l"] {
             assert!(valid_hls_quality(quality), "quality: {quality}");
         }
         for quality in ["ultra", "auto-1", "HIGH", "../../cache"] {

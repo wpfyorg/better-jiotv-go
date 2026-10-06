@@ -44,7 +44,7 @@ impl RenderCaches {
         if stream_url.to_lowercase().contains("catchup") {
             format!("{channel_id}|catchup")
         } else {
-            channel_id.to_string()
+            format!("{channel_id}|{}", strip_hdnea_from_url(stream_url))
         }
     }
 
@@ -315,7 +315,10 @@ async fn live_impl_inner(
     live_url = to_absolute_stream_url(&live_url, absolute_base_from_live(&live).as_deref());
     let live_hdnea = television::select_hls_hdnea_token(&live, quality, "");
     if !live_hdnea.is_empty() {
-        state.render_caches.set_hdnea(cache_gen, id, &live_hdnea);
+        let hdnea_key = RenderCaches::hdnea_key(id, &live_url);
+        state
+            .render_caches
+            .set_hdnea(cache_gen, &hdnea_key, &live_hdnea);
     }
 
     let encrypted = state.secure.encrypt(&live_url);
@@ -637,8 +640,9 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
         if !recently_dead && !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
                 let retry_quality = if quality.is_empty() { "auto" } else { &quality };
+                let rejected = rejected_hdnea_for_refresh(status, &rejected_token);
                 let fresh_token =
-                    television::select_hls_hdnea_token(&refreshed, retry_quality, &rejected_token);
+                    television::select_hls_hdnea_token(&refreshed, retry_quality, rejected);
                 if !fresh_token.is_empty() {
                     state
                         .render_caches
@@ -742,6 +746,14 @@ fn append_hdnea_query_param(params: String, token: &str) -> String {
         format!("__hdnea__={encoded}")
     } else {
         format!("{params}&__hdnea__={encoded}")
+    }
+}
+
+fn rejected_hdnea_for_refresh(status: u16, token: &str) -> &str {
+    if matches!(status, 401 | 403) {
+        token
+    } else {
+        ""
     }
 }
 
@@ -930,6 +942,26 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn hdnea_cache_key_is_scoped_to_stream_url() {
+        let auto_one =
+            RenderCaches::hdnea_key("154", "https://cdn.example/auto.m3u8?hdnea=token-one");
+        let auto_two =
+            RenderCaches::hdnea_key("154", "https://cdn.example/auto.m3u8?hdnea=token-two");
+        let high =
+            RenderCaches::hdnea_key("154", "https://cdn.example/high.m3u8?hdnea=token-three");
+
+        assert_eq!(auto_one, auto_two);
+        assert_ne!(auto_one, high);
+    }
+
+    #[test]
+    fn only_auth_failures_reject_the_previous_hdnea_token() {
+        assert_eq!(rejected_hdnea_for_refresh(401, "old-token"), "old-token");
+        assert_eq!(rejected_hdnea_for_refresh(403, "old-token"), "old-token");
+        assert_eq!(rejected_hdnea_for_refresh(404, "old-token"), "");
+    }
 
     #[test]
     fn absolute_url_is_passed_through() {

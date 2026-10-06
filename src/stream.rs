@@ -459,19 +459,28 @@ async fn refresh_rendition(
     let child = child?;
     // Tokenless child URIs inherit master credentials in the original rewrite.
     // Verify that credential against this child before returning it for media.
-    let child_token = extract_hdnea_from_url(&child).unwrap_or_else(|| {
-        if root_cookie.is_empty() {
-            root_token.clone()
-        } else {
-            root_cookie.clone()
-        }
-    });
+    let child_is_root = child == root;
+    let child_token = if child_is_root && !root_cookie.is_empty() {
+        root_cookie.clone()
+    } else {
+        extract_hdnea_from_url(&child).unwrap_or_else(|| {
+            if root_cookie.is_empty() {
+                root_token.clone()
+            } else {
+                root_cookie.clone()
+            }
+        })
+    };
     let child_request = if child_token.is_empty() {
         child.clone()
     } else {
         strip_hdnea_from_url(&child)
     };
-    let (mut body, mut status, mut cookie) = state.tv.render(&child_request, &child_token).await;
+    let (mut body, mut status, mut cookie) = if child_is_root {
+        (body, status, root_cookie)
+    } else {
+        state.tv.render(&child_request, &child_token).await
+    };
     if matches!(status, 401 | 403) && !cookie.is_empty() && cookie != child_token {
         let (next_body, next_status, next_cookie) = state
             .tv
@@ -514,25 +523,12 @@ async fn refresh_rendition(
             token: child_token,
         });
     }
-    // A rendition may put its credential on media URIs instead of itself.
-    let tokens: std::collections::HashSet<String> = String::from_utf8_lossy(&body)
-        .lines()
-        .filter(|line| !line.starts_with('#'))
-        .filter_map(extract_hdnea_from_url)
-        .collect();
-    if tokens.len() == 1 {
-        Some(RecoveredManifest {
-            shared_media: false,
-            url: child,
-            token: tokens.into_iter().next().unwrap_or_default(),
-        })
-    } else {
-        Some(RecoveredManifest {
-            shared_media: false,
-            url: child,
-            token: String::new(),
-        })
-    }
+    // Media-only credentials stay on their own rewritten URIs.
+    Some(RecoveredManifest {
+        shared_media: false,
+        url: child,
+        token: String::new(),
+    })
 }
 
 #[cfg(test)]
@@ -1292,11 +1288,7 @@ pub async fn render_ts_handler(
             }
         });
     let rendition_key = RenderCaches::hdnea_key(&channel_id, quality, &scope);
-    let original_token = q
-        .hdnea
-        .clone()
-        .or_else(|| extract_hdnea_from_url(&decoded))
-        .unwrap_or_default();
+    let original_token = extract_hdnea_from_url(&decoded).unwrap_or_default();
     let shared_key = shared_media_key(&rendition_key, &original_token);
     let hdnea_key = format!(
         "{}|segment|{}",
@@ -1746,6 +1738,74 @@ mod tests {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let upstream = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/direct.m3u8"))
+            .and(header("cookie", "__hdnea__=direct-old"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Set-Cookie", "__hdnea__=direct-new; Path=/")
+                    .set_body_string("#EXTM3U\nseg.ts\n"),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let direct = LiveUrlOutput {
+            bitrates: television::Bitrates {
+                auto: format!("{}/direct.m3u8?hdnea=direct-old", upstream.uri()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let recovered = refresh_rendition(
+            &state,
+            &direct,
+            "auto",
+            &identity_scope(&direct.bitrates.auto, None),
+            "expired",
+            Some(&format!("{}/seg.ts", upstream.uri())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(recovered.token, "direct-new");
+        assert!(recovered.shared_media);
+
+        Mock::given(method("GET"))
+            .and(path("/tokenless-master.m3u8"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\ntokenless-child.m3u8\n",
+                ),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/tokenless-child.m3u8"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("#EXTM3U\nseg.ts?hdnea=media-only\n"),
+            )
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let tokenless = LiveUrlOutput {
+            bitrates: television::Bitrates {
+                auto: format!("{}/tokenless-master.m3u8", upstream.uri()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let recovered = refresh_rendition(
+            &state,
+            &tokenless,
+            "auto",
+            &format!("{}/tokenless-child.m3u8", upstream.uri()),
+            "expired",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(recovered.token.is_empty());
+
         Mock::given(method("GET"))
             .and(path("/rotated/root.m3u8"))
             .and(header("cookie", "__hdnea__=root-fresh"))

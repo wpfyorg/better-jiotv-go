@@ -121,6 +121,7 @@ fn rendition_entries(body: &str, base: &str) -> Vec<(String, String)> {
 struct RecoveredManifest {
     url: String,
     token: String,
+    shared_media: bool,
 }
 
 #[derive(Default)]
@@ -341,6 +342,68 @@ async fn refresh_channel_token(
     fetch_live(state, channel_id).await
 }
 
+// Share only a credential verified as common to every media URI in this playlist.
+fn media_credential(
+    body: &str,
+    child: &str,
+    target: &str,
+    fallback: &str,
+) -> Option<(String, bool)> {
+    let params = url::Url::parse(child)
+        .ok()
+        .map(|u| drop_hdnea_params(u.query().unwrap_or_default()))
+        .unwrap_or_default();
+    let mut all = std::collections::HashSet::new();
+    let mut exact = std::collections::HashSet::new();
+    for line in body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let candidate = resolve_media_url(line, child, &params);
+        let token = extract_hdnea_from_url(&candidate).unwrap_or_else(|| fallback.to_string());
+        if strip_hdnea_from_url(&candidate) == strip_hdnea_from_url(target) {
+            exact.insert(token.clone());
+        }
+        all.insert(token);
+    }
+    if exact.len() == 1 {
+        Some((exact.into_iter().next().unwrap(), all.len() == 1))
+    } else {
+        None
+    }
+}
+
+fn shared_media_key(rendition_key: &str, original_token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "{rendition_key}|shared|{}",
+        hex::encode(Sha256::digest(original_token.as_bytes()))
+    )
+}
+
+async fn render_with_cookie_retry(
+    state: &AppState,
+    url: &str,
+    token: &str,
+) -> (Vec<u8>, u16, String) {
+    let (body, status, cookie) = state.tv.render(url, token).await;
+    if matches!(status, 401 | 403) && !cookie.is_empty() && cookie != token {
+        let (body, status, next_cookie) =
+            state.tv.render(&strip_hdnea_from_url(url), &cookie).await;
+        return (
+            body,
+            status,
+            if next_cookie.is_empty() {
+                cookie
+            } else {
+                next_cookie
+            },
+        );
+    }
+    (body, status, cookie)
+}
+
 /// Recover from the refreshed rendition itself, never reuse a master token
 /// for a child merely because both were requested with auto quality.
 async fn refresh_rendition(
@@ -365,6 +428,7 @@ async fn refresh_rendition(
             || (identity.is_none() && strip_hdnea_from_url(&root) == original_url))
     {
         return Some(RecoveredManifest {
+            shared_media: false,
             token: television::select_hls_hdnea_token(live, quality, rejected),
             url: root,
         });
@@ -423,49 +487,29 @@ async fn refresh_rendition(
         return None;
     }
     if let Some(media_url) = media_url {
-        let params = drop_hdnea_params(
-            url::Url::parse(&child)
-                .ok()
-                .and_then(|u| u.query().map(str::to_owned))
-                .as_deref()
-                .unwrap_or_default(),
-        );
-        let mut tokens = std::collections::HashSet::new();
-        let mut exact_media = false;
-        let mut exact_tokens = std::collections::HashSet::new();
-        for line in String::from_utf8_lossy(&body)
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        {
-            let candidate = resolve_media_url(line, &child, &params);
-            let exact = strip_hdnea_from_url(&candidate) == strip_hdnea_from_url(media_url);
-            exact_media |= exact;
-            if let Some(token) = extract_hdnea_from_url(&candidate) {
-                if exact {
-                    exact_tokens.insert(token.clone());
-                }
-                tokens.insert(token);
-            }
-        }
-        if exact_tokens.len() == 1 {
-            return Some(RecoveredManifest {
-                url: child,
-                token: exact_tokens.into_iter().next().unwrap(),
-            });
-        }
-        if !exact_media || !tokens.is_empty() {
-            return None;
-        }
+        let fallback = if cookie.is_empty() {
+            &child_token
+        } else {
+            &cookie
+        };
+        let (token, shared_media) =
+            media_credential(&String::from_utf8_lossy(&body), &child, media_url, fallback)?;
+        return Some(RecoveredManifest {
+            url: child,
+            token,
+            shared_media,
+        });
     }
     if !cookie.is_empty() {
         return Some(RecoveredManifest {
+            shared_media: false,
             url: child,
             token: cookie,
         });
     }
     if !child_token.is_empty() {
         return Some(RecoveredManifest {
+            shared_media: false,
             url: child,
             token: child_token,
         });
@@ -478,11 +522,13 @@ async fn refresh_rendition(
         .collect();
     if tokens.len() == 1 {
         Some(RecoveredManifest {
+            shared_media: false,
             url: child,
             token: tokens.into_iter().next().unwrap_or_default(),
         })
     } else {
         Some(RecoveredManifest {
+            shared_media: false,
             url: child,
             token: String::new(),
         })
@@ -1064,7 +1110,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                     hdnea_key = RenderCaches::hdnea_key(&channel_id, &quality, &scope);
                     token = recovered.token;
                     state.render_caches.set_hdnea(cache_gen, &hdnea_key, &token);
-                    let (b, s, h) = state.tv.render(&render_url, &token).await;
+                    let (b, s, h) = render_with_cookie_retry(&state, &render_url, &token).await;
                     body = b;
                     status = s;
                     if !h.is_empty() {
@@ -1245,15 +1291,23 @@ pub async fn render_ts_handler(
                 format!("legacy-{quality}")
             }
         });
-    let hdnea_key = format!(
-        "{}|segment|{}",
-        RenderCaches::hdnea_key(&channel_id, quality, &scope),
-        strip_hdnea_from_url(&decoded)
-    );
-    let mut token = q
+    let rendition_key = RenderCaches::hdnea_key(&channel_id, quality, &scope);
+    let original_token = q
         .hdnea
         .clone()
-        .or_else(|| state.render_caches.get_hdnea(&hdnea_key));
+        .or_else(|| extract_hdnea_from_url(&decoded))
+        .unwrap_or_default();
+    let shared_key = shared_media_key(&rendition_key, &original_token);
+    let hdnea_key = format!(
+        "{}|segment|{}",
+        rendition_key,
+        strip_hdnea_from_url(&decoded)
+    );
+    let mut token = state
+        .render_caches
+        .get_hdnea(&hdnea_key)
+        .or_else(|| state.render_caches.get_hdnea(&shared_key))
+        .or_else(|| q.hdnea.clone());
     if token.is_some() {
         decoded = strip_hdnea_from_url(&decoded);
     } else {
@@ -1265,6 +1319,7 @@ pub async fn render_ts_handler(
 
     if matches!(status, 401 | 403) {
         state.render_caches.clear_hdnea(&hdnea_key);
+        state.render_caches.clear_hdnea(&shared_key);
         let stripped = strip_hdnea_from_url(&decoded);
         let mut fresh_token = None;
         if !channel_id.is_empty() {
@@ -1280,9 +1335,14 @@ pub async fn render_ts_handler(
                 .await;
                 if let Some(recovered) = recovered {
                     let refreshed_token = recovered.token;
+                    let cache_key = if recovered.shared_media {
+                        &shared_key
+                    } else {
+                        &hdnea_key
+                    };
                     state
                         .render_caches
-                        .set_hdnea(cache_gen, &hdnea_key, &refreshed_token);
+                        .set_hdnea(cache_gen, cache_key, &refreshed_token);
                     fresh_token = Some(refreshed_token);
                 }
             }
@@ -1689,6 +1749,16 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/rotated/root.m3u8"))
             .and(header("cookie", "__hdnea__=root-fresh"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("Set-Cookie", "__hdnea__=root-rotated; Path=/"),
+            )
+            .expect(2)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/rotated/root.m3u8"))
+            .and(header("cookie", "__hdnea__=root-rotated"))
             .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\nnew.ts\n"))
             .expect(2)
             .mount(&upstream)
@@ -1726,10 +1796,13 @@ mod tests {
             .unwrap();
             assert_eq!(recovered.url, live.bitrates.auto);
             assert_eq!(recovered.token, "root-fresh");
-            let (_, status, _) = state
-                .tv
-                .render(&strip_hdnea_from_url(&recovered.url), &recovered.token)
-                .await;
+            let (_, status, cookie) = render_with_cookie_retry(
+                &state,
+                &strip_hdnea_from_url(&recovered.url),
+                &recovered.token,
+            )
+            .await;
+            assert_eq!(cookie, "root-rotated");
             assert_eq!(status, 200);
         }
         Mock::given(method("GET")).and(path("/rotated/master.m3u8"))
@@ -2014,6 +2087,35 @@ mod tests {
             assert!(matching_rendition_url(&body, fresh, &strip_hdnea_from_url(&entries[0].0)).is_none());
             assert_ne!(RenderCaches::hdnea_key("1", "auto", &scope), RenderCaches::hdnea_key("1", "auto", &identity_scope(&entries[0].0, None)));
         }
+    }
+
+    #[test]
+    fn media_credentials_share_only_when_common() {
+        let child = "https://cdn.example/child.m3u8";
+        let a = "https://cdn.example/a.ts";
+        let shared = media_credential("#EXTM3U\na.ts\nb.ts\n", child, a, "rotated").unwrap();
+        assert_eq!(shared, ("rotated".into(), true));
+        let caches = RenderCaches::default();
+        let key = shared_media_key("rendition", "expired");
+        caches.set_hdnea(caches.generation(), &key, &shared.0);
+        assert_eq!(
+            caches
+                .get_hdnea(&shared_media_key("rendition", "expired"))
+                .as_deref(),
+            Some("rotated")
+        );
+        assert!(caches
+            .get_hdnea(&shared_media_key("rendition", "different"))
+            .is_none());
+        assert_eq!(
+            media_credential("a.ts?hdnea=A\nb.ts?hdnea=B\n", child, a, "cookie"),
+            Some(("A".into(), false))
+        );
+        assert_eq!(
+            media_credential("a.ts?hdnea=A\nb.ts\n", child, a, "cookie"),
+            Some(("A".into(), false))
+        );
+        assert!(media_credential("b.ts\n", child, a, "cookie").is_none());
     }
 
     #[test]

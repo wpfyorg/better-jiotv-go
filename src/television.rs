@@ -912,7 +912,6 @@ fn finish_live_result(result: &mut LiveUrlOutput) {
         if !result.mpd.result.to_lowercase().contains(".m3u8") {
             result.mpd.result = append_hdnea(&result.mpd.result, token);
         }
-        result.mpd.key = append_hdnea(&result.mpd.key, token);
         if result.result.to_lowercase().contains(".mpd") {
             result.result = append_hdnea(&result.result, token);
         }
@@ -1217,18 +1216,43 @@ mod tests {
                     "source {source} propagated to wrong HLS family URL {url}"
                 );
             }
-            for url in [
-                &live.mpd.bitrates.auto,
-                &live.mpd.auto,
-                &live.mpd.result,
-                &live.mpd.key,
-            ] {
+            for url in [&live.mpd.bitrates.auto, &live.mpd.auto, &live.mpd.result] {
                 assert_eq!(
                     url.contains("hdnea=rotated-token"),
                     !hls_source,
                     "source {source} propagated to wrong DASH family URL {url}"
                 );
             }
+            assert_eq!(
+                live.mpd.key, "https://dash.example/license",
+                "source: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn dash_media_token_does_not_mutate_license_url() {
+        for key in [
+            "https://license.example/license?contentId=123",
+            "https://license.example/license?contentId=123&hdnea=license-only-token",
+        ] {
+            let mut live = LiveUrlOutput {
+                mpd: Mpd {
+                    high: "https://cdn.example/high.mpd?hdnea=dash-media-token".into(),
+                    auto: "https://cdn.example/auto.mpd".into(),
+                    key: key.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            finish_live_result(&mut live);
+
+            assert_eq!(live.mpd.key, key);
+            assert_eq!(
+                live.mpd.auto,
+                "https://cdn.example/auto.mpd?hdnea=dash-media-token"
+            );
         }
     }
 

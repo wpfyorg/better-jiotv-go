@@ -934,10 +934,15 @@ pub(crate) fn select_hls_hdnea_token(
             return token.clone();
         }
     }
-    if let Some(token) = live_hls_hdnea_tokens(live)
-        .into_iter()
-        .find(|token| token != rejected_token)
-    {
+    let hls_tokens = live_hls_hdnea_tokens(live);
+    if selected_token.is_none() {
+        return if hls_tokens.len() == 1 && hls_tokens[0] != rejected_token {
+            hls_tokens[0].clone()
+        } else {
+            String::new()
+        };
+    }
+    if let Some(token) = hls_tokens.into_iter().find(|token| token != rejected_token) {
         return token;
     }
     selected_token
@@ -1310,6 +1315,24 @@ mod tests {
             select_hls_hdnea_token(&live, "auto", "stale-hls-token"),
             "stale-hls-token"
         );
+    }
+
+    #[test]
+    fn tokenless_selected_rendition_stays_tokenless_when_siblings_conflict() {
+        let mut live = LiveUrlOutput {
+            bitrates: Bitrates {
+                auto: "https://cdn.example/auto.m3u8".into(),
+                high: "https://cdn.example/high.m3u8?hdnea=high-token".into(),
+                medium: String::new(),
+                low: "https://cdn.example/low.m3u8?hdnea=low-token".into(),
+            },
+            ..Default::default()
+        };
+
+        finish_live_result(&mut live);
+
+        assert_eq!(live.bitrates.auto, "https://cdn.example/auto.m3u8");
+        assert!(select_hls_hdnea_token(&live, "auto", "").is_empty());
     }
 
     #[tokio::test]

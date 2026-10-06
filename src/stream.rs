@@ -626,6 +626,10 @@ fn decrypt_render_auth(state: &AppState, auth: &str) -> Option<(String, Option<S
     Some((payload.url, Some(payload.scope)))
 }
 
+fn valid_hls_quality(quality: &str) -> bool {
+    quality.is_empty() || matches!(quality, "auto" | "high" | "medium" | "low")
+}
+
 pub async fn render_m3u8_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<RenderQuery>,
@@ -654,6 +658,9 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
     };
     let decoded = to_absolute_stream_url(&decoded, None);
     let mut quality = q.q.unwrap_or_default();
+    if !valid_hls_quality(&quality) {
+        return (StatusCode::BAD_REQUEST, "invalid quality parameter").into_response();
+    }
     let nested = q.nested.unwrap_or(false);
     let mut scope = authenticated_scope
         .filter(|scope| !scope.is_empty())
@@ -678,6 +685,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
 
     if matches!(status, 401 | 403) && !new_hdnea.is_empty() && new_hdnea != rejected_token {
         rejected_token = token.clone();
+        render_url = strip_hdnea_from_url(&render_url);
         let (b, s, h) = state.tv.render(&render_url, &token).await;
         body = b;
         status = s;
@@ -863,7 +871,15 @@ pub async fn render_ts_handler(
         None => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
 
-    let quality = q.q.as_deref().filter(|q| !q.is_empty()).unwrap_or("auto");
+    let requested_quality = q.q.as_deref().unwrap_or_default();
+    if !valid_hls_quality(requested_quality) {
+        return (StatusCode::BAD_REQUEST, "invalid quality parameter").into_response();
+    }
+    let quality = if requested_quality.is_empty() {
+        "auto"
+    } else {
+        requested_quality
+    };
     let scope = authenticated_scope
         .filter(|scope| !scope.is_empty())
         .unwrap_or_else(|| {
@@ -1076,6 +1092,16 @@ mod tests {
         assert_eq!(rejected_hdnea_for_refresh(401, "old-token"), "old-token");
         assert_eq!(rejected_hdnea_for_refresh(403, "old-token"), "old-token");
         assert_eq!(rejected_hdnea_for_refresh(404, "old-token"), "");
+    }
+
+    #[test]
+    fn hls_quality_is_bounded_to_known_values() {
+        for quality in ["", "auto", "high", "medium", "low"] {
+            assert!(valid_hls_quality(quality), "quality: {quality}");
+        }
+        for quality in ["ultra", "auto-1", "HIGH", "../../cache"] {
+            assert!(!valid_hls_quality(quality), "quality: {quality}");
+        }
     }
 
     #[test]

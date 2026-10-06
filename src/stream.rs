@@ -83,6 +83,7 @@ impl RenderCaches {
         if self.generation() != generation {
             return;
         }
+        map.retain(|_, (_, at)| at.elapsed() <= HDNEA_CACHE_TTL);
         map.insert(key.to_string(), (token.to_string(), Instant::now()));
     }
 
@@ -249,6 +250,7 @@ async fn refresh_rendition_token(
     live: &LiveUrlOutput,
     quality: &str,
     scope: &str,
+    rejected: &str,
 ) -> String {
     let root = television::select_best_live_hls_url(live, quality);
     if root.is_empty() {
@@ -257,10 +259,10 @@ async fn refresh_rendition_token(
     let root = to_absolute_stream_url(&root, absolute_base_from_live(live).as_deref());
     // Legacy links have no authenticated manifest scope.
     if scope.starts_with("legacy-") || strip_hdnea_from_url(&root) == scope {
-        return extract_hdnea_from_url(&root).unwrap_or_default();
+        return television::select_hls_hdnea_token(live, quality, rejected);
     }
     let root_token = extract_hdnea_from_url(&root).unwrap_or_default();
-    let (body, status, _) = state.tv.render(&root, &root_token).await;
+    let (body, status, root_cookie) = state.tv.render(&root, &root_token).await;
     if status != 200 {
         return String::new();
     }
@@ -269,7 +271,13 @@ async fn refresh_rendition_token(
     };
     // Tokenless child URIs inherit master credentials in the original rewrite.
     // Verify that credential against this child before returning it for media.
-    let child_token = extract_hdnea_from_url(&child).unwrap_or_else(|| root_token.clone());
+    let child_token = extract_hdnea_from_url(&child).unwrap_or_else(|| {
+        if root_cookie.is_empty() {
+            root_token.clone()
+        } else {
+            root_cookie.clone()
+        }
+    });
     let child_request = if child_token.is_empty() {
         child.clone()
     } else {
@@ -773,7 +781,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
         None => (decoded.clone(), url_token.clone().unwrap_or_default()),
     };
 
-    let rejected_token = token.clone();
+    let mut rejected_token = token.clone();
     let (mut body, mut status, new_hdnea) = state.tv.render(&render_url, &token).await;
     if !new_hdnea.is_empty() {
         state
@@ -783,6 +791,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
     }
 
     if matches!(status, 401 | 403) && !new_hdnea.is_empty() && new_hdnea != rejected_token {
+        rejected_token = token.clone();
         render_url = strip_hdnea_from_url(&render_url);
         let (b, s, h) = state.tv.render(&render_url, &token).await;
         body = b;
@@ -805,8 +814,14 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                 } else {
                     quality.clone()
                 };
-                let fresh_token =
-                    refresh_rendition_token(&state, &refreshed, &retry_quality, &scope).await;
+                let fresh_token = refresh_rendition_token(
+                    &state,
+                    &refreshed,
+                    &retry_quality,
+                    &scope,
+                    if status == 404 { "" } else { &rejected_token },
+                )
+                .await;
                 if !fresh_token.is_empty() {
                     state
                         .render_caches
@@ -843,7 +858,20 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                         let (b, s, h) = state.tv.render(&render_url, &token).await;
                         body = b;
                         status = s;
-                        if !h.is_empty() {
+                        if matches!(status, 401 | 403) && !h.is_empty() && h != token {
+                            let (retry_body, retry_status, retry_cookie) = state
+                                .tv
+                                .render(&strip_hdnea_from_url(&render_url), &h)
+                                .await;
+                            body = retry_body;
+                            status = retry_status;
+                            token = if retry_cookie.is_empty() {
+                                h
+                            } else {
+                                retry_cookie
+                            };
+                            state.render_caches.set_hdnea(cache_gen, &hdnea_key, &token);
+                        } else if !h.is_empty() {
                             state.render_caches.set_hdnea(cache_gen, &hdnea_key, &h);
                             token = h;
                         }
@@ -998,8 +1026,14 @@ pub async fn render_ts_handler(
         let mut fresh_token = None;
         if !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
-                let refreshed_token =
-                    refresh_rendition_token(&state, &refreshed, quality, &scope).await;
+                let refreshed_token = refresh_rendition_token(
+                    &state,
+                    &refreshed,
+                    quality,
+                    &scope,
+                    token.as_deref().unwrap_or_default(),
+                )
+                .await;
                 if !refreshed_token.is_empty() {
                     state
                         .render_caches
@@ -1171,6 +1205,8 @@ mod tests {
             ),
         );
 
+        caches.set_hdnea(caches.generation(), "new-scope", "fresh");
+        assert!(!caches.hdnea.read().unwrap().contains_key(&key));
         assert!(caches.get_hdnea(&key).is_none());
         assert!(!caches.hdnea.read().unwrap().contains_key(&key));
     }
@@ -1407,7 +1443,7 @@ mod tests {
         let upstream = MockServer::start().await;
         Mock::given(method("GET")).and(path("/master.m3u8"))
             .and(header("cookie", "__hdnea__=master-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
+            .respond_with(ResponseTemplate::new(200).insert_header("Set-Cookie", "__hdnea__=rotated-master; Path=/").set_body_string(
                 "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"muxed\"\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8?hdnea=low-token\n#EXT-X-STREAM-INF:BANDWIDTH=2\nhigh.m3u8?hdnea=child-token\nshared.m3u8\n"
             )).expect(2).mount(&upstream).await;
         Mock::given(method("GET"))
@@ -1419,7 +1455,7 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/shared.m3u8"))
-            .and(header("cookie", "__hdnea__=master-token"))
+            .and(header("cookie", "__hdnea__=rotated-master"))
             .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\nseg.ts\n"))
             .expect(1)
             .mount(&upstream)
@@ -1433,7 +1469,7 @@ mod tests {
         };
         let child_scope = format!("{}/high.m3u8", upstream.uri());
         assert_eq!(
-            refresh_rendition_token(&state, &live, "auto", &child_scope).await,
+            refresh_rendition_token(&state, &live, "auto", &child_scope, "").await,
             "child-token"
         );
 
@@ -1442,10 +1478,31 @@ mod tests {
                 &state,
                 &live,
                 "auto",
-                &format!("{}/shared.m3u8", upstream.uri())
+                &format!("{}/shared.m3u8", upstream.uri()),
+                "",
             )
             .await,
-            "master-token"
+            "rotated-master"
+        );
+
+        let conflicting = LiveUrlOutput {
+            bitrates: television::Bitrates {
+                auto: "https://cdn.example/root.m3u8?hdnea=rejected".into(),
+                high: "https://cdn.example/high.m3u8?hdnea=rotated".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            refresh_rendition_token(
+                &state,
+                &conflicting,
+                "auto",
+                "https://cdn.example/root.m3u8",
+                "rejected"
+            )
+            .await,
+            "rotated"
         );
 
         let body = "#EXTM3U\nseg1.ts\n";

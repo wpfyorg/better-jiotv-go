@@ -40,13 +40,9 @@ impl RenderCaches {
         self.generation.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn hdnea_key(channel_id: &str, stream_url: &str, quality: &str) -> String {
+    fn hdnea_key(channel_id: &str, quality: &str, scope: &str) -> String {
         let quality = if quality.is_empty() { "auto" } else { quality };
-        if stream_url.to_lowercase().contains("catchup") {
-            format!("{channel_id}|catchup|{quality}")
-        } else {
-            format!("{channel_id}|hls|{quality}")
-        }
+        format!("{channel_id}|hls|{quality}|{scope}")
     }
 
     pub fn get_hdnea(&self, key: &str) -> Option<String> {
@@ -316,7 +312,8 @@ async fn live_impl_inner(
     live_url = to_absolute_stream_url(&live_url, absolute_base_from_live(&live).as_deref());
     let live_hdnea = television::select_hls_hdnea_token(&live, quality, "");
     if !live_hdnea.is_empty() {
-        let hdnea_key = RenderCaches::hdnea_key(id, &live_url, quality);
+        let scope = strip_hdnea_from_url(&live_url);
+        let hdnea_key = RenderCaches::hdnea_key(id, quality, &scope);
         state
             .render_caches
             .set_hdnea(cache_gen, &hdnea_key, &live_hdnea);
@@ -341,6 +338,7 @@ pub struct RenderQuery {
     channel_key_id: Option<String>,
     q: Option<String>,
     nested: Option<bool>,
+    scope: Option<String>,
 }
 
 /// Rewrites a fetched HLS manifest so every media/key URI routes back
@@ -352,6 +350,7 @@ fn rewrite_m3u8(
     params: &str,
     channel_id: &str,
     quality: &str,
+    scope: &str,
     disable_ts_handler: bool,
 ) -> String {
     let mut out = String::with_capacity(body.len());
@@ -413,12 +412,18 @@ fn rewrite_m3u8(
                 if !is_manifest && disable_ts_handler {
                     out.push_str(&full_url);
                 } else {
+                    let link_scope = if is_manifest {
+                        strip_hdnea_from_url(&full_url)
+                    } else {
+                        scope.to_string()
+                    };
                     out.push_str(&build_encrypted_link(
                         endpoint,
                         &full_url,
                         channel_id,
                         quality,
                         is_manifest,
+                        &link_scope,
                     ));
                 }
             }
@@ -459,14 +464,15 @@ fn build_encrypted_link(
     channel_id: &str,
     quality: &str,
     nested: bool,
+    scope: &str,
 ) -> String {
     // Encryption happens in the caller (needs access to AppState::secure);
     // this function is only reached through `render_replace`, which does
     // the encryption inline. Kept separate for the unit tests below, which
     // exercise URL resolution without needing a real SecureUrl.
     format!(
-        "{endpoint}||{full_url}||{channel_id}||{quality}||{}",
-        if nested { "1" } else { "" }
+        "{endpoint}||{full_url}||{channel_id}||{quality}||{}||{scope}",
+        if nested { "1" } else { "" },
     )
 }
 
@@ -482,7 +488,7 @@ fn rewrite_key_attr_line(line: &str, params: &str, channel_id: &str) -> Option<S
     if !(key_url.starts_with("http://") || key_url.starts_with("https://")) {
         return None;
     }
-    let replacement = build_encrypted_link("/render.key", key_url, channel_id, "", false);
+    let replacement = build_encrypted_link("/render.key", key_url, channel_id, "", false, "");
     let _ = params;
     Some(format!(
         "{}{}{}",
@@ -505,7 +511,8 @@ fn rewrite_media_attr_line(
     let uri_start = line.find("URI=\"")? + 5;
     let uri_end = line[uri_start..].find('"')? + uri_start;
     let url = resolve_media_url(&line[uri_start..uri_end], base_url, params);
-    let replacement = build_encrypted_link("/render.m3u8", &url, channel_id, quality, true);
+    let scope = strip_hdnea_from_url(&url);
+    let replacement = build_encrypted_link("/render.m3u8", &url, channel_id, quality, true, &scope);
     Some(format!(
         "{}{}{}",
         &line[..uri_start],
@@ -515,7 +522,7 @@ fn rewrite_media_attr_line(
 }
 
 /// Runs `rewrite_m3u8` and then actually encrypts every
-/// `endpoint||url||id||q||nested`
+/// `endpoint||url||id||q||nested||scope`
 /// placeholder it produced (see `build_encrypted_link`).
 fn render_replace(
     state: &AppState,
@@ -524,6 +531,7 @@ fn render_replace(
     params: &str,
     channel_id: &str,
     quality: &str,
+    scope: &str,
 ) -> String {
     let placeholder = rewrite_m3u8(
         body,
@@ -531,6 +539,7 @@ fn render_replace(
         params,
         channel_id,
         quality,
+        scope,
         state.config.disable_ts_handler,
     );
     let mut out = String::with_capacity(placeholder.len());
@@ -555,12 +564,13 @@ fn render_replace(
 }
 
 fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
-    let mut parts = s.splitn(5, "||");
+    let mut parts = s.splitn(6, "||");
     let endpoint = parts.next()?;
     let url = parts.next()?;
     let channel_id = parts.next()?;
     let quality = parts.next()?;
     let nested = parts.next().unwrap_or_default() == "1";
+    let scope = parts.next().unwrap_or_default();
     let encrypted = state.secure.encrypt(url);
     let mut out = format!("{endpoint}?auth={encrypted}");
     if !channel_id.is_empty() {
@@ -571,6 +581,10 @@ fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
     }
     if nested {
         out.push_str("&nested=true");
+    }
+    if !scope.is_empty() {
+        out.push_str("&scope=");
+        out.push_str(&urlencoding::encode(scope));
     }
     Some(out)
 }
@@ -604,8 +618,12 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
     let decoded = to_absolute_stream_url(&decoded, None);
     let quality = q.q.unwrap_or_default();
     let nested = q.nested.unwrap_or(false);
+    let mut scope = q
+        .scope
+        .filter(|scope| !scope.is_empty())
+        .unwrap_or_else(|| strip_hdnea_from_url(&decoded));
 
-    let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded, &quality);
+    let mut hdnea_key = RenderCaches::hdnea_key(&channel_id, &quality, &scope);
     let cached = state.render_caches.get_hdnea(&hdnea_key);
     let url_token = extract_hdnea_from_url(&decoded);
     let (mut render_url, mut token) = match &cached {
@@ -673,6 +691,8 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                             continue;
                         }
                         tried.insert(candidate.clone());
+                        scope = strip_hdnea_from_url(&candidate);
+                        hdnea_key = RenderCaches::hdnea_key(&channel_id, &quality, &scope);
                         render_url = candidate;
                         let (b, s, h) = state.tv.render(&render_url, &token).await;
                         body = b;
@@ -711,7 +731,15 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
     params = append_hdnea_query_param(params, &token);
 
     let body_str = String::from_utf8_lossy(&body);
-    let rewritten = render_replace(&state, &body_str, &base_url, &params, &channel_id, &quality);
+    let rewritten = render_replace(
+        &state,
+        &body_str,
+        &base_url,
+        &params,
+        &channel_id,
+        &quality,
+        &scope,
+    );
 
     let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
     Response::builder()
@@ -764,6 +792,7 @@ pub struct SegmentQuery {
     channel_key_id: Option<String>,
     hdnea: Option<String>,
     q: Option<String>,
+    scope: Option<String>,
 }
 
 pub async fn render_ts_handler(
@@ -784,7 +813,19 @@ pub async fn render_ts_handler(
     };
 
     let quality = q.q.as_deref().filter(|q| !q.is_empty()).unwrap_or("auto");
-    let hdnea_key = RenderCaches::hdnea_key(&channel_id, &decoded, quality);
+    let scope = q
+        .scope
+        .as_deref()
+        .filter(|scope| !scope.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if decoded.to_lowercase().contains("catchup") {
+                "legacy-catchup".to_string()
+            } else {
+                format!("legacy-{quality}")
+            }
+        });
+    let hdnea_key = RenderCaches::hdnea_key(&channel_id, quality, &scope);
     let mut token = q
         .hdnea
         .clone()
@@ -945,25 +986,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hdnea_cache_key_is_scoped_to_hls_quality() {
-        let high_segment_one = RenderCaches::hdnea_key(
-            "154",
-            "https://cdn.example/high/segment-001.ts?hdnea=token-one",
-            "high",
-        );
-        let high_segment_two = RenderCaches::hdnea_key(
-            "154",
-            "https://cdn.example/high/segment-002.ts?hdnea=token-two",
-            "high",
-        );
-        let auto_segment = RenderCaches::hdnea_key(
-            "154",
-            "https://cdn.example/auto/segment-001.ts?hdnea=token-three",
-            "auto",
-        );
+    fn hdnea_cache_key_is_scoped_to_hls_rendition() {
+        let high_one =
+            RenderCaches::hdnea_key("154", "high", "https://cdn.example/high/rendition.m3u8");
+        let high_two =
+            RenderCaches::hdnea_key("154", "high", "https://cdn.example/high/rendition.m3u8");
+        let auto_same_scope =
+            RenderCaches::hdnea_key("154", "auto", "https://cdn.example/high/rendition.m3u8");
+        let auto_other_rendition =
+            RenderCaches::hdnea_key("154", "auto", "https://cdn.example/low/rendition.m3u8");
 
-        assert_eq!(high_segment_one, high_segment_two);
-        assert_ne!(high_segment_one, auto_segment);
+        assert_eq!(high_one, high_two);
+        assert_ne!(high_one, auto_same_scope);
+        assert_ne!(auto_same_scope, auto_other_rendition);
     }
 
     #[test]
@@ -1033,10 +1068,19 @@ mod tests {
     #[test]
     fn rewrites_master_playlist_variant_lines() {
         let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nchunk_1.m3u8?hdnea=old\n";
-        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "auto", false);
+        let rewritten = rewrite_m3u8(
+            body,
+            "https://a.b/live/",
+            "",
+            "154",
+            "auto",
+            "https://a.b/live/master.m3u8",
+            false,
+        );
         assert!(
             rewritten.contains("/render.m3u8||https://a.b/live/chunk_1.m3u8?hdnea=old||154||auto")
         );
+        assert!(rewritten.contains("||1||https://a.b/live/chunk_1.m3u8"));
     }
 
     #[test]
@@ -1068,17 +1112,27 @@ mod tests {
             "__hdnea__=fresh",
             "154",
             "auto",
+            "https://a.b/live/rendition.m3u8",
             false,
         );
         assert!(
             rewritten.contains("/render.ts||https://a.b/live/seg1.ts?__hdnea__=fresh||154||auto")
         );
+        assert!(rewritten.contains("||||https://a.b/live/rendition.m3u8"));
     }
 
     #[test]
     fn rewrites_packed_audio_segments_to_aac_route() {
         let body = "#EXTM3U\n#EXTINF:4,\naudio_1.aac?x=1\n#EXTINF:4,\nvideo_1.ts\n";
-        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "ex_1", "auto", false);
+        let rewritten = rewrite_m3u8(
+            body,
+            "https://a.b/live/",
+            "",
+            "ex_1",
+            "auto",
+            "https://a.b/live/rendition.m3u8",
+            false,
+        );
         assert!(rewritten.contains("\n/render.aac||https://a.b/live/audio_1.aac?x=1||ex_1||auto"));
         assert!(rewritten.contains("\n/render.ts||https://a.b/live/video_1.ts||ex_1||auto"));
     }
@@ -1086,7 +1140,15 @@ mod tests {
     #[test]
     fn rewritten_segments_keep_forced_quality() {
         let body = "#EXTM3U\nseg1.ts\n";
-        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "high", false);
+        let rewritten = rewrite_m3u8(
+            body,
+            "https://a.b/live/",
+            "",
+            "154",
+            "high",
+            "https://a.b/live/high.m3u8",
+            false,
+        );
         assert!(rewritten.contains("/render.ts||https://a.b/live/seg1.ts||154||high"));
     }
 
@@ -1107,7 +1169,15 @@ mod tests {
     #[test]
     fn ts_passthrough_when_disabled() {
         let body = "#EXTM3U\nseg1.ts\n";
-        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "auto", true);
+        let rewritten = rewrite_m3u8(
+            body,
+            "https://a.b/live/",
+            "",
+            "154",
+            "auto",
+            "https://a.b/live/rendition.m3u8",
+            true,
+        );
         assert_eq!(rewritten, "#EXTM3U\nhttps://a.b/live/seg1.ts\n");
     }
 
@@ -1115,8 +1185,18 @@ mod tests {
     fn rewrites_key_uri_in_ext_x_key_line() {
         let body =
             "#EXT-X-KEY:METHOD=AES-128,URI=\"https://tv.media.jio.com/key.pkey\",IV=0x1\nseg1.ts\n";
-        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "auto", false);
-        assert!(rewritten.starts_with("#EXT-X-KEY:METHOD=AES-128,URI=\"/render.key||https://tv.media.jio.com/key.pkey||154||||\""));
+        let rewritten = rewrite_m3u8(
+            body,
+            "https://a.b/live/",
+            "",
+            "154",
+            "auto",
+            "https://a.b/live/rendition.m3u8",
+            false,
+        );
+        assert!(rewritten.starts_with(
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"/render.key||https://tv.media.jio.com/key.pkey||154||"
+        ));
         assert!(rewritten.contains(",IV=0x1"));
     }
 
@@ -1146,7 +1226,15 @@ mod tests {
             listen: Default::default(),
         };
         let body = "#EXTM3U\nseg1.ts\n";
-        let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");
+        let out = render_replace(
+            &state,
+            body,
+            "https://a.b/live/",
+            "",
+            "154",
+            "auto",
+            "https://a.b/live/rendition.m3u8",
+        );
         assert!(out.contains("/render.ts?auth="));
         assert!(out.contains("&channel_key_id=154"));
         assert!(!out.contains("||"));
@@ -1156,7 +1244,15 @@ mod tests {
                 let body = format!(
                     "#EXTM3U\n#{tag}:METHOD=AES-128,URI=\"https://a.b/key.pkey\"{suffix}\nseg1.ts\n"
                 );
-                let out = render_replace(&state, &body, "https://a.b/live/", "", "154", "auto");
+                let out = render_replace(
+                    &state,
+                    &body,
+                    "https://a.b/live/",
+                    "",
+                    "154",
+                    "auto",
+                    "https://a.b/live/rendition.m3u8",
+                );
                 let line = out.lines().nth(1).unwrap();
                 let uri = line.split("URI=\"").nth(1).unwrap();
                 let (uri, remainder) = uri.split_once('"').expect("key URI must close");
@@ -1190,6 +1286,7 @@ mod tests {
                 "__hdnea__=fresh",
                 "154",
                 "auto",
+                "https://a.b/live/master.m3u8",
             );
             let uri = out.lines().next().unwrap().split("URI=\"").nth(1).unwrap();
             let (uri, suffix) = uri.split_once('"').unwrap();
@@ -1228,8 +1325,24 @@ mod tests {
             listen: Default::default(),
         };
         let body = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\nchild.m3u8\n";
-        let out = render_replace(&state, body, "https://a.b/live/", "", "154", "auto");
+        let out = render_replace(
+            &state,
+            body,
+            "https://a.b/live/",
+            "",
+            "154",
+            "auto",
+            "https://a.b/live/master.m3u8",
+        );
         assert!(out.contains("/render.m3u8?auth="));
         assert!(out.contains("&nested=true"));
+        let child_uri = out.lines().nth(2).unwrap();
+        let child_url = url::Url::parse(&format!("http://localhost{child_uri}")).unwrap();
+        let scope = child_url
+            .query_pairs()
+            .find(|(k, _)| k == "scope")
+            .unwrap()
+            .1;
+        assert_eq!(scope, "https://a.b/live/child.m3u8");
     }
 }

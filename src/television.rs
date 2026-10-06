@@ -433,7 +433,7 @@ fn append_hdnea(u: &str, hdnea: &str) -> String {
         return u.to_string();
     }
     let sep = if u.contains('?') { '&' } else { '?' };
-    format!("{u}{sep}hdnea={hdnea}")
+    format!("{u}{sep}hdnea={}", urlencoding::encode(hdnea))
 }
 
 pub struct Television {
@@ -783,8 +783,9 @@ pub fn civil_from_unix(secs: u64) -> (i64, i64, i64, i64, i64, i64) {
     (y, m, d, hh, mm, ss)
 }
 
-fn finish_live_result(result: &mut LiveUrlOutput) {
-    let hdnea = [
+fn live_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for url in [
         &result.bitrates.auto,
         &result.bitrates.high,
         &result.bitrates.medium,
@@ -803,10 +804,23 @@ fn finish_live_result(result: &mut LiveUrlOutput) {
         &result.mpd.medium,
         &result.mpd.low,
         &result.mpd.result,
-    ]
-    .into_iter()
-    .find_map(|url| extract_hdnea_from_url(url))
-    .unwrap_or_default();
+    ] {
+        if let Some(token) = extract_hdnea_from_url(url) {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
+fn finish_live_result(result: &mut LiveUrlOutput) {
+    let tokens = live_hdnea_tokens(result);
+    let hdnea = if tokens.len() == 1 {
+        tokens[0].clone()
+    } else {
+        String::new()
+    };
     result.hdnea = hdnea.clone();
     if !hdnea.is_empty() {
         result.bitrates.auto = append_hdnea(&result.bitrates.auto, &hdnea);
@@ -829,6 +843,32 @@ fn finish_live_result(result: &mut LiveUrlOutput) {
         result.mpd.result = append_hdnea(&result.mpd.result, &hdnea);
         result.mpd.key = append_hdnea(&result.mpd.key, &hdnea);
     }
+}
+
+/// Chooses the HDNEA token for an HLS stream. During recovery, prefer a token
+/// attached to the selected stream unless it is the token that just failed;
+/// then use another token returned by the refreshed playback response.
+pub(crate) fn select_hls_hdnea_token(
+    live: &LiveUrlOutput,
+    quality: &str,
+    rejected_token: &str,
+) -> String {
+    let selected = select_best_live_hls_url(live, quality);
+    let selected_token = extract_hdnea_from_url(&selected);
+    if let Some(token) = selected_token.as_ref() {
+        if token != rejected_token {
+            return token.clone();
+        }
+    }
+    if let Some(token) = live_hdnea_tokens(live)
+        .into_iter()
+        .find(|token| token != rejected_token)
+    {
+        return token;
+    }
+    selected_token
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| live.hdnea.clone())
 }
 
 /// Picks the best available HLS URL for a quality, mirroring
@@ -1113,6 +1153,38 @@ mod tests {
             extract_hdnea_from_url(url).as_deref(),
             Some("st=100~exp=200~acl=/*~hmac=test")
         );
+    }
+
+    #[test]
+    fn append_hdnea_percent_encodes_reserved_query_delimiters() {
+        let token = "st=100~exp=200~acl=/*&scope=live#fragment";
+        let url = append_hdnea("https://cdn.example/live.m3u8?foo=bar", token);
+
+        assert!(!url.contains("&scope=live"));
+        assert!(!url.contains("#fragment"));
+        assert_eq!(extract_hdnea_from_url(&url).as_deref(), Some(token));
+    }
+
+    #[test]
+    fn conflicting_hdnea_tokens_prefer_rotated_token_after_rejection() {
+        let mut live = LiveUrlOutput {
+            bitrates: Bitrates {
+                auto: "https://cdn.example/auto.m3u8?hdnea=stale-token".into(),
+                high: "https://cdn.example/high.m3u8?hdnea=rotated-token".into(),
+                medium: "https://cdn.example/medium.m3u8".into(),
+                low: String::new(),
+            },
+            ..Default::default()
+        };
+
+        finish_live_result(&mut live);
+
+        assert!(live.hdnea.is_empty());
+        assert_eq!(
+            select_hls_hdnea_token(&live, "auto", "stale-token"),
+            "rotated-token"
+        );
+        assert_eq!(live.bitrates.medium, "https://cdn.example/medium.m3u8");
     }
 
     #[tokio::test]

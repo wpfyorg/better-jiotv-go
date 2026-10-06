@@ -313,8 +313,9 @@ async fn live_impl_inner(
         return (StatusCode::NOT_FOUND, message).into_response();
     }
     live_url = to_absolute_stream_url(&live_url, absolute_base_from_live(&live).as_deref());
-    if !live.hdnea.is_empty() {
-        state.render_caches.set_hdnea(cache_gen, id, &live.hdnea);
+    let live_hdnea = television::select_hls_hdnea_token(&live, quality, "");
+    if !live_hdnea.is_empty() {
+        state.render_caches.set_hdnea(cache_gen, id, &live_hdnea);
     }
 
     let encrypted = state.secure.encrypt(&live_url);
@@ -610,7 +611,9 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
 
     let (mut body, mut status, new_hdnea) = state.tv.render(&render_url, &token).await;
     if !new_hdnea.is_empty() {
-        state.render_caches.set_hdnea(cache_gen, &hdnea_key, &new_hdnea);
+        state
+            .render_caches
+            .set_hdnea(cache_gen, &hdnea_key, &new_hdnea);
         token = new_hdnea.clone();
     }
 
@@ -621,9 +624,14 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
         let recently_dead = status == 404 && state.render_caches.is_dead(&channel_id);
         if !recently_dead && !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
-                if !refreshed.hdnea.is_empty() {
-                    state.render_caches.set_hdnea(cache_gen, &hdnea_key, &refreshed.hdnea);
-                    token = refreshed.hdnea.clone();
+                let retry_quality = if quality.is_empty() { "auto" } else { &quality };
+                let fresh_token =
+                    television::select_hls_hdnea_token(&refreshed, retry_quality, &token);
+                if !fresh_token.is_empty() {
+                    state
+                        .render_caches
+                        .set_hdnea(cache_gen, &hdnea_key, &fresh_token);
+                    token = fresh_token;
                 }
                 render_url = strip_hdnea_from_url(&decoded);
                 let (b, s, h) = state.tv.render(&render_url, &token).await;
@@ -635,7 +643,6 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                 }
 
                 if status == 404 && !nested {
-                    let retry_quality = if quality.is_empty() { "auto" } else { &quality };
                     let candidates = [retry_quality, "auto", "high", "medium", "low"];
                     let mut tried = std::collections::HashSet::new();
                     tried.insert(render_url.clone());
@@ -764,9 +771,14 @@ pub async fn render_ts_handler(
         let mut fresh_token = None;
         if !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
-                if !refreshed.hdnea.is_empty() {
-                    state.render_caches.set_hdnea(cache_gen, &hdnea_key, &refreshed.hdnea);
-                    fresh_token = Some(refreshed.hdnea);
+                let rejected_token = token.as_deref().unwrap_or_default();
+                let refreshed_token =
+                    television::select_hls_hdnea_token(&refreshed, "auto", rejected_token);
+                if !refreshed_token.is_empty() {
+                    state
+                        .render_caches
+                        .set_hdnea(cache_gen, &hdnea_key, &refreshed_token);
+                    fresh_token = Some(refreshed_token);
                 }
             }
         }

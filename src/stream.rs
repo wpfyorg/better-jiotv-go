@@ -27,6 +27,102 @@ struct RenderAuthPayload {
     scope: String,
 }
 
+// Identity travels only inside the encrypted scope, including on segment links.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ManifestIdentity {
+    url: String,
+    // None identifies a root selected by the live API.
+    selector: Option<String>,
+}
+
+fn identity_scope(url: &str, selector: Option<String>) -> String {
+    format!(
+        "identity:{}",
+        hex::encode(
+            serde_json::to_vec(&ManifestIdentity {
+                url: strip_hdnea_from_url(url),
+                selector,
+            })
+            .expect("manifest identity serializes")
+        )
+    )
+}
+
+fn manifest_identity(scope: &str) -> Option<ManifestIdentity> {
+    serde_json::from_slice(&hex::decode(scope.strip_prefix("identity:")?).ok()?).ok()
+}
+
+// Split HLS attributes without splitting commas inside quoted values.
+fn rendition_selector(line: &str) -> Option<String> {
+    let (tag, attrs) = line.split_once(':')?;
+    let mut quoted = false;
+    let mut start = 0;
+    let mut fields = std::collections::BTreeMap::new();
+    for (i, c) in attrs
+        .char_indices()
+        .chain(std::iter::once((attrs.len(), ',')))
+    {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        if c == ',' && !quoted {
+            let (key, value) = attrs[start..i].split_once('=')?;
+            if key != "URI" && fields.insert(key.trim(), value.trim()).is_some() {
+                return None;
+            }
+            start = i + 1;
+        }
+    }
+    if quoted {
+        return None;
+    }
+    match tag {
+        "#EXT-X-STREAM-INF" | "#EXT-X-I-FRAME-STREAM-INF" if fields.contains_key("BANDWIDTH") => {}
+        "#EXT-X-MEDIA" if fields.get("TYPE") == Some(&"AUDIO") => {
+            if !fields.contains_key("GROUP-ID") || !fields.contains_key("NAME") {
+                return None;
+            }
+            fields.retain(|key, _| matches!(*key, "TYPE" | "GROUP-ID" | "NAME" | "LANGUAGE"));
+        }
+        _ => return None,
+    }
+    Some(format!("{tag}:{}", serde_json::to_string(&fields).ok()?))
+}
+
+fn rendition_entries(body: &str, base: &str) -> Vec<(String, String)> {
+    let params = url::Url::parse(base)
+        .ok()
+        .map(|u| drop_hdnea_params(u.query().unwrap_or_default()))
+        .unwrap_or_default();
+    let mut pending = None;
+    let mut entries = Vec::new();
+    for line in body.lines().map(str::trim) {
+        if line.starts_with("#EXT-X-STREAM-INF:") {
+            pending = rendition_selector(line);
+        } else if line.starts_with("#EXT-X-MEDIA:")
+            || line.starts_with("#EXT-X-I-FRAME-STREAM-INF:")
+        {
+            if let (Some(selector), Some(uri)) = (
+                rendition_selector(line),
+                line.split_once("URI=\"")
+                    .and_then(|(_, rest)| rest.split('"').next()),
+            ) {
+                entries.push((resolve_media_url(uri, base, &params), selector));
+            }
+        } else if !line.is_empty() && !line.starts_with('#') {
+            if let Some(selector) = pending.take() {
+                entries.push((resolve_media_url(line, base, &params), selector));
+            }
+        }
+    }
+    entries
+}
+
+struct RecoveredManifest {
+    url: String,
+    token: String,
+}
+
 #[derive(Default)]
 pub struct RenderCaches {
     hdnea: std::sync::RwLock<HashMap<String, (String, Instant)>>,
@@ -49,7 +145,9 @@ impl RenderCaches {
 
     fn hdnea_key(channel_id: &str, quality: &str, scope: &str) -> String {
         let quality = if quality.is_empty() { "auto" } else { quality };
-        let scope = strip_hdnea_from_url(scope);
+        let scope = manifest_identity(scope)
+            .map(|i| identity_scope(&i.url, i.selector))
+            .unwrap_or_else(|| strip_hdnea_from_url(scope));
         format!("{channel_id}|hls|{quality}|{scope}")
     }
 
@@ -245,23 +343,31 @@ async fn refresh_channel_token(
 
 /// Recover from the refreshed rendition itself, never reuse a master token
 /// for a child merely because both were requested with auto quality.
-async fn refresh_rendition_token(
+async fn refresh_rendition(
     state: &AppState,
     live: &LiveUrlOutput,
     quality: &str,
     scope: &str,
     rejected: &str,
     media_url: Option<&str>,
-) -> String {
+) -> Option<RecoveredManifest> {
     let root = television::select_best_live_hls_url(live, quality);
     if root.is_empty() {
-        return String::new();
+        return None;
     }
     let root = to_absolute_stream_url(&root, absolute_base_from_live(live).as_deref());
+    let identity = manifest_identity(scope);
+    let original_url = identity.as_ref().map(|i| i.url.as_str()).unwrap_or(scope);
     // Legacy links have no authenticated manifest scope.
-    if media_url.is_none() && (scope.starts_with("legacy-") || strip_hdnea_from_url(&root) == scope)
+    if media_url.is_none()
+        && (scope.starts_with("legacy-")
+            || identity.as_ref().is_some_and(|i| i.selector.is_none())
+            || (identity.is_none() && strip_hdnea_from_url(&root) == original_url))
     {
-        return television::select_hls_hdnea_token(live, quality, rejected);
+        return Some(RecoveredManifest {
+            token: television::select_hls_hdnea_token(live, quality, rejected),
+            url: root,
+        });
     }
     let root_token = extract_hdnea_from_url(&root).unwrap_or_default();
     let (mut body, mut status, mut root_cookie) = state.tv.render(&root, &root_token).await;
@@ -277,16 +383,16 @@ async fn refresh_rendition_token(
         }
     }
     if status != 200 {
-        return String::new();
+        return None;
     }
-    let child = if strip_hdnea_from_url(&root) == scope {
+    let child = if identity.as_ref().is_some_and(|i| i.selector.is_none())
+        || (identity.is_none() && strip_hdnea_from_url(&root) == original_url)
+    {
         Some(root.clone())
     } else {
         matching_rendition_url(&String::from_utf8_lossy(&body), &root, scope)
     };
-    let Some(child) = child else {
-        return String::new();
-    };
+    let child = child?;
     // Tokenless child URIs inherit master credentials in the original rewrite.
     // Verify that credential against this child before returning it for media.
     let child_token = extract_hdnea_from_url(&child).unwrap_or_else(|| {
@@ -314,7 +420,7 @@ async fn refresh_rendition_token(
         }
     }
     if status != 200 {
-        return String::new();
+        return None;
     }
     if let Some(media_url) = media_url {
         let params = drop_hdnea_params(
@@ -325,31 +431,44 @@ async fn refresh_rendition_token(
                 .unwrap_or_default(),
         );
         let mut tokens = std::collections::HashSet::new();
+        let mut exact_media = false;
+        let mut exact_tokens = std::collections::HashSet::new();
         for line in String::from_utf8_lossy(&body)
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
         {
             let candidate = resolve_media_url(line, &child, &params);
+            let exact = strip_hdnea_from_url(&candidate) == strip_hdnea_from_url(media_url);
+            exact_media |= exact;
             if let Some(token) = extract_hdnea_from_url(&candidate) {
-                if strip_hdnea_from_url(&candidate) == strip_hdnea_from_url(media_url) {
-                    return token;
+                if exact {
+                    exact_tokens.insert(token.clone());
                 }
                 tokens.insert(token);
             }
         }
-        if tokens.len() == 1 {
-            return tokens.into_iter().next().unwrap_or_default();
+        if exact_tokens.len() == 1 {
+            return Some(RecoveredManifest {
+                url: child,
+                token: exact_tokens.into_iter().next().unwrap(),
+            });
         }
-        if !tokens.is_empty() {
-            return String::new();
+        if !exact_media || !tokens.is_empty() {
+            return None;
         }
     }
     if !cookie.is_empty() {
-        return cookie;
+        return Some(RecoveredManifest {
+            url: child,
+            token: cookie,
+        });
     }
     if !child_token.is_empty() {
-        return child_token;
+        return Some(RecoveredManifest {
+            url: child,
+            token: child_token,
+        });
     }
     // A rendition may put its credential on media URIs instead of itself.
     let tokens: std::collections::HashSet<String> = String::from_utf8_lossy(&body)
@@ -358,13 +477,57 @@ async fn refresh_rendition_token(
         .filter_map(extract_hdnea_from_url)
         .collect();
     if tokens.len() == 1 {
-        tokens.into_iter().next().unwrap_or_default()
+        Some(RecoveredManifest {
+            url: child,
+            token: tokens.into_iter().next().unwrap_or_default(),
+        })
     } else {
-        String::new()
+        Some(RecoveredManifest {
+            url: child,
+            token: String::new(),
+        })
     }
 }
 
+#[cfg(test)]
+async fn refresh_rendition_token(
+    state: &AppState,
+    live: &LiveUrlOutput,
+    quality: &str,
+    scope: &str,
+    rejected: &str,
+    media_url: Option<&str>,
+) -> String {
+    refresh_rendition(state, live, quality, scope, rejected, media_url)
+        .await
+        .map(|r| r.token)
+        .unwrap_or_default()
+}
+
 fn matching_rendition_url(body: &str, master_url: &str, scope: &str) -> Option<String> {
+    if let Some(identity) = manifest_identity(scope) {
+        let entries = rendition_entries(body, master_url);
+        let exact: Vec<_> = entries
+            .iter()
+            .filter(|(u, _)| strip_hdnea_from_url(u) == identity.url)
+            .collect();
+        if exact.len() == 1 {
+            return Some(exact[0].0.clone());
+        }
+        if exact.len() > 1 {
+            return None;
+        }
+        let selector = identity.selector?;
+        let matches: Vec<_> = entries
+            .into_iter()
+            .filter(|(_, s)| *s == selector)
+            .collect();
+        return if matches.len() == 1 {
+            Some(matches[0].0.clone())
+        } else {
+            None
+        };
+    }
     let base = url::Url::parse(master_url).ok()?;
     let params = drop_hdnea_params(base.query().unwrap_or_default());
     for line in body.lines() {
@@ -481,14 +644,14 @@ async fn live_impl_inner(
     live_url = to_absolute_stream_url(&live_url, absolute_base_from_live(&live).as_deref());
     let live_hdnea = television::select_hls_hdnea_token(&live, quality, "");
     if !live_hdnea.is_empty() {
-        let scope = strip_hdnea_from_url(&live_url);
+        let scope = identity_scope(&live_url, None);
         let hdnea_key = RenderCaches::hdnea_key(id, quality, &scope);
         state
             .render_caches
             .set_hdnea(cache_gen, &hdnea_key, &live_hdnea);
     }
 
-    let encrypted = state.secure.encrypt(&live_url);
+    let encrypted = encrypt_render_auth(state, &live_url, &identity_scope(&live_url, None));
     let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
     let q = if quality == "auto" {
         String::new()
@@ -673,7 +836,7 @@ fn rewrite_media_attr_line(
     channel_id: &str,
     quality: &str,
 ) -> Option<String> {
-    if !line.starts_with("#EXT-X-MEDIA:") {
+    if !line.starts_with("#EXT-X-MEDIA:") && !line.starts_with("#EXT-X-I-FRAME-STREAM-INF:") {
         return None;
     }
     let uri_start = line.find("URI=\"")? + 5;
@@ -710,6 +873,10 @@ fn render_replace(
         scope,
         state.config.disable_ts_handler,
     );
+    let entries = rendition_entries(
+        body,
+        &resolve_media_url(base_url, base_url, &drop_hdnea_params(params)),
+    );
     let mut out = String::with_capacity(placeholder.len());
     let mut rest = placeholder.as_str();
     while let Some(start) = rest.find("/render.") {
@@ -719,7 +886,24 @@ fn render_replace(
         // quote and any following attributes when encrypting the placeholder.
         let line_end = tail.find(['\n', '\r', '"']).unwrap_or(tail.len());
         let placeholder_str = &tail[..line_end];
-        if let Some(encoded) = encode_placeholder(state, placeholder_str) {
+        let mut parts: Vec<_> = placeholder_str.splitn(6, "||").map(str::to_owned).collect();
+        if parts.len() == 6 && parts[4] == "1" {
+            let candidate = resolve_media_url(&parts[1], base_url, "");
+            let matches: Vec<_> = entries
+                .iter()
+                .filter(|(url, _)| strip_hdnea_from_url(url) == strip_hdnea_from_url(&candidate))
+                .collect();
+            if matches.len() == 1
+                && entries
+                    .iter()
+                    .filter(|(_, selector)| selector == &matches[0].1)
+                    .count()
+                    == 1
+            {
+                parts[5] = identity_scope(&parts[1], Some(matches[0].1.clone()));
+            }
+        }
+        if let Some(encoded) = encode_placeholder(state, &parts.join("||")) {
             out.push_str(&encoded);
             rest = &tail[line_end..];
         } else {
@@ -861,7 +1045,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                 } else {
                     quality.clone()
                 };
-                let fresh_token = refresh_rendition_token(
+                let recovered = refresh_rendition(
                     &state,
                     &refreshed,
                     &retry_quality,
@@ -870,22 +1054,29 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                     None,
                 )
                 .await;
-                if !fresh_token.is_empty() {
-                    state
-                        .render_caches
-                        .set_hdnea(cache_gen, &hdnea_key, &fresh_token);
-                }
-                token = fresh_token;
-                render_url = strip_hdnea_from_url(&decoded);
-                let (b, s, h) = state.tv.render(&render_url, &token).await;
-                body = b;
-                status = s;
-                if !h.is_empty() {
-                    state.render_caches.set_hdnea(cache_gen, &hdnea_key, &h);
-                    token = h;
+                if let Some(recovered) = recovered {
+                    render_url = strip_hdnea_from_url(&recovered.url);
+                    scope = if let Some(identity) = manifest_identity(&scope) {
+                        identity_scope(&render_url, identity.selector)
+                    } else {
+                        render_url.clone()
+                    };
+                    hdnea_key = RenderCaches::hdnea_key(&channel_id, &quality, &scope);
+                    token = recovered.token;
+                    state.render_caches.set_hdnea(cache_gen, &hdnea_key, &token);
+                    let (b, s, h) = state.tv.render(&render_url, &token).await;
+                    body = b;
+                    status = s;
+                    if !h.is_empty() {
+                        state.render_caches.set_hdnea(cache_gen, &hdnea_key, &h);
+                        token = h;
+                    }
                 }
 
-                if status == 404 && !nested {
+                if status == 404
+                    && !nested
+                    && manifest_identity(&scope).is_none_or(|i| i.selector.is_none())
+                {
                     let candidates = [retry_quality.as_str(), "auto", "high", "medium", "low"];
                     let mut tried = std::collections::HashSet::new();
                     tried.insert((render_url.clone(), token.clone()));
@@ -896,7 +1087,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                         {
                             continue;
                         }
-                        scope = candidate.clone();
+                        scope = identity_scope(&candidate, None);
                         hdnea_key = RenderCaches::hdnea_key(&channel_id, cq, &scope);
                         render_url = candidate;
                         token = candidate_token;
@@ -1054,7 +1245,11 @@ pub async fn render_ts_handler(
                 format!("legacy-{quality}")
             }
         });
-    let hdnea_key = RenderCaches::hdnea_key(&channel_id, quality, &scope);
+    let hdnea_key = format!(
+        "{}|segment|{}",
+        RenderCaches::hdnea_key(&channel_id, quality, &scope),
+        strip_hdnea_from_url(&decoded)
+    );
     let mut token = q
         .hdnea
         .clone()
@@ -1074,7 +1269,7 @@ pub async fn render_ts_handler(
         let mut fresh_token = None;
         if !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
-                let refreshed_token = refresh_rendition_token(
+                let recovered = refresh_rendition(
                     &state,
                     &refreshed,
                     quality,
@@ -1083,7 +1278,8 @@ pub async fn render_ts_handler(
                     Some(&decoded),
                 )
                 .await;
-                if !refreshed_token.is_empty() {
+                if let Some(recovered) = recovered {
+                    let refreshed_token = recovered.token;
                     state
                         .render_caches
                         .set_hdnea(cache_gen, &hdnea_key, &refreshed_token);
@@ -1491,6 +1687,121 @@ mod tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let upstream = MockServer::start().await;
         Mock::given(method("GET"))
+            .and(path("/rotated/root.m3u8"))
+            .and(header("cookie", "__hdnea__=root-fresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\nnew.ts\n"))
+            .expect(2)
+            .mount(&upstream)
+            .await;
+        // Verify both rejected statuses recover using the new manifest URL.
+        for rejected_status in [403, 404] {
+            let old_path = format!("/old-{rejected_status}/root.m3u8");
+            Mock::given(method("GET"))
+                .and(path(&old_path))
+                .respond_with(ResponseTemplate::new(rejected_status))
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let old_url = format!("{}{old_path}", upstream.uri());
+            assert_eq!(
+                state.tv.render(&old_url, "expired").await.1,
+                rejected_status
+            );
+            let live = LiveUrlOutput {
+                bitrates: television::Bitrates {
+                    auto: format!("{}/rotated/root.m3u8?hdnea=root-fresh", upstream.uri()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let recovered = refresh_rendition(
+                &state,
+                &live,
+                "auto",
+                &identity_scope(&old_url, None),
+                "expired",
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(recovered.url, live.bitrates.auto);
+            assert_eq!(recovered.token, "root-fresh");
+            let (_, status, _) = state
+                .tv
+                .render(&strip_hdnea_from_url(&recovered.url), &recovered.token)
+                .await;
+            assert_eq!(status, 200);
+        }
+        Mock::given(method("GET")).and(path("/rotated/master.m3u8"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=123\nnew/child.m3u8?hdnea=child-fresh&session=new\n"))
+            .expect(2).mount(&upstream).await;
+        Mock::given(method("GET"))
+            .and(path("/rotated/new/child.m3u8"))
+            .and(header("cookie", "__hdnea__=child-fresh"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("#EXTM3U\nsegment.ts?hdnea=segment-fresh\n"),
+            )
+            .expect(2)
+            .mount(&upstream)
+            .await;
+        let rotated_live = LiveUrlOutput {
+            bitrates: television::Bitrates {
+                auto: format!("{}/rotated/master.m3u8", upstream.uri()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let identity = identity_scope(
+            "https://old.example/old/child.m3u8?session=old",
+            rendition_selector("#EXT-X-STREAM-INF:BANDWIDTH=123"),
+        );
+        let recovered =
+            refresh_rendition(&state, &rotated_live, "auto", &identity, "expired", None)
+                .await
+                .unwrap();
+        assert_eq!(
+            recovered.url,
+            format!(
+                "{}/rotated/new/child.m3u8?hdnea=child-fresh&session=new",
+                upstream.uri()
+            )
+        );
+        assert_eq!(recovered.token, "child-fresh");
+        let fresh_scope = identity_scope(
+            &recovered.url,
+            rendition_selector("#EXT-X-STREAM-INF:BANDWIDTH=123"),
+        );
+        let rewritten = render_replace(
+            &state,
+            "#EXTM3U\nsegment.ts\n",
+            &recovered.url,
+            "",
+            "154",
+            "auto",
+            &fresh_scope,
+        );
+        let link = url::Url::parse(&format!(
+            "http://localhost{}",
+            rewritten.lines().nth(1).unwrap()
+        ))
+        .unwrap();
+        let auth = link.query_pairs().find(|(key, _)| key == "auth").unwrap().1;
+        let (url, scope) = decrypt_render_auth(&state, &auth).unwrap();
+        assert_eq!(url, format!("{}/rotated/new/segment.ts", upstream.uri()));
+        assert_eq!(scope.unwrap(), fresh_scope);
+        assert!(refresh_rendition(
+            &state,
+            &rotated_live,
+            "auto",
+            &identity,
+            "expired",
+            Some("https://old.example/old/segment.ts")
+        )
+        .await
+        .is_none());
+
+        Mock::given(method("GET"))
             .and(path("/master.m3u8"))
             .and(header("cookie", "__hdnea__=master-token"))
             .respond_with(
@@ -1581,6 +1892,19 @@ mod tests {
             "rotated"
         );
 
+        assert_eq!(
+            refresh_rendition_token(
+                &state,
+                &conflicting,
+                "auto",
+                &identity_scope("https://cdn.example/root.m3u8", None),
+                "rejected",
+                None
+            )
+            .await,
+            "rotated"
+        );
+
         let body = "#EXTM3U\nseg1.ts\n";
         let out = render_replace(
             &state,
@@ -1661,12 +1985,34 @@ mod tests {
             let (decoded, scope) = decrypt_render_auth(&state, &auth).unwrap();
             assert_eq!(decoded, expected);
             assert_eq!(
-                scope.as_deref(),
-                Some(strip_hdnea_from_url(expected).as_str())
+                manifest_identity(scope.as_deref().unwrap()).unwrap().url,
+                strip_hdnea_from_url(expected)
             );
             assert!(uri.contains("&nested=true"));
             assert!(!uri.contains("&scope="));
             assert!(out.ends_with(&format!("{muxed}\r\n")));
+        }
+    }
+
+    #[test]
+    fn rotated_rendition_requires_unique_original_selector() {
+        let old = "https://old.example/a/master.m3u8?session=old";
+        let fresh = "https://new.example/b/master.m3u8?session=new";
+        for tag in [
+            "#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS=\"avc1,mp4a\"",
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"Hindi\",LANGUAGE=\"hin\",URI=\"child.m3u8\"",
+            "#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=800000,URI=\"child.m3u8\"",
+        ] {
+            let body = if tag.starts_with("#EXT-X-STREAM-INF:") {
+                format!("{tag}\nchild.m3u8\n")
+            } else { format!("{tag}\n") };
+            let entries = rendition_entries(&body, old);
+            let scope = identity_scope(&entries[0].0, Some(entries[0].1.clone()));
+            assert_eq!(matching_rendition_url(&body, fresh, &scope).unwrap(), "https://new.example/b/child.m3u8?session=new");
+            assert!(matching_rendition_url(&format!("{body}{body}"), fresh, &scope).is_none());
+            assert!(matching_rendition_url("#EXTM3U\nother.m3u8\n", fresh, &scope).is_none());
+            assert!(matching_rendition_url(&body, fresh, &strip_hdnea_from_url(&entries[0].0)).is_none());
+            assert_ne!(RenderCaches::hdnea_key("1", "auto", &scope), RenderCaches::hdnea_key("1", "auto", &identity_scope(&entries[0].0, None)));
         }
     }
 
@@ -1737,6 +2083,9 @@ mod tests {
             .1;
         let (decoded, scope) = decrypt_render_auth(&state, &auth).unwrap();
         assert_eq!(decoded, "https://a.b/live/child.m3u8");
-        assert_eq!(scope.as_deref(), Some("https://a.b/live/child.m3u8"));
+        assert_eq!(
+            manifest_identity(scope.as_deref().unwrap()).unwrap().url,
+            "https://a.b/live/child.m3u8"
+        );
     }
 }

@@ -413,7 +413,7 @@ fn rewrite_m3u8(
                         endpoint,
                         &full_url,
                         channel_id,
-                        if is_manifest { quality } else { "" },
+                        quality,
                         is_manifest,
                     ));
                 }
@@ -609,12 +609,24 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
         None => (decoded.clone(), url_token.clone().unwrap_or_default()),
     };
 
+    let mut rejected_token = token.clone();
     let (mut body, mut status, new_hdnea) = state.tv.render(&render_url, &token).await;
     if !new_hdnea.is_empty() {
         state
             .render_caches
             .set_hdnea(cache_gen, &hdnea_key, &new_hdnea);
         token = new_hdnea.clone();
+    }
+
+    if matches!(status, 401 | 403) && !new_hdnea.is_empty() && new_hdnea != rejected_token {
+        rejected_token = token.clone();
+        let (b, s, h) = state.tv.render(&render_url, &token).await;
+        body = b;
+        status = s;
+        if !h.is_empty() {
+            state.render_caches.set_hdnea(cache_gen, &hdnea_key, &h);
+            token = h;
+        }
     }
 
     if matches!(status, 401 | 403 | 404) {
@@ -626,7 +638,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
                 let retry_quality = if quality.is_empty() { "auto" } else { &quality };
                 let fresh_token =
-                    television::select_hls_hdnea_token(&refreshed, retry_quality, &token);
+                    television::select_hls_hdnea_token(&refreshed, retry_quality, &rejected_token);
                 if !fresh_token.is_empty() {
                     state
                         .render_caches
@@ -691,13 +703,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
         .map(|(_, q)| q.to_string())
         .unwrap_or_default();
     params = drop_hdnea_params(&params);
-    if !token.is_empty() {
-        if params.is_empty() {
-            params = format!("__hdnea__={token}");
-        } else {
-            params = format!("{params}&__hdnea__={token}");
-        }
-    }
+    params = append_hdnea_query_param(params, &token);
 
     let body_str = String::from_utf8_lossy(&body);
     let rewritten = render_replace(&state, &body_str, &base_url, &params, &channel_id, &quality);
@@ -727,11 +733,24 @@ fn drop_hdnea_params(params: &str) -> String {
         .join("&")
 }
 
+fn append_hdnea_query_param(params: String, token: &str) -> String {
+    if token.is_empty() {
+        return params;
+    }
+    let encoded = urlencoding::encode(token);
+    if params.is_empty() {
+        format!("__hdnea__={encoded}")
+    } else {
+        format!("{params}&__hdnea__={encoded}")
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct SegmentQuery {
     auth: Option<String>,
     channel_key_id: Option<String>,
     hdnea: Option<String>,
+    q: Option<String>,
 }
 
 pub async fn render_ts_handler(
@@ -772,8 +791,9 @@ pub async fn render_ts_handler(
         if !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
                 let rejected_token = token.as_deref().unwrap_or_default();
+                let quality = q.q.as_deref().filter(|q| !q.is_empty()).unwrap_or("auto");
                 let refreshed_token =
-                    television::select_hls_hdnea_token(&refreshed, "auto", rejected_token);
+                    television::select_hls_hdnea_token(&refreshed, quality, rejected_token);
                 if !refreshed_token.is_empty() {
                     state
                         .render_caches
@@ -1008,15 +1028,38 @@ mod tests {
             "auto",
             false,
         );
-        assert!(rewritten.contains("/render.ts||https://a.b/live/seg1.ts?__hdnea__=fresh||154||"));
+        assert!(
+            rewritten.contains("/render.ts||https://a.b/live/seg1.ts?__hdnea__=fresh||154||auto")
+        );
     }
 
     #[test]
     fn rewrites_packed_audio_segments_to_aac_route() {
         let body = "#EXTM3U\n#EXTINF:4,\naudio_1.aac?x=1\n#EXTINF:4,\nvideo_1.ts\n";
         let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "ex_1", "auto", false);
-        assert!(rewritten.contains("\n/render.aac||https://a.b/live/audio_1.aac?x=1||ex_1||"));
-        assert!(rewritten.contains("\n/render.ts||https://a.b/live/video_1.ts||ex_1||"));
+        assert!(rewritten.contains("\n/render.aac||https://a.b/live/audio_1.aac?x=1||ex_1||auto"));
+        assert!(rewritten.contains("\n/render.ts||https://a.b/live/video_1.ts||ex_1||auto"));
+    }
+
+    #[test]
+    fn rewritten_segments_keep_forced_quality() {
+        let body = "#EXTM3U\nseg1.ts\n";
+        let rewritten = rewrite_m3u8(body, "https://a.b/live/", "", "154", "high", false);
+        assert!(rewritten.contains("/render.ts||https://a.b/live/seg1.ts||154||high"));
+    }
+
+    #[test]
+    fn hdnea_query_param_is_percent_encoded() {
+        let params = append_hdnea_query_param(
+            "foo=bar".to_string(),
+            "st=100~exp=200~acl=/*&scope=live#fragment",
+        );
+        assert!(!params.contains("&scope=live"));
+        assert!(!params.contains("#fragment"));
+        assert_eq!(
+            extract_hdnea_from_url(&format!("https://a.b/live.ts?{params}")).as_deref(),
+            Some("st=100~exp=200~acl=/*&scope=live#fragment")
+        );
     }
 
     #[test]

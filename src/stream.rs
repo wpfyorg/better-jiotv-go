@@ -267,7 +267,9 @@ async fn refresh_rendition_token(
     let Some(child) = matching_rendition_url(&String::from_utf8_lossy(&body), &root, scope) else {
         return String::new();
     };
-    let child_token = extract_hdnea_from_url(&child).unwrap_or_default();
+    // Tokenless child URIs inherit master credentials in the original rewrite.
+    // Verify that credential against this child before returning it for media.
+    let child_token = extract_hdnea_from_url(&child).unwrap_or_else(|| root_token.clone());
     let child_request = if child_token.is_empty() {
         child.clone()
     } else {
@@ -1406,11 +1408,18 @@ mod tests {
         Mock::given(method("GET")).and(path("/master.m3u8"))
             .and(header("cookie", "__hdnea__=master-token"))
             .respond_with(ResponseTemplate::new(200).set_body_string(
-                "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"muxed\"\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8?hdnea=low-token\n#EXT-X-STREAM-INF:BANDWIDTH=2\nhigh.m3u8?hdnea=child-token\n"
-            )).expect(1).mount(&upstream).await;
+                "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"muxed\"\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8?hdnea=low-token\n#EXT-X-STREAM-INF:BANDWIDTH=2\nhigh.m3u8?hdnea=child-token\nshared.m3u8\n"
+            )).expect(2).mount(&upstream).await;
         Mock::given(method("GET"))
             .and(path("/high.m3u8"))
             .and(header("cookie", "__hdnea__=child-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\nseg.ts\n"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/shared.m3u8"))
+            .and(header("cookie", "__hdnea__=master-token"))
             .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\nseg.ts\n"))
             .expect(1)
             .mount(&upstream)
@@ -1426,6 +1435,17 @@ mod tests {
         assert_eq!(
             refresh_rendition_token(&state, &live, "auto", &child_scope).await,
             "child-token"
+        );
+
+        assert_eq!(
+            refresh_rendition_token(
+                &state,
+                &live,
+                "auto",
+                &format!("{}/shared.m3u8", upstream.uri())
+            )
+            .await,
+            "master-token"
         );
 
         let body = "#EXTM3U\nseg1.ts\n";

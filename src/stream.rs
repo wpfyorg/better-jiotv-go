@@ -251,6 +251,7 @@ async fn refresh_rendition_token(
     quality: &str,
     scope: &str,
     rejected: &str,
+    media_url: Option<&str>,
 ) -> String {
     let root = television::select_best_live_hls_url(live, quality);
     if root.is_empty() {
@@ -258,15 +259,32 @@ async fn refresh_rendition_token(
     }
     let root = to_absolute_stream_url(&root, absolute_base_from_live(live).as_deref());
     // Legacy links have no authenticated manifest scope.
-    if scope.starts_with("legacy-") || strip_hdnea_from_url(&root) == scope {
+    if media_url.is_none() && (scope.starts_with("legacy-") || strip_hdnea_from_url(&root) == scope)
+    {
         return television::select_hls_hdnea_token(live, quality, rejected);
     }
     let root_token = extract_hdnea_from_url(&root).unwrap_or_default();
-    let (body, status, root_cookie) = state.tv.render(&root, &root_token).await;
+    let (mut body, mut status, mut root_cookie) = state.tv.render(&root, &root_token).await;
+    if matches!(status, 401 | 403) && !root_cookie.is_empty() && root_cookie != root_token {
+        let (next_body, next_status, next_cookie) = state
+            .tv
+            .render(&strip_hdnea_from_url(&root), &root_cookie)
+            .await;
+        body = next_body;
+        status = next_status;
+        if !next_cookie.is_empty() {
+            root_cookie = next_cookie;
+        }
+    }
     if status != 200 {
         return String::new();
     }
-    let Some(child) = matching_rendition_url(&String::from_utf8_lossy(&body), &root, scope) else {
+    let child = if strip_hdnea_from_url(&root) == scope {
+        Some(root.clone())
+    } else {
+        matching_rendition_url(&String::from_utf8_lossy(&body), &root, scope)
+    };
+    let Some(child) = child else {
         return String::new();
     };
     // Tokenless child URIs inherit master credentials in the original rewrite.
@@ -297,6 +315,35 @@ async fn refresh_rendition_token(
     }
     if status != 200 {
         return String::new();
+    }
+    if let Some(media_url) = media_url {
+        let params = drop_hdnea_params(
+            url::Url::parse(&child)
+                .ok()
+                .and_then(|u| u.query().map(str::to_owned))
+                .as_deref()
+                .unwrap_or_default(),
+        );
+        let mut tokens = std::collections::HashSet::new();
+        for line in String::from_utf8_lossy(&body)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        {
+            let candidate = resolve_media_url(line, &child, &params);
+            if let Some(token) = extract_hdnea_from_url(&candidate) {
+                if strip_hdnea_from_url(&candidate) == strip_hdnea_from_url(media_url) {
+                    return token;
+                }
+                tokens.insert(token);
+            }
+        }
+        if tokens.len() == 1 {
+            return tokens.into_iter().next().unwrap_or_default();
+        }
+        if !tokens.is_empty() {
+            return String::new();
+        }
     }
     if !cookie.is_empty() {
         return cookie;
@@ -820,6 +867,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                     &retry_quality,
                     &scope,
                     if status == 404 { "" } else { &rejected_token },
+                    None,
                 )
                 .await;
                 if !fresh_token.is_empty() {
@@ -1032,6 +1080,7 @@ pub async fn render_ts_handler(
                     quality,
                     &scope,
                     token.as_deref().unwrap_or_default(),
+                    Some(&decoded),
                 )
                 .await;
                 if !refreshed_token.is_empty() {
@@ -1441,16 +1490,28 @@ mod tests {
         use wiremock::matchers::{header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let upstream = MockServer::start().await;
-        Mock::given(method("GET")).and(path("/master.m3u8"))
+        Mock::given(method("GET"))
+            .and(path("/master.m3u8"))
             .and(header("cookie", "__hdnea__=master-token"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("Set-Cookie", "__hdnea__=rotated-master; Path=/"),
+            )
+            .expect(3)
+            .mount(&upstream)
+            .await;
+        Mock::given(method("GET")).and(path("/master.m3u8"))
+            .and(header("cookie", "__hdnea__=rotated-master"))
             .respond_with(ResponseTemplate::new(200).insert_header("Set-Cookie", "__hdnea__=rotated-master; Path=/").set_body_string(
                 "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"muxed\"\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8?hdnea=low-token\n#EXT-X-STREAM-INF:BANDWIDTH=2\nhigh.m3u8?hdnea=child-token\nshared.m3u8\n"
-            )).expect(2).mount(&upstream).await;
+            )).expect(3).mount(&upstream).await;
         Mock::given(method("GET"))
             .and(path("/high.m3u8"))
             .and(header("cookie", "__hdnea__=child-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\nseg.ts\n"))
-            .expect(1)
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("#EXTM3U\nseg.ts?hdnea=segment-token\n"),
+            )
+            .expect(2)
             .mount(&upstream)
             .await;
         Mock::given(method("GET"))
@@ -1469,7 +1530,7 @@ mod tests {
         };
         let child_scope = format!("{}/high.m3u8", upstream.uri());
         assert_eq!(
-            refresh_rendition_token(&state, &live, "auto", &child_scope, "").await,
+            refresh_rendition_token(&state, &live, "auto", &child_scope, "", None).await,
             "child-token"
         );
 
@@ -1480,9 +1541,23 @@ mod tests {
                 "auto",
                 &format!("{}/shared.m3u8", upstream.uri()),
                 "",
+                None,
             )
             .await,
             "rotated-master"
+        );
+
+        assert_eq!(
+            refresh_rendition_token(
+                &state,
+                &live,
+                "auto",
+                &child_scope,
+                "expired",
+                Some(&format!("{}/seg.ts", upstream.uri()))
+            )
+            .await,
+            "segment-token"
         );
 
         let conflicting = LiveUrlOutput {
@@ -1499,7 +1574,8 @@ mod tests {
                 &conflicting,
                 "auto",
                 "https://cdn.example/root.m3u8",
-                "rejected"
+                "rejected",
+                None,
             )
             .await,
             "rotated"

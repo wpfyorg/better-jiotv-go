@@ -19,6 +19,13 @@ use std::time::{Duration, Instant};
 
 const HDNEA_CACHE_TTL: Duration = Duration::from_secs(60);
 const DEAD_CACHE_TTL: Duration = Duration::from_secs(60);
+const RENDER_AUTH_PREFIX: &str = "jiotv-hls-v1:";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RenderAuthPayload {
+    url: String,
+    scope: String,
+}
 
 #[derive(Default)]
 pub struct RenderCaches {
@@ -42,16 +49,28 @@ impl RenderCaches {
 
     fn hdnea_key(channel_id: &str, quality: &str, scope: &str) -> String {
         let quality = if quality.is_empty() { "auto" } else { quality };
+        let scope = strip_hdnea_from_url(scope);
         format!("{channel_id}|hls|{quality}|{scope}")
     }
 
     pub fn get_hdnea(&self, key: &str) -> Option<String> {
-        let map = self.hdnea.read().unwrap();
-        let (token, at) = map.get(key)?;
-        if at.elapsed() > HDNEA_CACHE_TTL {
-            return None;
+        let expired_at = {
+            let map = self.hdnea.read().unwrap();
+            let (token, at) = map.get(key)?;
+            if at.elapsed() <= HDNEA_CACHE_TTL {
+                return Some(token.clone());
+            }
+            *at
+        };
+        let mut map = self.hdnea.write().unwrap();
+        if map
+            .get(key)
+            .map(|(_, at)| *at == expired_at)
+            .unwrap_or(false)
+        {
+            map.remove(key);
         }
-        Some(token.clone())
+        None
     }
 
     /// Stores `token` unless the caches were cleared since `generation` was
@@ -338,7 +357,6 @@ pub struct RenderQuery {
     channel_key_id: Option<String>,
     q: Option<String>,
     nested: Option<bool>,
-    scope: Option<String>,
 }
 
 /// Rewrites a fetched HLS manifest so every media/key URI routes back
@@ -571,7 +589,7 @@ fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
     let quality = parts.next()?;
     let nested = parts.next().unwrap_or_default() == "1";
     let scope = parts.next().unwrap_or_default();
-    let encrypted = state.secure.encrypt(url);
+    let encrypted = encrypt_render_auth(state, url, scope);
     let mut out = format!("{endpoint}?auth={encrypted}");
     if !channel_id.is_empty() {
         out.push_str(&format!("&channel_key_id={channel_id}"));
@@ -582,11 +600,30 @@ fn encode_placeholder(state: &AppState, s: &str) -> Option<String> {
     if nested {
         out.push_str("&nested=true");
     }
-    if !scope.is_empty() {
-        out.push_str("&scope=");
-        out.push_str(&urlencoding::encode(scope));
-    }
     Some(out)
+}
+
+fn encrypt_render_auth(state: &AppState, url: &str, scope: &str) -> String {
+    if scope.is_empty() {
+        return state.secure.encrypt(url);
+    }
+    let payload = RenderAuthPayload {
+        url: url.to_string(),
+        scope: scope.to_string(),
+    };
+    let serialized = serde_json::to_string(&payload).expect("render auth payload serializes");
+    state
+        .secure
+        .encrypt(&format!("{RENDER_AUTH_PREFIX}{serialized}"))
+}
+
+fn decrypt_render_auth(state: &AppState, auth: &str) -> Option<(String, Option<String>)> {
+    let decoded = state.secure.decrypt(auth).ok()?;
+    let Some(serialized) = decoded.strip_prefix(RENDER_AUTH_PREFIX) else {
+        return Some((decoded, None));
+    };
+    let payload: RenderAuthPayload = serde_json::from_str(serialized).ok()?;
+    Some((payload.url, Some(payload.scope)))
 }
 
 pub async fn render_m3u8_handler(
@@ -611,15 +648,14 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
     if channel_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
     }
-    let decoded = match state.secure.decrypt(&auth) {
-        Ok(d) => d,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
+    let (decoded, authenticated_scope) = match decrypt_render_auth(&state, &auth) {
+        Some(decoded) => decoded,
+        None => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
     let decoded = to_absolute_stream_url(&decoded, None);
-    let quality = q.q.unwrap_or_default();
+    let mut quality = q.q.unwrap_or_default();
     let nested = q.nested.unwrap_or(false);
-    let mut scope = q
-        .scope
+    let mut scope = authenticated_scope
         .filter(|scope| !scope.is_empty())
         .unwrap_or_else(|| strip_hdnea_from_url(&decoded));
 
@@ -658,10 +694,14 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
         let recently_dead = status == 404 && state.render_caches.is_dead(&channel_id);
         if !recently_dead && !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
-                let retry_quality = if quality.is_empty() { "auto" } else { &quality };
+                let retry_quality = if quality.is_empty() {
+                    "auto".to_string()
+                } else {
+                    quality.clone()
+                };
                 let rejected = rejected_hdnea_for_refresh(status, &rejected_token);
                 let fresh_token =
-                    television::select_hls_hdnea_token(&refreshed, retry_quality, rejected);
+                    television::select_hls_hdnea_token(&refreshed, &retry_quality, rejected);
                 if !fresh_token.is_empty() {
                     state
                         .render_caches
@@ -678,22 +718,23 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                 }
 
                 if status == 404 && !nested {
-                    let candidates = [retry_quality, "auto", "high", "medium", "low"];
+                    let candidates = [retry_quality.as_str(), "auto", "high", "medium", "low"];
                     let mut tried = std::collections::HashSet::new();
-                    tried.insert(render_url.clone());
+                    tried.insert((render_url.clone(), token.clone()));
                     for cq in candidates {
-                        let candidate = television::select_best_live_hls_url(&refreshed, cq);
-                        let candidate = to_absolute_stream_url(
-                            &candidate,
-                            absolute_base_from_live(&refreshed).as_deref(),
-                        );
-                        if candidate.is_empty() || tried.contains(&candidate) {
+                        let (candidate, candidate_token) = hls_fallback_candidate(&refreshed, cq);
+                        if candidate.is_empty()
+                            || !tried.insert((candidate.clone(), candidate_token.clone()))
+                        {
                             continue;
                         }
-                        tried.insert(candidate.clone());
-                        scope = strip_hdnea_from_url(&candidate);
-                        hdnea_key = RenderCaches::hdnea_key(&channel_id, &quality, &scope);
+                        scope = candidate.clone();
+                        hdnea_key = RenderCaches::hdnea_key(&channel_id, cq, &scope);
                         render_url = candidate;
+                        token = candidate_token;
+                        if !token.is_empty() {
+                            state.render_caches.set_hdnea(cache_gen, &hdnea_key, &token);
+                        }
                         let (b, s, h) = state.tv.render(&render_url, &token).await;
                         body = b;
                         status = s;
@@ -702,6 +743,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                             token = h;
                         }
                         if status == 200 {
+                            quality = cq.to_string();
                             break;
                         }
                     }
@@ -786,13 +828,22 @@ fn rejected_hdnea_for_refresh(status: u16, token: &str) -> &str {
     }
 }
 
+fn hls_fallback_candidate(live: &LiveUrlOutput, quality: &str) -> (String, String) {
+    let candidate = television::select_best_live_hls_url(live, quality);
+    if candidate.is_empty() {
+        return (String::new(), String::new());
+    }
+    let candidate = to_absolute_stream_url(&candidate, absolute_base_from_live(live).as_deref());
+    let token = extract_hdnea_from_url(&candidate).unwrap_or_default();
+    (strip_hdnea_from_url(&candidate), token)
+}
+
 #[derive(serde::Deserialize)]
 pub struct SegmentQuery {
     auth: Option<String>,
     channel_key_id: Option<String>,
     hdnea: Option<String>,
     q: Option<String>,
-    scope: Option<String>,
 }
 
 pub async fn render_ts_handler(
@@ -807,17 +858,14 @@ pub async fn render_ts_handler(
     let Some(channel_id) = q.channel_key_id.filter(|id| !id.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
     };
-    let mut decoded = match state.secure.decrypt(&auth) {
-        Ok(d) => d,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
+    let (mut decoded, authenticated_scope) = match decrypt_render_auth(&state, &auth) {
+        Some(decoded) => decoded,
+        None => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
 
     let quality = q.q.as_deref().filter(|q| !q.is_empty()).unwrap_or("auto");
-    let scope = q
-        .scope
-        .as_deref()
+    let scope = authenticated_scope
         .filter(|scope| !scope.is_empty())
-        .map(str::to_string)
         .unwrap_or_else(|| {
             if decoded.to_lowercase().contains("catchup") {
                 "legacy-catchup".to_string()
@@ -911,9 +959,9 @@ pub async fn render_key_handler(
     let Some(channel_id) = q.channel_key_id.clone().filter(|id| !id.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "channel_key_id is required").into_response();
     };
-    let decoded = match state.secure.decrypt(&auth) {
-        Ok(d) => d,
-        Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
+    let (decoded, _) = match decrypt_render_auth(&state, &auth) {
+        Some(decoded) => decoded,
+        None => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
     let hdnea = q.hdnea.clone().or_else(|| extract_hdnea_from_url(&decoded));
     let is_custom = state.custom_channels.contains(&channel_id);
@@ -987,10 +1035,16 @@ mod tests {
 
     #[test]
     fn hdnea_cache_key_is_scoped_to_hls_rendition() {
-        let high_one =
-            RenderCaches::hdnea_key("154", "high", "https://cdn.example/high/rendition.m3u8");
-        let high_two =
-            RenderCaches::hdnea_key("154", "high", "https://cdn.example/high/rendition.m3u8");
+        let high_one = RenderCaches::hdnea_key(
+            "154",
+            "high",
+            "https://cdn.example/high/rendition.m3u8?hdnea=token-one",
+        );
+        let high_two = RenderCaches::hdnea_key(
+            "154",
+            "high",
+            "https://cdn.example/high/rendition.m3u8?__hdnea__=token-two",
+        );
         let auto_same_scope =
             RenderCaches::hdnea_key("154", "auto", "https://cdn.example/high/rendition.m3u8");
         let auto_other_rendition =
@@ -999,6 +1053,22 @@ mod tests {
         assert_eq!(high_one, high_two);
         assert_ne!(high_one, auto_same_scope);
         assert_ne!(auto_same_scope, auto_other_rendition);
+    }
+
+    #[test]
+    fn expired_hdnea_entries_are_removed() {
+        let caches = RenderCaches::default();
+        let key = RenderCaches::hdnea_key("154", "auto", "scope");
+        caches.hdnea.write().unwrap().insert(
+            key.clone(),
+            (
+                "expired".into(),
+                Instant::now() - HDNEA_CACHE_TTL - Duration::from_secs(1),
+            ),
+        );
+
+        assert!(caches.get_hdnea(&key).is_none());
+        assert!(!caches.hdnea.read().unwrap().contains_key(&key));
     }
 
     #[test]
@@ -1237,7 +1307,16 @@ mod tests {
         );
         assert!(out.contains("/render.ts?auth="));
         assert!(out.contains("&channel_key_id=154"));
+        assert!(!out.contains("&scope="));
+        assert!(!out.contains("https://a.b/live/rendition.m3u8"));
         assert!(!out.contains("||"));
+
+        let segment_uri = out.lines().nth(1).unwrap();
+        let url = url::Url::parse(&format!("http://localhost{segment_uri}")).unwrap();
+        let auth = url.query_pairs().find(|(k, _)| k == "auth").unwrap().1;
+        let (decoded, scope) = decrypt_render_auth(&state, &auth).unwrap();
+        assert_eq!(decoded, "https://a.b/live/seg1.ts");
+        assert_eq!(scope.as_deref(), Some("https://a.b/live/rendition.m3u8"));
 
         for tag in ["EXT-X-KEY", "EXT-X-SESSION-KEY"] {
             for suffix in ["", ",IV=0x1,KEYFORMAT=\"identity\""] {
@@ -1293,10 +1372,36 @@ mod tests {
             assert_eq!(suffix, ",DEFAULT=YES");
             let url = url::Url::parse(&format!("http://localhost{uri}")).unwrap();
             let auth = url.query_pairs().find(|(k, _)| k == "auth").unwrap().1;
-            assert_eq!(state.secure.decrypt(&auth).unwrap(), expected);
+            let (decoded, scope) = decrypt_render_auth(&state, &auth).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(
+                scope.as_deref(),
+                Some(strip_hdnea_from_url(expected).as_str())
+            );
             assert!(uri.contains("&nested=true"));
+            assert!(!uri.contains("&scope="));
             assert!(out.ends_with(&format!("{muxed}\r\n")));
         }
+    }
+
+    #[test]
+    fn fallback_candidates_pair_each_rendition_with_its_own_token() {
+        let live = LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                high: "https://cdn.example/high.m3u8?hdnea=high-token".into(),
+                low: "https://cdn.example/low.m3u8?hdnea=low-token".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let (high_url, high_token) = hls_fallback_candidate(&live, "high");
+        let (low_url, low_token) = hls_fallback_candidate(&live, "low");
+
+        assert_eq!(high_url, "https://cdn.example/high.m3u8");
+        assert_eq!(high_token, "high-token");
+        assert_eq!(low_url, "https://cdn.example/low.m3u8");
+        assert_eq!(low_token, "low-token");
     }
 
     #[test]
@@ -1338,11 +1443,14 @@ mod tests {
         assert!(out.contains("&nested=true"));
         let child_uri = out.lines().nth(2).unwrap();
         let child_url = url::Url::parse(&format!("http://localhost{child_uri}")).unwrap();
-        let scope = child_url
+        assert!(child_url.query_pairs().all(|(k, _)| k != "scope"));
+        let auth = child_url
             .query_pairs()
-            .find(|(k, _)| k == "scope")
+            .find(|(k, _)| k == "auth")
             .unwrap()
             .1;
-        assert_eq!(scope, "https://a.b/live/child.m3u8");
+        let (decoded, scope) = decrypt_render_auth(&state, &auth).unwrap();
+        assert_eq!(decoded, "https://a.b/live/child.m3u8");
+        assert_eq!(scope.as_deref(), Some("https://a.b/live/child.m3u8"));
     }
 }

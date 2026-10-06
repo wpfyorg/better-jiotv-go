@@ -842,34 +842,80 @@ fn live_hls_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
     tokens
 }
 
+fn live_dash_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut urls = vec![
+        &result.mpd.bitrates.auto,
+        &result.mpd.bitrates.high,
+        &result.mpd.bitrates.medium,
+        &result.mpd.bitrates.low,
+        &result.mpd.auto,
+        &result.mpd.high,
+        &result.mpd.medium,
+        &result.mpd.low,
+    ];
+    if result.result.to_lowercase().contains(".mpd") {
+        urls.push(&result.result);
+    }
+    if !result.mpd.result.to_lowercase().contains(".m3u8") {
+        urls.push(&result.mpd.result);
+    }
+    for url in urls {
+        if let Some(token) = extract_hdnea_from_url(url) {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
 fn finish_live_result(result: &mut LiveUrlOutput) {
     let tokens = live_hdnea_tokens(result);
+    let hls_tokens = live_hls_hdnea_tokens(result);
+    let dash_tokens = live_dash_hdnea_tokens(result);
     let hdnea = if tokens.len() == 1 {
         tokens[0].clone()
     } else {
         String::new()
     };
-    result.hdnea = hdnea.clone();
-    if !hdnea.is_empty() {
-        result.bitrates.auto = append_hdnea(&result.bitrates.auto, &hdnea);
-        result.bitrates.high = append_hdnea(&result.bitrates.high, &hdnea);
-        result.bitrates.medium = append_hdnea(&result.bitrates.medium, &hdnea);
-        result.bitrates.low = append_hdnea(&result.bitrates.low, &hdnea);
-        result.result = append_hdnea(&result.result, &hdnea);
-        result.m3u8.auto = append_hdnea(&result.m3u8.auto, &hdnea);
-        result.m3u8.high = append_hdnea(&result.m3u8.high, &hdnea);
-        result.m3u8.medium = append_hdnea(&result.m3u8.medium, &hdnea);
-        result.m3u8.low = append_hdnea(&result.m3u8.low, &hdnea);
-        result.mpd.bitrates.auto = append_hdnea(&result.mpd.bitrates.auto, &hdnea);
-        result.mpd.bitrates.high = append_hdnea(&result.mpd.bitrates.high, &hdnea);
-        result.mpd.bitrates.medium = append_hdnea(&result.mpd.bitrates.medium, &hdnea);
-        result.mpd.bitrates.low = append_hdnea(&result.mpd.bitrates.low, &hdnea);
-        result.mpd.auto = append_hdnea(&result.mpd.auto, &hdnea);
-        result.mpd.high = append_hdnea(&result.mpd.high, &hdnea);
-        result.mpd.medium = append_hdnea(&result.mpd.medium, &hdnea);
-        result.mpd.low = append_hdnea(&result.mpd.low, &hdnea);
-        result.mpd.result = append_hdnea(&result.mpd.result, &hdnea);
-        result.mpd.key = append_hdnea(&result.mpd.key, &hdnea);
+    result.hdnea = hdnea;
+
+    if hls_tokens.len() == 1 {
+        let token = &hls_tokens[0];
+        result.bitrates.auto = append_hdnea(&result.bitrates.auto, token);
+        result.bitrates.high = append_hdnea(&result.bitrates.high, token);
+        result.bitrates.medium = append_hdnea(&result.bitrates.medium, token);
+        result.bitrates.low = append_hdnea(&result.bitrates.low, token);
+        result.m3u8.auto = append_hdnea(&result.m3u8.auto, token);
+        result.m3u8.high = append_hdnea(&result.m3u8.high, token);
+        result.m3u8.medium = append_hdnea(&result.m3u8.medium, token);
+        result.m3u8.low = append_hdnea(&result.m3u8.low, token);
+        if result.result.to_lowercase().contains(".m3u8") {
+            result.result = append_hdnea(&result.result, token);
+        }
+        if result.mpd.result.to_lowercase().contains(".m3u8") {
+            result.mpd.result = append_hdnea(&result.mpd.result, token);
+        }
+    }
+
+    if dash_tokens.len() == 1 {
+        let token = &dash_tokens[0];
+        result.mpd.bitrates.auto = append_hdnea(&result.mpd.bitrates.auto, token);
+        result.mpd.bitrates.high = append_hdnea(&result.mpd.bitrates.high, token);
+        result.mpd.bitrates.medium = append_hdnea(&result.mpd.bitrates.medium, token);
+        result.mpd.bitrates.low = append_hdnea(&result.mpd.bitrates.low, token);
+        result.mpd.auto = append_hdnea(&result.mpd.auto, token);
+        result.mpd.high = append_hdnea(&result.mpd.high, token);
+        result.mpd.medium = append_hdnea(&result.mpd.medium, token);
+        result.mpd.low = append_hdnea(&result.mpd.low, token);
+        if !result.mpd.result.to_lowercase().contains(".m3u8") {
+            result.mpd.result = append_hdnea(&result.mpd.result, token);
+        }
+        result.mpd.key = append_hdnea(&result.mpd.key, token);
+        if result.result.to_lowercase().contains(".mpd") {
+            result.result = append_hdnea(&result.result, token);
+        }
     }
 }
 
@@ -1158,20 +1204,48 @@ mod tests {
             finish_live_result(&mut live);
 
             assert_eq!(live.hdnea, "rotated-token", "source: {source}");
+            let hls_source = matches!(source, "high" | "medium" | "low" | "result" | "m3u8_high");
+            for url in [&live.bitrates.auto, &live.m3u8.auto, &live.result] {
+                assert_eq!(
+                    url.contains("hdnea=rotated-token"),
+                    hls_source,
+                    "source {source} propagated to wrong HLS family URL {url}"
+                );
+            }
             for url in [
-                &live.bitrates.auto,
-                &live.m3u8.auto,
                 &live.mpd.bitrates.auto,
                 &live.mpd.auto,
                 &live.mpd.result,
                 &live.mpd.key,
             ] {
-                assert!(
+                assert_eq!(
                     url.contains("hdnea=rotated-token"),
-                    "source {source} did not propagate to {url}"
+                    !hls_source,
+                    "source {source} propagated to wrong DASH family URL {url}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn dash_only_token_is_not_copied_to_hls_urls() {
+        let mut live = LiveUrlOutput {
+            bitrates: Bitrates {
+                auto: "https://cdn.example/auto.m3u8".into(),
+                ..Default::default()
+            },
+            mpd: Mpd {
+                high: "https://cdn.example/high.mpd?hdnea=dash-only-token".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        finish_live_result(&mut live);
+
+        assert_eq!(live.hdnea, "dash-only-token");
+        assert_eq!(live.bitrates.auto, "https://cdn.example/auto.m3u8");
+        assert!(select_hls_hdnea_token(&live, "auto", "").is_empty());
     }
 
     #[test]

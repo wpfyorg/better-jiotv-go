@@ -242,6 +242,99 @@ async fn refresh_channel_token(
     fetch_live(state, channel_id).await
 }
 
+/// Recover from the refreshed rendition itself, never reuse a master token
+/// for a child merely because both were requested with auto quality.
+async fn refresh_rendition_token(
+    state: &AppState,
+    live: &LiveUrlOutput,
+    quality: &str,
+    scope: &str,
+) -> String {
+    let root = television::select_best_live_hls_url(live, quality);
+    if root.is_empty() {
+        return String::new();
+    }
+    let root = to_absolute_stream_url(&root, absolute_base_from_live(live).as_deref());
+    // Legacy links have no authenticated manifest scope.
+    if scope.starts_with("legacy-") || strip_hdnea_from_url(&root) == scope {
+        return extract_hdnea_from_url(&root).unwrap_or_default();
+    }
+    let root_token = extract_hdnea_from_url(&root).unwrap_or_default();
+    let (body, status, _) = state.tv.render(&root, &root_token).await;
+    if status != 200 {
+        return String::new();
+    }
+    let Some(child) = matching_rendition_url(&String::from_utf8_lossy(&body), &root, scope) else {
+        return String::new();
+    };
+    let child_token = extract_hdnea_from_url(&child).unwrap_or_default();
+    let child_request = if child_token.is_empty() {
+        child.clone()
+    } else {
+        strip_hdnea_from_url(&child)
+    };
+    let (mut body, mut status, mut cookie) = state.tv.render(&child_request, &child_token).await;
+    if matches!(status, 401 | 403) && !cookie.is_empty() && cookie != child_token {
+        let (next_body, next_status, next_cookie) = state
+            .tv
+            .render(&strip_hdnea_from_url(&child_request), &cookie)
+            .await;
+        body = next_body;
+        status = next_status;
+        if !next_cookie.is_empty() {
+            cookie = next_cookie;
+        }
+    }
+    if status != 200 {
+        return String::new();
+    }
+    if !cookie.is_empty() {
+        return cookie;
+    }
+    if !child_token.is_empty() {
+        return child_token;
+    }
+    // A rendition may put its credential on media URIs instead of itself.
+    let tokens: std::collections::HashSet<String> = String::from_utf8_lossy(&body)
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(extract_hdnea_from_url)
+        .collect();
+    if tokens.len() == 1 {
+        tokens.into_iter().next().unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
+fn matching_rendition_url(body: &str, master_url: &str, scope: &str) -> Option<String> {
+    let base = url::Url::parse(master_url).ok()?;
+    let params = drop_hdnea_params(base.query().unwrap_or_default());
+    for line in body.lines() {
+        let line = line.trim();
+        let uri = if line.starts_with("#EXT-X-MEDIA:")
+            || line.starts_with("#EXT-X-I-FRAME-STREAM-INF:")
+        {
+            match line
+                .split_once("URI=\"")
+                .and_then(|(_, rest)| rest.split('"').next())
+            {
+                Some(uri) => uri,
+                None => continue,
+            }
+        } else if line.is_empty() || line.starts_with('#') {
+            continue;
+        } else {
+            line
+        };
+        let candidate = resolve_media_url(uri, master_url, &params);
+        if strip_hdnea_from_url(&candidate) == scope {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 fn channel_and_quality(id_with_ext: &str) -> String {
     id_with_ext.trim_end_matches(".m3u8").to_string()
 }
@@ -678,7 +771,7 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
         None => (decoded.clone(), url_token.clone().unwrap_or_default()),
     };
 
-    let mut rejected_token = token.clone();
+    let rejected_token = token.clone();
     let (mut body, mut status, new_hdnea) = state.tv.render(&render_url, &token).await;
     if !new_hdnea.is_empty() {
         state
@@ -688,7 +781,6 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
     }
 
     if matches!(status, 401 | 403) && !new_hdnea.is_empty() && new_hdnea != rejected_token {
-        rejected_token = token.clone();
         render_url = strip_hdnea_from_url(&render_url);
         let (b, s, h) = state.tv.render(&render_url, &token).await;
         body = b;
@@ -711,15 +803,14 @@ async fn render_m3u8_inner(state: Arc<AppState>, q: RenderQuery) -> Response {
                 } else {
                     quality.clone()
                 };
-                let rejected = rejected_hdnea_for_refresh(status, &rejected_token);
                 let fresh_token =
-                    television::select_hls_hdnea_token(&refreshed, &retry_quality, rejected);
+                    refresh_rendition_token(&state, &refreshed, &retry_quality, &scope).await;
                 if !fresh_token.is_empty() {
                     state
                         .render_caches
                         .set_hdnea(cache_gen, &hdnea_key, &fresh_token);
-                    token = fresh_token;
                 }
+                token = fresh_token;
                 render_url = strip_hdnea_from_url(&decoded);
                 let (b, s, h) = state.tv.render(&render_url, &token).await;
                 body = b;
@@ -832,14 +923,6 @@ fn append_hdnea_query_param(params: String, token: &str) -> String {
     }
 }
 
-fn rejected_hdnea_for_refresh(status: u16, token: &str) -> &str {
-    if matches!(status, 401 | 403) {
-        token
-    } else {
-        ""
-    }
-}
-
 fn hls_fallback_candidate(live: &LiveUrlOutput, quality: &str) -> (String, String) {
     let candidate = television::select_best_live_hls_url(live, quality);
     if candidate.is_empty() {
@@ -913,9 +996,8 @@ pub async fn render_ts_handler(
         let mut fresh_token = None;
         if !channel_id.is_empty() {
             if let Ok(refreshed) = refresh_channel_token(&state, &channel_id).await {
-                let rejected_token = token.as_deref().unwrap_or_default();
                 let refreshed_token =
-                    television::select_hls_hdnea_token(&refreshed, quality, rejected_token);
+                    refresh_rendition_token(&state, &refreshed, quality, &scope).await;
                 if !refreshed_token.is_empty() {
                     state
                         .render_caches
@@ -1089,13 +1171,6 @@ mod tests {
 
         assert!(caches.get_hdnea(&key).is_none());
         assert!(!caches.hdnea.read().unwrap().contains_key(&key));
-    }
-
-    #[test]
-    fn only_auth_failures_reject_the_previous_hdnea_token() {
-        assert_eq!(rejected_hdnea_for_refresh(401, "old-token"), "old-token");
-        assert_eq!(rejected_hdnea_for_refresh(403, "old-token"), "old-token");
-        assert_eq!(rejected_hdnea_for_refresh(404, "old-token"), "");
     }
 
     #[test]
@@ -1300,8 +1375,8 @@ mod tests {
         assert!(rewritten.contains(",IV=0x1"));
     }
 
-    #[test]
-    fn full_render_replace_encrypts_placeholders() {
+    #[tokio::test]
+    async fn full_render_replace_encrypts_placeholders() {
         let dir = tempfile::tempdir().unwrap();
         let store =
             std::sync::Arc::new(crate::store::Store::open(dir.path().to_str().unwrap()).unwrap());
@@ -1325,6 +1400,34 @@ mod tests {
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
             listen: Default::default(),
         };
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let upstream = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/master.m3u8"))
+            .and(header("cookie", "__hdnea__=master-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"muxed\"\n#EXT-X-STREAM-INF:BANDWIDTH=1\nlow.m3u8?hdnea=low-token\n#EXT-X-STREAM-INF:BANDWIDTH=2\nhigh.m3u8?hdnea=child-token\n"
+            )).expect(1).mount(&upstream).await;
+        Mock::given(method("GET"))
+            .and(path("/high.m3u8"))
+            .and(header("cookie", "__hdnea__=child-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("#EXTM3U\nseg.ts\n"))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let live = LiveUrlOutput {
+            bitrates: television::Bitrates {
+                auto: format!("{}/master.m3u8?hdnea=master-token", upstream.uri()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let child_scope = format!("{}/high.m3u8", upstream.uri());
+        assert_eq!(
+            refresh_rendition_token(&state, &live, "auto", &child_scope).await,
+            "child-token"
+        );
+
         let body = "#EXTM3U\nseg1.ts\n";
         let out = render_replace(
             &state,

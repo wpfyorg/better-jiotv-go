@@ -73,12 +73,13 @@
   }
 
   function updateClock() {
-    const previousTitle = currentProgram?.showname || "";
+    const previousKey = currentProgram ? `${currentProgram.startEpoch}:${currentProgram.endEpoch}` : "";
     const nextClock = Date.now();
-    const nextTitle = guide.find((program) => isNow(program, nextClock))?.showname || "";
+    const nextProgram = guide.find((program) => isNow(program, nextClock)) ?? null;
+    const nextKey = nextProgram ? `${nextProgram.startEpoch}:${nextProgram.endEpoch}` : "";
     clock = nextClock;
-    if (previousTitle && nextTitle && previousTitle !== nextTitle) {
-      programToast = nextTitle;
+    if (previousKey && nextKey && previousKey !== nextKey) {
+      programToast = nextProgram?.showname || "";
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => (programToast = ""), 4200);
     }
@@ -130,6 +131,10 @@
       const status = await api("/api/status").catch(() => null);
       if (thisRun !== runID) return;
       if (channelID.startsWith("ex_")) {
+        if (!status) {
+          setPlayerState("extras-status", "Extras", "Extras status unavailable", "We could not check the extras account right now. Wait a moment and try again.");
+          return;
+        }
         if (!status?.extras?.enabled) {
           setPlayerState("extras-status", "Extras", "Extras is not enabled", "Enable extras in account settings, then return here to start playback.");
           return;
@@ -228,7 +233,7 @@
   });
 
   onMount(() => {
-    const clockTimer = setInterval(updateClock, 15000);
+    const clockTimer = setInterval(updateClock, 1000);
     const onOffline = () => setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
     const onOnline = () => {
       setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");

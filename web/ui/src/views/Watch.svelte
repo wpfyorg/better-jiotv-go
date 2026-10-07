@@ -291,20 +291,15 @@
       const onWaiting = () => {
         if (isCurrent() && !fullStageKinds.has(playerState.kind)) setPlayerState("buffering", "Live TV", "Buffering…", "");
       };
-      const onStalled = () => {
-        if (isCurrent() && !fullStageKinds.has(playerState.kind)) setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
-      };
       video.addEventListener("playing", onPlaying);
       video.addEventListener("pause", onPause);
       video.addEventListener("volumechange", onVolumeChange);
       video.addEventListener("waiting", onWaiting);
-      video.addEventListener("stalled", onStalled);
       cleanup = async () => {
         video?.removeEventListener("playing", onPlaying);
         video?.removeEventListener("pause", onPause);
         video?.removeEventListener("volumechange", onVolumeChange);
         video?.removeEventListener("waiting", onWaiting);
-        video?.removeEventListener("stalled", onStalled);
         await session.destroy().catch(() => {});
       };
 
@@ -551,6 +546,7 @@
   .layout { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr) minmax(310px, 360px); align-items: start; }
   .stage {
     position: relative;
+    isolation: isolate;
     aspect-ratio: 16 / 9;
     background: #000;
     border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);

@@ -1,7 +1,7 @@
 <script>
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { api, keyBase, loadChannels, formatTime } from "../lib/api.js";
-  import { createShakaPlayer, isDrmPlaybackError, playbackErrorMessage, playWithAutoplay, widevineCapability } from "../lib/shakaPlayer.js";
+  import { createShakaPlayer, isDrmPlaybackError, playWithAutoplay, widevineCapability } from "../lib/shakaPlayer.js";
 
   let { id } = $props();
 
@@ -11,8 +11,19 @@
   let guideError = $state("");
   let playerContainer = $state();
   let video = $state();
-  let playerError = $state("");
+  let playerState = $state({ kind: "loading", eyebrow: "Live TV", title: "Starting live TV…", detail: "" });
+  let showMeta = $state(true);
+  let clock = $state(Date.now());
+  let programToast = $state("");
   let cleanup = null;
+  let runID = 0;
+  let activityTimer = null;
+  let toastTimer = null;
+  let lastProgram = "";
+
+  const fullStageKinds = new Set(["offline", "playback", "no-stream", "protected", "subscription", "restricted", "extras-signin", "service"]);
+
+  let currentProgram = $derived(guide.find((program) => isNow(program, clock)) ?? null);
 
   function gated(path) {
     return keyBase ? keyBase + path.replace(/^\//, "") : path;
@@ -22,9 +33,55 @@
     return gated(`/live/${encodeURIComponent(q)}/${encodeURIComponent(channelID)}.m3u8`);
   }
 
-  function isNow(program) {
-    const now = Date.now();
+  function isNow(program, now = Date.now()) {
     return program?.startEpoch <= now && program?.endEpoch > now;
+  }
+
+  function setPlayerState(kind, eyebrow, title, detail = "") {
+    playerState = { kind, eyebrow, title, detail };
+  }
+
+  function showPlaybackError(err, drmCapability = null) {
+    const message = String(err?.message || "").toLowerCase();
+    const status = Number(err?.status);
+
+    if (!navigator.onLine) {
+      setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
+    } else if (isDrmPlaybackError(err) && drmCapability && !drmCapability.usable) {
+      setPlayerState("protected", "Protected playback", "Protected playback unavailable", "This browser cannot play the protected stream. Try a supported browser or device, then retry.");
+    } else if (message.includes("extras is not connected") || message.includes("not logged in")) {
+      setPlayerState("extras-signin", "Extras", "Connect extras to play", "This channel comes from extras. Connect the extras account, then return here to start playback.");
+    } else if (message.includes("not in your extras plan") || message.includes("not subscribed")) {
+      setPlayerState("subscription", "Account access", "Subscription required", "This channel is not included with the current account. Choose another channel or retry after the account has access.");
+    } else if (status === 404 && message.includes("no stream")) {
+      setPlayerState("no-stream", "Live TV", "No live stream available", "This channel does not have a playable live stream right now.");
+    } else if (status === 404 && message.includes("active account")) {
+      setPlayerState("restricted", "Account access", "Not available on this account", "Playback was refused for this account. Access may depend on the active plan or provider entitlement.");
+    } else if (status === 403) {
+      setPlayerState("subscription", "Account access", "Subscription required", "This channel is not included with the current account. Choose another channel or retry after the account has access.");
+    } else if (status >= 500) {
+      setPlayerState("service", "Live TV", "Service temporarily unavailable", "The provider could not start this live stream. Wait a moment and try again.");
+    } else {
+      setPlayerState("playback", "Playback issue", "Playback unavailable", "The live stream could not be started. Check the connection or try again in a moment.");
+    }
+  }
+
+  function markActivity() {
+    showMeta = true;
+    clearTimeout(activityTimer);
+    activityTimer = setTimeout(() => (showMeta = false), 3000);
+  }
+
+  async function tapToPlay() {
+    if (!video) return;
+    video.muted = false;
+    try {
+      await video.play();
+      setPlayerState("playing", "", "", "");
+      markActivity();
+    } catch {
+      showPlaybackError(new Error("playback failed"));
+    }
   }
 
   $effect(() => {
@@ -38,6 +95,8 @@
     channel = null;
     guide = [];
     guideError = "";
+    lastProgram = "";
+    programToast = "";
     loadChannels()
       .then((list) => (channel = list.find((c) => c.id === current) ?? null))
       .catch(() => {});
@@ -49,16 +108,54 @@
       .catch((err) => (guideError = err.message));
   });
 
+  $effect(() => {
+    const title = currentProgram?.showname || "";
+    if (!title) return;
+    if (lastProgram && lastProgram !== title) {
+      programToast = title;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (programToast = ""), 4200);
+    }
+    lastProgram = title;
+  });
+
   async function start(channelID, q) {
-    cleanup?.();
+    const thisRun = ++runID;
+    await cleanup?.();
     cleanup = null;
-    playerError = "";
+    setPlayerState("loading", "Live TV", "Starting live TV…", "");
+    markActivity();
 
     try {
+      const status = await api("/api/status").catch(() => null);
+      if (thisRun !== runID) return;
+      if (channelID.startsWith("ex_") && status?.extras?.enabled && !status?.extras?.connected) {
+        setPlayerState("extras-signin", "Extras", "Connect extras to play", "This channel comes from extras. Connect the extras account, then return here to start playback.");
+        return;
+      }
+
       const d = await api(`/api/live/play/${encodeURIComponent(channelID)}?q=${q}`);
+      if (thisRun !== runID) return;
       const session = await createShakaPlayer(playerContainer, video);
       const player = session.player;
-      cleanup = () => session.destroy().catch(() => {});
+      const onPlaying = () => {
+        if (thisRun === runID) setPlayerState("playing", "", "", "");
+      };
+      const onWaiting = () => {
+        if (thisRun === runID && !fullStageKinds.has(playerState.kind)) setPlayerState("buffering", "Live TV", "Buffering…", "");
+      };
+      const onStalled = () => {
+        if (thisRun === runID && !fullStageKinds.has(playerState.kind)) setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
+      };
+      video.addEventListener("playing", onPlaying);
+      video.addEventListener("waiting", onWaiting);
+      video.addEventListener("stalled", onStalled);
+      cleanup = async () => {
+        video?.removeEventListener("playing", onPlaying);
+        video?.removeEventListener("waiting", onWaiting);
+        video?.removeEventListener("stalled", onStalled);
+        await session.destroy().catch(() => {});
+      };
       const drmCapability = d.dash && d.license ? await widevineCapability() : null;
 
       if (d.license) {
@@ -75,35 +172,48 @@
       const fallbackToHls = async () => {
         if (fallingBack) return;
         fallingBack = true;
-        playerError = "";
+        setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
         await player.unload();
         await player.load(hlsFallback(channelID, q));
-        await playWithAutoplay(video);
-        playerError = "";
+        const played = await playWithAutoplay(video, { allowMutedFallback: false });
+        if (thisRun !== runID) return;
+        setPlayerState(played ? "playing" : "tap", "", played ? "" : "Tap to play", "");
       };
 
       player.addEventListener("error", (event) => {
+        if (thisRun !== runID) return;
         const detail = event.detail;
         if (d.dash && d.license && isDrmPlaybackError(detail)) {
-          fallbackToHls().catch((err) => (playerError = err.message || playbackErrorMessage(detail, drmCapability)));
+          fallbackToHls().catch(() => showPlaybackError(detail, drmCapability));
         } else {
-          playerError = playbackErrorMessage(detail, drmCapability);
+          showPlaybackError(detail, drmCapability);
         }
+      });
+
+      player.addEventListener("buffering", (event) => {
+        if (thisRun !== runID || fullStageKinds.has(playerState.kind)) return;
+        const buffering = event?.buffering ?? event?.detail?.buffering;
+        setPlayerState(buffering ? "buffering" : "playing", "Live TV", buffering ? "Buffering…" : "", "");
       });
 
       try {
         await player.load(d.url);
       } catch (err) {
         if (d.dash && d.license && isDrmPlaybackError(err)) {
-          await fallbackToHls();
+          try {
+            await fallbackToHls();
+          } catch {
+            showPlaybackError(err, drmCapability);
+          }
           return;
         }
         throw err;
       }
-      await playWithAutoplay(video);
-      playerError = "";
+      const played = await playWithAutoplay(video, { allowMutedFallback: false });
+      if (thisRun !== runID) return;
+      setPlayerState(played ? "playing" : "tap", "", played ? "" : "Tap to play", "");
     } catch (err) {
-      playerError = err.message || String(err);
+      if (thisRun === runID) showPlaybackError(err);
     }
   }
 
@@ -111,31 +221,85 @@
     if (playerContainer && video) start(id, quality);
   });
 
-  onDestroy(() => cleanup?.());
+  onMount(() => {
+    const clockTimer = setInterval(() => (clock = Date.now()), 15000);
+    const onOffline = () => setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
+    const onOnline = () => {
+      setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
+      start(id, quality);
+    };
+    window.addEventListener("offline", onOffline);
+    window.addEventListener("online", onOnline);
+    markActivity();
+    return () => {
+      clearInterval(clockTimer);
+      window.removeEventListener("offline", onOffline);
+      window.removeEventListener("online", onOnline);
+    };
+  });
+
+  onDestroy(() => {
+    runID += 1;
+    clearTimeout(activityTimer);
+    clearTimeout(toastTimer);
+    cleanup?.();
+  });
 </script>
 
 <div class="layout">
-  <div class:has-error={playerError} class="stage" bind:this={playerContainer}>
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <div
+    class:has-overlay={fullStageKinds.has(playerState.kind)}
+    class="stage"
+    role="region"
+    aria-label="Live player"
+    bind:this={playerContainer}
+    onpointermove={markActivity}
+    onpointerdown={markActivity}
+    onkeydown={markActivity}
+    onfocusin={markActivity}
+  >
     <!-- svelte-ignore a11y_media_has_caption -->
     <video bind:this={video} autoplay playsinline></video>
-    {#if !playerError}
+    {#if showMeta && !fullStageKinds.has(playerState.kind)}
       <div class="player-meta" aria-hidden="true">
         <span class="live-pill"><span></span>LIVE</span>
         <div class="player-copy">
           <strong>{channel?.name ?? id}</strong>
-          {#if guide[0] && isNow(guide[0])}<small>{guide[0].showname}</small>{/if}
+          {#if currentProgram}<small>{currentProgram.showname}</small>{/if}
         </div>
       </div>
     {/if}
-    {#if playerError}
+    {#if ["loading", "buffering", "reconnecting"].includes(playerState.kind)}
+      <div class="player-progress" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>{playerState.title}</span>
+      </div>
+    {:else if playerState.kind === "tap"}
+      <button class="tap-to-play" onclick={tapToPlay} aria-label="Start live playback">
+        <span aria-hidden="true">▶</span>
+        Tap to play
+      </button>
+    {/if}
+    {#if programToast}
+      <div class="program-toast" role="status" aria-live="polite">
+        <span class="live-pill"><span></span>LIVE</span>
+        <span class="toast-copy"><small>Now playing</small><strong>{programToast}</strong></span>
+      </div>
+    {/if}
+    {#if fullStageKinds.has(playerState.kind)}
       <section class="player-error" role="alert" aria-labelledby="player-error-title">
         <span class="error-mark" aria-hidden="true">!</span>
-        <p class="error-eyebrow">Playback issue</p>
-        <h2 id="player-error-title">Playback unavailable</h2>
-        <p class="error-detail">{playerError}</p>
+        <p class="error-eyebrow">{playerState.eyebrow}</p>
+        <h2 id="player-error-title">{playerState.title}</h2>
+        <p class="error-detail">{playerState.detail}</p>
         <div class="error-actions">
-          <button class="retry-button" onclick={() => start(id, quality)}>Try again</button>
-          <a class="channels-button" href="#/">All channels</a>
+          {#if playerState.kind === "extras-signin"}
+            <a class="retry-button" href="#/settings">Open account settings</a>
+          {:else}
+            <button class="retry-button" onclick={() => start(id, quality)}>Try again</button>
+          {/if}
+          {#if playerState.kind !== "service"}<a class="channels-button" href="#/">All channels</a>{/if}
         </div>
       </section>
     {/if}
@@ -238,6 +402,63 @@
   .player-copy strong, .player-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .player-copy strong { font-size: 13px; }
   .player-copy small { margin-top: 2px; color: rgba(255, 255, 255, .72); font-size: 11px; }
+  .player-progress {
+    position: absolute;
+    z-index: 8;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    color: rgba(255, 255, 255, .82);
+    background: linear-gradient(180deg, rgba(0, 0, 0, .12), rgba(0, 0, 0, .24));
+    pointer-events: none;
+    font-size: 12px;
+    font-weight: 650;
+  }
+  .spinner { width: 15px; height: 15px; border: 2px solid rgba(255, 255, 255, .24); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
+  .tap-to-play {
+    position: absolute;
+    z-index: 9;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 44px;
+    padding: 0 18px;
+    border: 1px solid rgba(255, 255, 255, .18);
+    border-radius: 12px;
+    color: #fff;
+    background: rgba(8, 10, 14, .74);
+    backdrop-filter: blur(12px);
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 750;
+  }
+  .tap-to-play:hover { background: rgba(18, 21, 28, .9); }
+  .program-toast {
+    position: absolute;
+    z-index: 10;
+    left: 16px;
+    bottom: 70px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: min(72%, 520px);
+    padding: 9px 11px;
+    border: 1px solid rgba(255, 255, 255, .12);
+    border-radius: 12px;
+    color: #fff;
+    background: rgba(8, 10, 14, .78);
+    backdrop-filter: blur(12px);
+    pointer-events: none;
+  }
+  .toast-copy { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .toast-copy small { color: rgba(255, 255, 255, .62); font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+  .toast-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
   .player-error {
     position: absolute;
     z-index: 20;
@@ -253,8 +474,8 @@
     background: radial-gradient(ellipse at 50% 42%, rgba(39, 28, 34, .97), rgba(7, 9, 13, .99) 72%);
     text-align: center;
   }
-  .has-error video { visibility: hidden; }
-  .has-error :global(.shaka-controls-container) { display: none; }
+  .has-overlay video { visibility: hidden; }
+  .has-overlay :global(.shaka-controls-container) { display: none; }
   .error-mark { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 18px; border: 1px solid rgba(248, 113, 113, .3); border-radius: 50%; color: #fca5a5; background: rgba(239, 68, 68, .12); font-size: 20px; font-weight: 700; }
   .error-eyebrow { margin: 0 0 8px; color: #fca5a5; font-size: 11px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
   .player-error h2 { max-width: 100%; margin: 0; font-size: clamp(20px, 3vw, 28px); line-height: 1.2; letter-spacing: -.025em; }
@@ -266,8 +487,11 @@
   .error-actions button:focus-visible, .error-actions a:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
   @media (prefers-reduced-motion: no-preference) {
     .player-error { animation: error-in .18s ease-out both; }
+    .program-toast { animation: toast-in .2s ease-out both; }
     @keyframes error-in { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
   }
+  @keyframes spin { to { transform: rotate(360deg); } }
   aside { display: flex; flex-direction: column; gap: 20px; min-width: 0; padding-top: 2px; }
   .channel-card {
     display: flex;
@@ -348,6 +572,7 @@
     .live-pill { padding: 2px 6px; font-size: 9px; }
     .player-copy strong { font-size: 12px; }
     .player-copy small { display: none; }
+    .program-toast { left: 10px; bottom: 56px; max-width: calc(100% - 20px); }
     .error-detail { font-size: 12px; }
     .error-actions { margin-top: 18px; }
     aside { gap: 16px; padding-top: 0; }

@@ -136,12 +136,19 @@ export async function createShakaPlayer(container, video) {
   };
 }
 
-export async function playWithAutoplay(video) {
+export async function playWithAutoplay(video, { allowMutedFallback = true } = {}) {
   video.muted = false;
   try {
     await video.play();
+    return true;
   } catch {
+    if (!allowMutedFallback) return false;
     video.muted = true;
-    await video.play().catch(() => {});
+    try {
+      await video.play();
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

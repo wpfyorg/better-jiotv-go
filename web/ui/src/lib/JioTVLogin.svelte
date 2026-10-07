@@ -41,7 +41,7 @@
 
 {#if step === "number"}
   <form onsubmit={sendOTP}>
-    <input class="input" type="tel" inputmode="numeric" placeholder="10-digit Jio mobile number" pattern="[0-9]{10}" maxlength="10" bind:value={number} required />
+    <input class="input" type="tel" inputmode="numeric" placeholder="10-digit Jio mobile number" pattern={'[0-9]{10}'} maxlength="10" bind:value={number} required />
     <button class="btn primary" disabled={busy}>Send OTP</button>
   </form>
 {:else}

@@ -312,6 +312,7 @@
         <h1>{channel?.name ?? id}</h1>
         <p class="muted">
           {[channel?.category, channel?.language].filter(Boolean).join(" · ")}
+          {#if channel?.premium}<span class="badge premium">Premium</span>{/if}
           {#if channel?.extras}<span class="badge extras">Extra</span>{/if}
         </p>
       </div>
@@ -485,6 +486,7 @@
   .error-actions .retry-button { border-color: color-mix(in srgb, var(--accent) 65%, transparent); color: #fff; background: var(--accent); }
   .error-actions button:hover, .error-actions a:hover { filter: brightness(1.12); }
   .error-actions button:focus-visible, .error-actions a:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+  .badge.premium { color: #f6c667; border-color: rgba(246, 198, 103, .34); }
   @media (prefers-reduced-motion: no-preference) {
     .player-error { animation: error-in .18s ease-out both; }
     .program-toast { animation: toast-in .2s ease-out both; }

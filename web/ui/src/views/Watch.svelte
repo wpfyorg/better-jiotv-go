@@ -79,7 +79,13 @@
   function markActivity() {
     showMeta = true;
     clearTimeout(activityTimer);
-    activityTimer = setTimeout(() => (showMeta = false), 3000);
+    activityTimer = setTimeout(function hideMeta() {
+      if (playerContainer?.contains(document.activeElement)) {
+        activityTimer = setTimeout(hideMeta, 3000);
+        return;
+      }
+      showMeta = false;
+    }, 3000);
   }
 
   function formatElapsed(ms) {
@@ -198,11 +204,15 @@
     markActivity();
 
     try {
-      const status = await api("/api/status").catch(() => null);
-      if (thisRun !== runID) return;
       if (channelID.startsWith("ex_")) {
+        const status = await api("/api/status").catch(() => null);
+        if (thisRun !== runID) return;
         if (!status) {
-          setPlayerState("extras-status", "Extras", "Extras status unavailable", "We could not check the extras account right now. Wait a moment and try again.");
+          if (!navigator.onLine) {
+            setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
+          } else {
+            setPlayerState("extras-status", "Extras", "Extras status unavailable", "We could not check the extras account right now. Wait a moment and try again.");
+          }
           return;
         }
         if (!status?.extras?.enabled) {
@@ -217,7 +227,7 @@
 
       const d = await api(`/api/live/play/${encodeURIComponent(channelID)}?q=${q}`);
       if (thisRun !== runID) return;
-      const session = await createShakaPlayer(playerContainer, video);
+      const session = await createShakaPlayer(playerContainer, video, { controls: false });
       const player = session.player;
       const onPlaying = () => {
         if (thisRun === runID) {
@@ -324,11 +334,13 @@
     };
     window.addEventListener("offline", onOffline);
     window.addEventListener("online", onOnline);
+    window.addEventListener("keydown", markActivity);
     markActivity();
     return () => {
       clearInterval(clockTimer);
       window.removeEventListener("offline", onOffline);
       window.removeEventListener("online", onOnline);
+      window.removeEventListener("keydown", markActivity);
     };
   });
 
@@ -389,7 +401,7 @@
           <div class="player-control-right">
             <div class="control-menu-wrap">
               <button class="quality-control" onclick={() => { showQualityMenu = !showQualityMenu; showMoreMenu = false; markActivity(); }} aria-haspopup="menu" aria-expanded={showQualityMenu}>
-                {channel?.hd ? "HD" : quality === "auto" ? "Auto" : quality[0].toUpperCase() + quality.slice(1)}
+                {quality === "auto" ? (channel?.hd ? "HD" : "Auto") : quality[0].toUpperCase() + quality.slice(1)}
               </button>
               {#if showQualityMenu}
                 <div class="control-menu quality-menu" role="menu" aria-label="Playback quality">

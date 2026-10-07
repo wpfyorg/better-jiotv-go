@@ -82,7 +82,7 @@ export function playbackErrorMessage(error, capability = null) {
   return error?.message || String(error || "Playback failed");
 }
 
-export async function createShakaPlayer(container, video) {
+export async function createShakaPlayer(container, video, { controls = true } = {}) {
   await Promise.all([
     loadScript("/static/external/shaka-player.ui.js"),
     loadStylesheet("/static/external/shaka-player-controls.css"),
@@ -97,7 +97,25 @@ export async function createShakaPlayer(container, video) {
   const player = new shaka.Player();
   await player.attach(video);
   const ui = new shaka.ui.Overlay(player, container, video);
-  ui.configure({
+  ui.configure(controls ? {
+    addBigPlayButton: false,
+    fadeDelay: 3,
+    enableKeyboardPlaybackControls: true,
+    enableTooltips: true,
+    singleClickForPlayAndPause: true,
+    doubleClickForFullscreen: true,
+    controlPanelElements: ["play_pause", "time_and_duration", "spacer", "mute", "volume", "quality", "fullscreen", "overflow_menu"],
+    overflowMenuButtons: ["captions", "language", "picture_in_picture", "playback_rate"],
+    seekBarColors: {
+      base: "rgba(255,255,255,.22)",
+      buffered: "rgba(255,255,255,.48)",
+      played: "#5b8cff",
+    },
+    volumeBarColors: {
+      base: "rgba(255,255,255,.28)",
+      level: "#ffffff",
+    },
+  } : {
     addBigPlayButton: false,
     addSeekBar: false,
     fadeDelay: 3,

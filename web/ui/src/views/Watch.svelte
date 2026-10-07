@@ -96,6 +96,36 @@
     }, 3000);
   }
 
+  function handlePlayerKeydown(event) {
+    markActivity();
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    const target = event.target;
+    if (
+      target instanceof HTMLButtonElement ||
+      target instanceof HTMLAnchorElement ||
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLSelectElement ||
+      target instanceof HTMLTextAreaElement ||
+      target?.isContentEditable
+    ) return;
+
+    switch (event.key.toLowerCase()) {
+      case " ":
+      case "k":
+        event.preventDefault();
+        togglePlayback();
+        break;
+      case "m":
+        event.preventDefault();
+        toggleMute();
+        break;
+      case "f":
+        event.preventDefault();
+        toggleFullscreen();
+        break;
+    }
+  }
+
   function formatElapsed(ms) {
     const seconds = Math.max(0, Math.floor(ms / 1000));
     const minutes = Math.floor(seconds / 60);
@@ -357,11 +387,12 @@
     class="stage"
     role="region"
     aria-label="Live player"
+    tabindex="0"
     bind:this={playerContainer}
     onpointermove={markActivity}
     onpointerdown={markActivity}
     ontouchstart={markActivity}
-    onkeydown={markActivity}
+    onkeydown={handlePlayerKeydown}
     onfocusin={markActivity}
   >
     <!-- svelte-ignore a11y_media_has_caption -->

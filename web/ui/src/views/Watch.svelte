@@ -21,7 +21,7 @@
   let toastTimer = null;
   let lastProgram = "";
 
-  const fullStageKinds = new Set(["offline", "playback", "no-stream", "protected", "subscription", "restricted", "extras-signin", "service"]);
+  const fullStageKinds = new Set(["offline", "playback", "no-stream", "protected", "subscription", "restricted", "extras-signin", "extras-status", "service"]);
 
   let currentProgram = $derived(guide.find((program) => isNow(program, clock)) ?? null);
 
@@ -129,9 +129,15 @@
     try {
       const status = await api("/api/status").catch(() => null);
       if (thisRun !== runID) return;
-      if (channelID.startsWith("ex_") && status?.extras?.enabled && !status?.extras?.connected) {
-        setPlayerState("extras-signin", "Extras", "Connect extras to play", "This channel comes from extras. Connect the extras account, then return here to start playback.");
-        return;
+      if (channelID.startsWith("ex_")) {
+        if (!status?.extras?.enabled) {
+          setPlayerState("extras-status", "Extras", "Extras is not enabled", "Enable extras in account settings, then return here to start playback.");
+          return;
+        }
+        if (!status?.extras?.connected) {
+          setPlayerState("extras-signin", "Extras", "Connect extras to play", "This channel comes from extras. Connect the extras account, then return here to start playback.");
+          return;
+        }
       }
 
       const d = await api(`/api/live/play/${encodeURIComponent(channelID)}?q=${q}`);
@@ -294,7 +300,7 @@
         <h2 id="player-error-title">{playerState.title}</h2>
         <p class="error-detail">{playerState.detail}</p>
         <div class="error-actions">
-          {#if playerState.kind === "extras-signin"}
+          {#if playerState.kind === "extras-signin" || playerState.kind === "extras-status"}
             <a class="retry-button" href="#/settings">Open account settings</a>
           {:else}
             <button class="retry-button" onclick={() => start(id, quality)}>Try again</button>

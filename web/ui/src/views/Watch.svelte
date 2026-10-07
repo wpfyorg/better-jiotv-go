@@ -31,7 +31,7 @@
   let activityTimer = null;
   let toastTimer = null;
 
-  const fullStageKinds = new Set(["offline", "playback", "secure", "protected", "subscription", "restricted", "extras-signin", "extras-status", "service"]);
+  const fullStageKinds = new Set(["offline", "playback", "secure", "protected", "subscription", "restricted", "extras-signin", "extras-status", "extras-unavailable", "service"]);
 
   let currentProgramIndex = $derived(guide.findIndex((program) => isNow(program, clock)));
   let currentProgram = $derived(currentProgramIndex >= 0 ? guide[currentProgramIndex] : null);
@@ -254,7 +254,7 @@
           if (!navigator.onLine) {
             setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
           } else {
-            setPlayerState("extras-status", "Extras", "Extras status unavailable", "We could not check the extras account right now. Wait a moment and try again.");
+            setPlayerState("extras-unavailable", "Extras", "Extras status unavailable", "We could not check the extras account right now. Wait a moment and try again.");
           }
           return;
         }
@@ -741,13 +741,14 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
+    justify-content: safe center;
     padding: clamp(20px, 5vw, 56px);
     margin: 0;
     border-radius: inherit;
     color: #fff;
     background: radial-gradient(ellipse at 50% 42%, rgba(39, 28, 34, .97), rgba(7, 9, 13, .99) 72%);
     text-align: center;
+    overflow-y: auto;
   }
   .has-overlay video { visibility: hidden; }
   .has-overlay :global(.shaka-controls-container) { display: none; }

@@ -12,17 +12,26 @@
 
   let auth = $state({ loading: true, passwordSet: false, authenticated: false });
   let extrasActive = $state(false);
+  let extrasStatusPromise = null;
 
   async function refreshExtrasStatus() {
     if (!auth.authenticated) {
       extrasActive = false;
       return;
     }
+    if (extrasStatusPromise) return extrasStatusPromise;
+    extrasStatusPromise = (async () => {
+      try {
+        const status = await api("/api/extras/status");
+        extrasActive = status?.extras?.enabled === true && status?.extras?.connected === true;
+      } catch {
+        extrasActive = false;
+      }
+    })();
     try {
-      const status = await api("/api/status");
-      extrasActive = status?.extras?.enabled === true && status?.extras?.connected === true;
-    } catch {
-      extrasActive = false;
+      await extrasStatusPromise;
+    } finally {
+      extrasStatusPromise = null;
     }
   }
 
@@ -43,8 +52,16 @@
   }
 
   onMount(() => {
-    refreshAuth();
-    const statusTimer = window.setInterval(refreshExtrasStatus, 15000);
+    let disposed = false;
+    let statusTimer = null;
+    const scheduleStatusRefresh = () => {
+      if (disposed) return;
+      statusTimer = window.setTimeout(async () => {
+        await refreshExtrasStatus();
+        scheduleStatusRefresh();
+      }, 15000);
+    };
+    refreshAuth().finally(scheduleStatusRefresh);
     window.addEventListener("jiotv:extras-changed", refreshExtrasStatus);
     const onSignedOut = () => {
       auth = { ...auth, authenticated: false };
@@ -52,7 +69,8 @@
     };
     window.addEventListener("jiotv:signed-out", onSignedOut);
     return () => {
-      window.clearInterval(statusTimer);
+      disposed = true;
+      window.clearTimeout(statusTimer);
       window.removeEventListener("jiotv:extras-changed", refreshExtrasStatus);
       window.removeEventListener("jiotv:signed-out", onSignedOut);
     };

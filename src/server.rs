@@ -67,6 +67,7 @@ fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/auth/login", post(crate::api::auth_login))
         .route("/api/auth/logout", post(crate::api::auth_logout))
         .route("/api/status", get(crate::api::status))
+        .route("/api/extras/status", get(crate::api::extras_status_get))
         .route("/api/channels", get(crate::api::channels))
         .route("/api/account/password", post(crate::api::account_password))
         .route("/api/key/rotate", post(crate::api::rotate_key))
@@ -586,6 +587,38 @@ mod tests {
             StatusCode::NOT_FOUND,
             "unkeyed {path} didn't match any route"
         );
+    }
+
+    #[tokio::test]
+    async fn extras_status_is_session_gated_and_reports_local_state() {
+        let state = test_state();
+        state.access.set_password("hunter22hunter").unwrap();
+
+        let resp = send(state.clone(), "/api/extras/status").await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let session = state
+            .access
+            .new_session(std::time::SystemTime::now())
+            .unwrap();
+        let mut svc = GatedService::new(state);
+        let mut req = Request::builder()
+            .uri("/api/extras/status")
+            .body(Body::empty())
+            .unwrap();
+        req.headers_mut().insert(
+            header::COOKIE,
+            format!("{}={session}", crate::access::SESSION_COOKIE)
+                .parse()
+                .unwrap(),
+        );
+        svc.ready().await.unwrap();
+        let resp = svc.call(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_str(&body_text(resp).await).unwrap();
+        assert_eq!(body["status"], true);
+        assert_eq!(body["extras"]["enabled"], false);
+        assert_eq!(body["extras"]["connected"], false);
     }
 
     #[tokio::test]

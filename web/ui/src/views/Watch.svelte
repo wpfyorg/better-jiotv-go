@@ -120,8 +120,12 @@
     try {
       if (document.fullscreenElement) {
         await document.exitFullscreen?.();
+      } else if (video?.webkitDisplayingFullscreen) {
+        video.webkitExitFullscreen?.();
+      } else if (playerContainer?.requestFullscreen) {
+        await playerContainer.requestFullscreen();
       } else {
-        await playerContainer?.requestFullscreen?.();
+        video?.webkitEnterFullscreen?.();
       }
     } catch {}
   }
@@ -205,7 +209,7 @@
 
     try {
       if (channelID.startsWith("ex_")) {
-        const status = await api("/api/status").catch(() => null);
+        const status = await api("/api/extras/status").catch(() => null);
         if (thisRun !== runID) return;
         if (!status) {
           if (!navigator.onLine) {

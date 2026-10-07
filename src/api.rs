@@ -440,6 +440,10 @@ fn extras_status(state: &AppState) -> serde_json::Value {
     json!({"enabled": state.extras.enabled(), "connected": state.extras.connected()})
 }
 
+pub async fn extras_status_get(State(state): State<SharedState>) -> Response {
+    Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
+}
+
 /// `POST /api/extras/unlock`. Only reached when the channel search box's
 /// own shape test decided the query looked like an unlock code (see
 /// `unlock.rs`), so this never sees an ordinary search. Rate-limited per IP

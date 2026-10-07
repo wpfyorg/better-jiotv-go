@@ -72,21 +72,20 @@
       }
 
       let fallingBack = false;
-      const fallbackToHls = async (preserveError = false) => {
+      const fallbackToHls = async () => {
         if (fallingBack) return;
         fallingBack = true;
-        if (!preserveError) playerError = "";
+        playerError = "";
         await player.unload();
         await player.load(hlsFallback(channelID, q));
         await playWithAutoplay(video);
+        playerError = "";
       };
 
       player.addEventListener("error", (event) => {
         const detail = event.detail;
         if (d.dash && d.license && isDrmPlaybackError(detail)) {
-          const environmentBlocked = drmCapability && !drmCapability.usable;
-          playerError = playbackErrorMessage(detail, drmCapability);
-          fallbackToHls(environmentBlocked).catch((err) => (playerError = err.message || String(err)));
+          fallbackToHls().catch((err) => (playerError = err.message || playbackErrorMessage(detail, drmCapability)));
         } else {
           playerError = playbackErrorMessage(detail, drmCapability);
         }
@@ -96,14 +95,13 @@
         await player.load(d.url);
       } catch (err) {
         if (d.dash && d.license && isDrmPlaybackError(err)) {
-          const environmentBlocked = drmCapability && !drmCapability.usable;
-          playerError = playbackErrorMessage(err, drmCapability);
-          await fallbackToHls(environmentBlocked);
+          await fallbackToHls();
           return;
         }
         throw err;
       }
       await playWithAutoplay(video);
+      playerError = "";
     } catch (err) {
       playerError = err.message || String(err);
     }
@@ -117,17 +115,30 @@
 </script>
 
 <div class="layout">
-  <div class="stage" bind:this={playerContainer}>
+  <div class:has-error={playerError} class="stage" bind:this={playerContainer}>
     <!-- svelte-ignore a11y_media_has_caption -->
     <video bind:this={video} autoplay playsinline></video>
-    <div class="player-meta" aria-hidden="true">
-      <span class="live-pill"><span></span>LIVE</span>
-      <div class="player-copy">
-        <strong>{channel?.name ?? id}</strong>
-        {#if guide[0] && isNow(guide[0])}<small>{guide[0].showname}</small>{/if}
+    {#if !playerError}
+      <div class="player-meta" aria-hidden="true">
+        <span class="live-pill"><span></span>LIVE</span>
+        <div class="player-copy">
+          <strong>{channel?.name ?? id}</strong>
+          {#if guide[0] && isNow(guide[0])}<small>{guide[0].showname}</small>{/if}
+        </div>
       </div>
-    </div>
-    {#if playerError}<p class="player-error" role="alert">{playerError}</p>{/if}
+    {/if}
+    {#if playerError}
+      <section class="player-error" role="alert" aria-labelledby="player-error-title">
+        <span class="error-mark" aria-hidden="true">!</span>
+        <p class="error-eyebrow">Playback issue</p>
+        <h2 id="player-error-title">Playback unavailable</h2>
+        <p class="error-detail">{playerError}</p>
+        <div class="error-actions">
+          <button class="retry-button" onclick={() => start(id, quality)}>Try again</button>
+          <a class="channels-button" href="#/">All channels</a>
+        </div>
+      </section>
+    {/if}
   </div>
 
   <aside>
@@ -229,18 +240,33 @@
   .player-copy small { margin-top: 2px; color: rgba(255, 255, 255, .72); font-size: 11px; }
   .player-error {
     position: absolute;
-    z-index: 4;
-    right: 16px;
-    bottom: 68px;
-    max-width: min(80%, 560px);
+    z-index: 20;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(20px, 5vw, 56px);
     margin: 0;
-    padding: 9px 12px;
-    border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
-    border-radius: 10px;
+    border-radius: inherit;
     color: #fff;
-    background: color-mix(in srgb, #1a0d10 92%, transparent);
-    box-shadow: 0 10px 30px rgba(0, 0, 0, .32);
-    font-size: 13px;
+    background: radial-gradient(ellipse at 50% 42%, rgba(39, 28, 34, .97), rgba(7, 9, 13, .99) 72%);
+    text-align: center;
+  }
+  .has-error video { visibility: hidden; }
+  .has-error :global(.shaka-controls-container) { display: none; }
+  .error-mark { display: grid; place-items: center; width: 42px; height: 42px; margin-bottom: 18px; border: 1px solid rgba(248, 113, 113, .3); border-radius: 50%; color: #fca5a5; background: rgba(239, 68, 68, .12); font-size: 20px; font-weight: 700; }
+  .error-eyebrow { margin: 0 0 8px; color: #fca5a5; font-size: 11px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; }
+  .player-error h2 { max-width: 100%; margin: 0; font-size: clamp(20px, 3vw, 28px); line-height: 1.2; letter-spacing: -.025em; }
+  .error-detail { max-width: min(100%, 560px); margin: 12px 0 0; color: #a7afbd; font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+  .error-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 24px; }
+  .error-actions button, .error-actions a { display: inline-flex; align-items: center; justify-content: center; min-height: 40px; padding: 0 17px; border: 1px solid var(--border); border-radius: 10px; color: #e8ebf1; background: rgba(255, 255, 255, .045); text-decoration: none; font: inherit; font-size: 12px; font-weight: 700; cursor: pointer; }
+  .error-actions .retry-button { border-color: color-mix(in srgb, var(--accent) 65%, transparent); color: #fff; background: var(--accent); }
+  .error-actions button:hover, .error-actions a:hover { filter: brightness(1.12); }
+  .error-actions button:focus-visible, .error-actions a:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .player-error { animation: error-in .18s ease-out both; }
+    @keyframes error-in { from { opacity: 0; } to { opacity: 1; } }
   }
   aside { display: flex; flex-direction: column; gap: 20px; min-width: 0; padding-top: 2px; }
   .channel-card {
@@ -322,7 +348,8 @@
     .live-pill { padding: 2px 6px; font-size: 9px; }
     .player-copy strong { font-size: 12px; }
     .player-copy small { display: none; }
-    .player-error { right: 10px; bottom: 54px; max-width: calc(100% - 20px); font-size: 11px; }
+    .error-detail { font-size: 12px; }
+    .error-actions { margin-top: 18px; }
     aside { gap: 16px; padding-top: 0; }
     .channel-card { padding: 8px; }
     .channel-card img { width: 52px; height: 38px; }

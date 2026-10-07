@@ -38,7 +38,7 @@ default_languages = [1, 6]
 | `title`                   | `JIOTV_TITLE`                     | `"JioTV Go"`   | Page title. |
 | `disable_url_encryption`  | `JIOTV_DISABLE_URL_ENCRYPTION`    | `false`        | Turn off AES encryption of stream-proxy URL parameters (they're percent-encoded instead). Never combine with `disable_auth`. |
 | `proxy`                   | `JIOTV_PROXY`                     | `""`           | Outbound proxy URL for JioTV API requests. |
-| `path_prefix`             | `JIOTV_PATH_PREFIX`               | `~/.jiotv_go`  | Where `store_v4.toml` and other data live. |
+| `path_prefix`             | `JIOTV_PATH_PREFIX`               | `~/.jiotv_go` (`/etc/jiotv` on OpenWrt) | Where `store_v4.toml` and other data live. |
 | `log_path`                | `JIOTV_LOG_PATH`                  | `""`           | Reserved; not wired to a file sink yet (only stdout logging is implemented). |
 | `log_to_stdout`           | `JIOTV_LOG_TO_STDOUT`             | `true`         | Log to stdout/stderr. |
 | `custom_channels_file`    | `JIOTV_CUSTOM_CHANNELS_FILE`      | `""`           | Path to a JSON file of custom channels (`{"channels": [{"id","name","url","logo_url","category","language","is_hd"}]}`). YAML isn't supported (the Go version's other accepted format). |
@@ -50,7 +50,7 @@ default_languages = [1, 6]
 
 ## Data directory
 
-`path_prefix` (default `~/.jiotv_go`) holds:
+`path_prefix` (default `~/.jiotv_go`, or `/etc/jiotv` on OpenWrt) holds:
 
 - `store_v4.toml` — the key/value store: access key, admin password hash,
   session secret. It does **not** reuse the Go version's separate plain-JioTV
@@ -63,3 +63,15 @@ default_languages = [1, 6]
 
 Never commit or share this directory: it holds your access key, your admin
 password hash, and (once you've logged in) your JioTV tokens.
+
+## HTTPS options
+
+These are command-line flags of `jiotv serve`; see [HTTPS in Usage](usage.md#https).
+
+| Flag | Default | Meaning |
+| ---- | ------- | ------- |
+| `--tls` | off | Add an HTTPS listener next to the plain HTTP listener. |
+| `--tls-port` | `5443` | HTTPS port. |
+| `--tls-cert`, `--tls-key` | self-signed in `<data dir>/tls/` | Your own PEM certificate and key; both are required together. |
+
+The plain HTTP listener (`--port`, default `5001`) stays on for IPTV apps. On OpenWrt the same settings are the `tls`, `tls_port`, `tls_cert` and `tls_key` options in `/etc/config/jiotv`.

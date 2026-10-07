@@ -35,7 +35,7 @@ The installer automatically detects `apk` or `opkg`, chooses the matching packag
 Run:
 
 ```sh
-docker run -d --name jiotv --restart unless-stopped -p 5001:5001 -v jiotv-data:/app/.jiotv_go ghcr.io/wpfyorg/better-jiotv-go:latest
+docker run -d --name jiotv --restart unless-stopped -p 5001:5001 -p 5443:5443 -v jiotv-data:/app/.jiotv_go ghcr.io/wpfyorg/better-jiotv-go:latest
 ```
 
 Docker chooses the correct CPU image automatically.
@@ -47,14 +47,17 @@ For Linux, macOS, Windows, or Android / Termux:
 ```sh
 jiotv login otp
 jiotv admin password
-jiotv serve --host 0.0.0.0 --port 5001
+jiotv serve --host 0.0.0.0 --port 5001 --tls
 ```
 
 Enter the OTP yourself when prompted.
 
-For OpenWrt, run the first two commands above and then start the service:
+For OpenWrt, the installer already started the service. Set the admin password, then sign in from the browser UI. To sign in from the terminal instead, stop the service around the login so it cannot overwrite it:
 
 ```sh
+jiotv admin password
+/etc/init.d/jiotv stop; while pidof jiotv >/dev/null; do sleep 1; done
+jiotv login otp
 /etc/init.d/jiotv start
 ```
 
@@ -66,7 +69,7 @@ docker exec -it jiotv jiotv admin password
 docker restart jiotv
 ```
 
-Then open `http://<device-ip>:5001/` from another device on the same network.
+Then open `https://<device-ip>:5443/` from another device on the same network and accept the one-time self-signed certificate warning. Browsers only allow protected playback over HTTPS (or `localhost`). IPTV apps should use the `http://<device-ip>:5001/` playlist. See [HTTPS in Usage](usage.md#https).
 
 ## Optional: slim version
 

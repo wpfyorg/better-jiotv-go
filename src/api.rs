@@ -17,12 +17,15 @@ use std::time::SystemTime;
 
 pub type SharedState = Arc<AppState>;
 
-fn session_cookie_header(_state: &AppState, value: &str) -> String {
+/// `secure` is true for sessions created over the TLS listener, so the browser
+/// never replays an HTTPS-authenticated session over the plain-HTTP listener.
+fn session_cookie_header(value: &str, secure: bool) -> String {
     format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+        "{}={}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}{}",
         crate::access::SESSION_COOKIE,
         value,
         crate::access::SESSION_TTL.as_secs(),
+        if secure { "; Secure" } else { "" },
     )
 }
 
@@ -82,6 +85,7 @@ pub struct PasswordBody {
 pub async fn auth_setup(
     State(state): State<SharedState>,
     prefix: Option<axum::Extension<KeyPrefix>>,
+    https: Option<axum::Extension<crate::tls::Https>>,
     Json(body): Json<PasswordBody>,
 ) -> Response {
     if state.access.has_password() {
@@ -95,7 +99,7 @@ pub async fn auth_setup(
         );
     }
     match state.access.set_password(&body.password) {
-        Ok(()) => login_response(&state),
+        Ok(()) => login_response(&state, https.is_some()),
         Err(crate::access::AccessError::WeakPassword(n)) => err(
             StatusCode::BAD_REQUEST,
             format!("the password needs at least {n} characters"),
@@ -110,13 +114,14 @@ pub async fn auth_setup(
 pub async fn auth_login(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    https: Option<axum::Extension<crate::tls::Https>>,
     Json(body): Json<PasswordBody>,
 ) -> Response {
     match state
         .access
         .login(&addr.ip().to_string(), &body.password, SystemTime::now())
     {
-        Ok(true) => login_response(&state),
+        Ok(true) => login_response(&state, https.is_some()),
         Ok(false) => err(StatusCode::UNAUTHORIZED, "wrong password"),
         Err(crate::access::AccessError::TooManyAttempts) => err(
             StatusCode::TOO_MANY_REQUESTS,
@@ -126,7 +131,7 @@ pub async fn auth_login(
     }
 }
 
-fn login_response(state: &AppState) -> Response {
+fn login_response(state: &AppState, secure: bool) -> Response {
     let session = match state.access.new_session(SystemTime::now()) {
         Ok(s) => s,
         Err(_) => return err(StatusCode::INTERNAL_SERVER_ERROR, "cannot start a session"),
@@ -134,7 +139,7 @@ fn login_response(state: &AppState) -> Response {
     let mut resp = Json(json!({"status": true})).into_response();
     resp.headers_mut().insert(
         header::SET_COOKIE,
-        session_cookie_header(state, &session).parse().unwrap(),
+        session_cookie_header(&session, secure).parse().unwrap(),
     );
     resp
 }
@@ -155,6 +160,7 @@ pub struct ChangePasswordBody {
 pub async fn account_password(
     State(state): State<SharedState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    https: Option<axum::Extension<crate::tls::Https>>,
     Json(body): Json<ChangePasswordBody>,
 ) -> Response {
     match state
@@ -172,7 +178,7 @@ pub async fn account_password(
         Err(_) => return err(StatusCode::UNAUTHORIZED, "the current password is wrong"),
     }
     match state.access.set_password(&body.new) {
-        Ok(()) => login_response(&state),
+        Ok(()) => login_response(&state, https.is_some()),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
     }
 }
@@ -209,6 +215,8 @@ pub async fn status(State(state): State<SharedState>) -> Response {
         },
         "playlistPath": playlist,
         "epgPath": epg_path,
+        "httpPort": state.listen.get().map(|l| l.http),
+        "tlsPort": state.listen.get().and_then(|l| l.tls),
         "epg": state.config.epg,
         "drm": state.config.drm,
         "logoutDisabled": state.config.disable_logout,
@@ -224,9 +232,10 @@ struct ApiChannel {
     category: String,
     language: String,
     hd: bool,
-    premium: bool,
     extras: bool,
     catchup: bool,
+    #[serde(rename = "requiresSubscription")]
+    requires_subscription: bool,
     playable: bool,
 }
 
@@ -252,9 +261,9 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
                 category: crate::television::category_name(ch.category).to_string(),
                 language: crate::television::language_name(ch.language).to_string(),
                 hd: ch.is_hd,
-                premium: ch.requires_subscription(),
                 extras: ch.id.starts_with(crate::extras::ID_PREFIX),
                 catchup: ch.is_catchup_available,
+                requires_subscription: ch.requires_subscription(),
                 playable: state.is_playable(&ch.id),
             }
         })
@@ -324,6 +333,9 @@ pub async fn jiotv_verify_otp(
     state.invalidate_context();
     state.tv.set_credentials(creds);
     state.extras.invalidate_account_context();
+    // A request that entered after the first rotation still used the old
+    // credentials; rotate again now that the new ones are installed.
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": "success"})).into_response()
 }
@@ -336,6 +348,7 @@ pub async fn jiotv_logout(State(state): State<SharedState>) -> Response {
     state.invalidate_context();
     state.tv.clear_credentials();
     state.extras.invalidate_account_context();
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true})).into_response()
 }
@@ -401,14 +414,34 @@ pub async fn extras_verify_otp(
     if !state.extras.enabled() {
         return err(StatusCode::BAD_REQUEST, "extras is not enabled");
     }
-    // Block every old account-scoped artifact before the Extras client can
-    // install credentials returned by the OTP exchange.
-    state.invalidate_context();
+    let before = state.extras.credentials_marker();
+    // Rotate the moment verified credentials replace the old account's, not when
+    // the token exchange that follows finishes: for that whole network wait the
+    // client holds the new account's partial credentials, and the old epoch
+    // would keep serving the previous account's URLs and caches. A rejected OTP
+    // never installs anything, so it neither calls this nor rotates, and does
+    // not cut off existing viewers.
+    let installed = std::sync::atomic::AtomicBool::new(false);
     let result = state
         .extras
-        .verify_otp(&body.number, &body.otp, &state.store)
+        .verify_otp(&body.number, &body.otp, &state.store, || {
+            installed.store(true, std::sync::atomic::Ordering::SeqCst);
+            state.invalidate_context()
+        })
         .await;
-    crate::epg::trigger_regeneration(&state);
+    // Rotate again once the exchange has finished and the final credentials are
+    // in place. This also covers an OTP that verified but failed its exchange
+    // (it already swapped the account), and discards anything resolved while the
+    // exchange was in flight (the Extras and VOD caches are guarded by a
+    // generation, and URL-minting handlers re-check the epoch).
+    // Always finish the cleanup if the install hook ran, even when the final
+    // credentials equal the previous ones (a re-verify of the same account).
+    if installed.load(std::sync::atomic::Ordering::SeqCst)
+        || state.extras.credentials_marker() != before
+    {
+        state.invalidate_context();
+        crate::epg::trigger_regeneration(&state);
+    }
     match result {
         Ok(ok) => Json(json!({"status": ok})).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
@@ -424,6 +457,7 @@ pub async fn extras_logout(State(state): State<SharedState>) -> Response {
     state.invalidate_context();
     match state.extras.logout(&state.store) {
         Ok(()) => {
+            state.invalidate_context();
             crate::epg::trigger_regeneration(&state);
             Json(json!({"status": true})).into_response()
         }
@@ -481,6 +515,7 @@ pub async fn extras_unlock(
     }
     state.invalidate_context();
     state.extras.set_unlocked(true, &state.http, &state.store);
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
@@ -494,17 +529,19 @@ pub async fn extras_lock(State(state): State<SharedState>) -> Response {
     }
     state.invalidate_context();
     state.extras.set_unlocked(false, &state.http, &state.store);
+    state.invalidate_context();
     crate::epg::trigger_regeneration(&state);
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
 
 /// `GET /api/live/play/:id?q=` — resolves a live channel to what the
-/// in-app player needs, the same shape `/api/ott/play/:id` gives
-/// `VodPlayer.svelte` (`{dash, url, license}`), so `Watch.svelte` can use
+/// in-app player needs, the same shape `/api/ott/play/:id` gives plus an
+/// optional HLS alternative, so `Watch.svelte` can use
 /// the same Shaka/hls.js logic instead of the old Go-template `/mpd/:id`
-/// iframe. Tries DASH first via the same `get_drm_mpd` the IPTV
-/// `/live/mpd/:id` route uses, falling back to HLS exactly like
-/// `LiveHandler` does when there's no DASH stream.
+/// iframe. DASH remains the preferred source, matching the TV+ app. When the
+/// provider also returned HLS, expose that exact source so the UI can retry it
+/// after a DASH player failure. DASH-only channels therefore never fall into a
+/// fabricated `/live/...m3u8` request.
 pub async fn live_play(
     Path(id): Path<String>,
     Query(q): Query<HashMap<String, String>>,
@@ -523,36 +560,77 @@ pub async fn live_play(
         return Json(json!({"dash": false, "url": ch.url, "license": null})).into_response();
     }
 
-    if let Ok(out) = crate::dash::get_drm_mpd(&state, &id, &quality).await {
+    // The response URLs are encrypted under the current context epoch, so the
+    // data they carry must belong to that epoch from lookup until the last URL
+    // is generated. If an account switch lands in between, resolve again.
+    for _ in 0..2 {
+        let (live, epoch) = match crate::dash::get_live_cached(&state, &id).await {
+            Ok(l) => l,
+            Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        };
+        let response = live_play_response_from_live(&state, &live, &id, &quality);
+        if state.secure.current_epoch() == epoch {
+            return response;
+        }
+    }
+    err(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "The active account changed while resolving the stream; retry",
+    )
+}
+
+fn live_play_response_from_live(
+    state: &AppState,
+    live: &crate::television::LiveUrlOutput,
+    id: &str,
+    quality: &str,
+) -> Response {
+    let hls_quality = crate::stream::hls_quality_for_channel(id, quality);
+    let live_url = crate::television::select_best_live_hls_url(live, hls_quality);
+    let hls = if live_url.is_empty() {
+        serde_json::Value::Null
+    } else {
+        let abs = crate::stream::to_absolute_stream_url(
+            &live_url,
+            crate::stream::absolute_base_from_live(live).as_deref(),
+        );
+        let encrypted = state.secure.encrypt(&abs);
+        // Carry a forced quality so a 404 recovery retries it before `auto`.
+        let q = if hls_quality == "auto" {
+            String::new()
+        } else {
+            format!("&q={hls_quality}")
+        };
+        serde_json::Value::String(format!(
+            "/render.m3u8?auth={encrypted}&channel_key_id={id}{q}"
+        ))
+    };
+
+    if let Ok(out) = crate::dash::build_drm_mpd_output(state, live, id, quality) {
         if !out.play_url.is_empty() {
             let license = if out.license_url.is_empty() {
                 serde_json::Value::Null
             } else {
                 serde_json::Value::String(out.license_url)
             };
-            return Json(json!({"dash": true, "url": out.play_url, "license": license}))
-                .into_response();
+            return Json(json!({
+                "dash": true,
+                "url": out.play_url,
+                "license": license,
+                "hls": hls
+            }))
+            .into_response();
         }
     }
 
-    let live = match crate::stream::fetch_live(&state, &id).await {
-        Ok(l) => l,
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    };
-    let live_url = crate::television::select_best_live_hls_url(&live, &quality);
     if live_url.is_empty() {
         return err(
             StatusCode::NOT_FOUND,
             format!("No stream found for channel id: {id}"),
         );
     }
-    let abs = crate::stream::to_absolute_stream_url(
-        &live_url,
-        crate::stream::absolute_base_from_live(&live).as_deref(),
-    );
-    let encrypted = state.secure.encrypt(&abs);
-    let url = format!("/render.m3u8?auth={encrypted}&channel_key_id={id}");
-    Json(json!({"dash": false, "url": url, "license": null})).into_response()
+    let url = hls.as_str().unwrap_or_default();
+    Json(json!({"dash": false, "url": url, "license": null, "hls": null})).into_response()
 }
 
 #[cfg(test)]
@@ -567,6 +645,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
         std::mem::forget(dir);
+        let extras = Arc::new(crate::extras_state::ExtrasState::new(false, None));
+        state_with(store, extras)
+    }
+
+    fn state_with(
+        store: Arc<Store>,
+        extras: Arc<crate::extras_state::ExtrasState>,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             config: Config::default(),
             path_prefix: String::new(),
@@ -580,11 +666,188 @@ mod tests {
             render_caches: Default::default(),
             dash_state: Default::default(),
             epg_state: Default::default(),
-            extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
+            extras,
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+            listen: Default::default(),
         })
+    }
+
+    /// Extras state with a mock auth service. `exchange_ok` decides whether the
+    /// token exchange after a verified OTP succeeds; `verify_status` is the
+    /// status of the OTP verification itself.
+    async fn extras_state_with_mock_auth(
+        verify_status: u16,
+        exchange_status: u16,
+        exchange_delay_ms: u64,
+    ) -> (Arc<AppState>, wiremock::MockServer, wiremock::MockServer) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let auth = MockServer::start().await;
+        let user_service = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/apis/v3.2/stbotplogin/sendotp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 0, "message": "ok", "identifier": "redacted-identifier", "fttxIds": []
+            })))
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/apis/v3.2/stbotplogin/verifyotp"))
+            .respond_with(if verify_status == 200 {
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ssoToken": "redacted-sso",
+                    "sessionAttributes": {"user": {"subscriberId": "redacted-sub", "unique": "redacted-uniq"}}
+                }))
+            } else {
+                ResponseTemplate::new(verify_status)
+            })
+            .mount(&auth)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/loginotp/exchangetoken"))
+            .respond_with(
+                if exchange_status == 200 {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "authToken": "redacted-at", "refreshToken": "redacted-rt", "userId": "redacted-uid"
+                    }))
+                } else {
+                    ResponseTemplate::new(exchange_status)
+                }
+                .set_delay(std::time::Duration::from_millis(exchange_delay_ms)),
+            )
+            .mount(&user_service)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
+        std::mem::forget(dir);
+        let extras = Arc::new(crate::extras_state::ExtrasState::new(true, None));
+        extras.init(&reqwest::Client::new(), &store);
+        extras.set_endpoints_for_test(crate::extras::Endpoints {
+            auth: auth.uri(),
+            user_service: user_service.uri(),
+            ..Default::default()
+        });
+        let s = state_with(store, extras);
+        s.extras.send_otp("9876543210", None).await.unwrap();
+        (s, auth, user_service)
+    }
+
+    async fn verify(s: &Arc<AppState>) -> Response {
+        extras_verify_otp(
+            State(s.clone()),
+            Json(ExtrasVerifyOtpBody {
+                number: "9876543210".into(),
+                otp: "123456".into(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn otp_that_verifies_but_fails_its_exchange_still_rotates_the_context() {
+        // The verification installed the new account's SSO credentials before
+        // the exchange failed, so the previous account's artifacts are stale.
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 500, 0).await;
+        let before = s.secure.current_epoch();
+        let resp = verify(&s).await;
+        let json = response_json(resp).await;
+        assert_eq!(json["status"], false);
+        assert!(s.secure.current_epoch() > before, "context was not rotated");
+        assert!(!s.extras.connected(), "no auth token after a failed exchange");
+    }
+
+    #[tokio::test]
+    async fn context_rotates_when_otp_credentials_are_installed_not_after_the_exchange() {
+        // The token exchange is slow; for its whole duration the client holds
+        // the new account's partial credentials, so the old epoch must already
+        // be gone.
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 200, 600).await;
+        let before = s.secure.current_epoch();
+        let task = tokio::spawn({
+            let s = s.clone();
+            async move { verify(&s).await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        assert!(!task.is_finished(), "the exchange should still be in flight");
+        assert!(
+            s.secure.current_epoch() > before,
+            "context was not rotated while the exchange was in flight"
+        );
+        let resp = task.await.unwrap();
+        assert_eq!(response_json(resp).await["status"], true);
+    }
+
+    #[tokio::test]
+    async fn reverifying_the_same_account_still_finishes_the_cleanup() {
+        // The final credentials equal the ones already installed, so only the
+        // install hook tells the handler the context was rotated and the
+        // post-exchange cleanup is still owed.
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 200, 0).await;
+        s.extras.prime_for_test(
+            crate::extras::Credentials {
+                number: "9876543210".into(),
+                sso_token: "redacted-sso".into(),
+                auth_token: "redacted-at".into(),
+                ..Default::default()
+            },
+            Vec::new(),
+            None,
+        );
+        let before = s.secure.current_epoch();
+        let resp = verify(&s).await;
+        assert_eq!(response_json(resp).await["status"], true);
+        assert_eq!(
+            s.secure.current_epoch(),
+            before + 2,
+            "install and post-exchange rotations were not both performed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_otp_leaves_the_context_alone() {
+        let (s, _auth, _user) = extras_state_with_mock_auth(401, 200, 0).await;
+        let before = s.secure.current_epoch();
+        let resp = verify(&s).await;
+        assert_eq!(response_json(resp).await["status"], false);
+        assert_eq!(s.secure.current_epoch(), before);
+    }
+
+    #[tokio::test]
+    async fn successful_otp_rotates_the_context() {
+        let (s, _auth, _user) = extras_state_with_mock_auth(200, 200, 0).await;
+        let before = s.secure.current_epoch();
+        let resp = verify(&s).await;
+        assert_eq!(response_json(resp).await["status"], true);
+        assert!(s.secure.current_epoch() > before);
+        assert!(s.extras.connected());
+    }
+
+    #[tokio::test]
+    async fn failed_extras_otp_does_not_rotate_the_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
+        let extras = Arc::new(crate::extras_state::ExtrasState::new(true, None));
+        extras.init(&reqwest::Client::new(), &store);
+        let s = state_with(store, extras);
+        assert!(s.extras.enabled());
+        let before = s.secure.current_epoch();
+
+        // No OTP was sent first, so verification fails without changing the
+        // active account; existing viewers' URLs must keep working.
+        let resp = extras_verify_otp(
+            State(s.clone()),
+            Json(ExtrasVerifyOtpBody {
+                number: "9876543210".into(),
+                otp: "123456".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(s.secure.current_epoch(), before);
     }
 
     #[tokio::test]
@@ -592,6 +855,7 @@ mod tests {
         let s = state();
         let resp = auth_setup(
             State(s.clone()),
+            None,
             None,
             Json(PasswordBody {
                 password: "longenough".into(),
@@ -608,6 +872,7 @@ mod tests {
         let resp = auth_setup(
             State(s.clone()),
             prefix,
+            None,
             Json(PasswordBody {
                 password: "longenough".into(),
             }),
@@ -615,6 +880,30 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(s.access.has_password());
+        let cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(
+            !cookie.contains("Secure"),
+            "plain-HTTP setup keeps a non-Secure cookie"
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_over_tls_issues_a_secure_session_cookie() {
+        let s = state();
+        let prefix = Some(axum::Extension(KeyPrefix("/k/abc/".to_string())));
+        let https = Some(axum::Extension(crate::tls::Https));
+        let resp = auth_setup(
+            State(s.clone()),
+            prefix,
+            https,
+            Json(PasswordBody {
+                password: "longenough".into(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let cookie = resp.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.ends_with("; Secure"), "{cookie}");
     }
 
     #[tokio::test]
@@ -626,5 +915,192 @@ mod tests {
         assert_eq!(json["catalogue"]["extrasEntitlementStatus"], "unknown");
         assert_eq!(json["catalogue"]["extrasEntitlementsAvailable"], false);
         assert_eq!(json["catalogue"]["extrasEntitlementsApplied"], false);
+    }
+
+    #[tokio::test]
+    async fn status_reports_the_listen_ports_once_serve_has_chosen_them() {
+        let s = state();
+        let json = response_json(status(State(s.clone())).await).await;
+        assert!(json["httpPort"].is_null());
+        assert!(json["tlsPort"].is_null());
+
+        s.listen
+            .set(crate::state::ListenPorts {
+                http: 5001,
+                tls: Some(5443),
+            })
+            .unwrap();
+        let json = response_json(status(State(s)).await).await;
+        assert_eq!(json["httpPort"], 5001);
+        assert_eq!(json["tlsPort"], 5443);
+    }
+
+    #[tokio::test]
+    async fn channels_marks_premium_business_type_as_subscription_required() {
+        let s = state();
+        s.tv.set_channels_for_test(vec![
+            crate::television::Channel {
+                id: "154".into(),
+                name: "Premium".into(),
+                business_type: "premium".into(),
+                ..Default::default()
+            },
+            crate::television::Channel {
+                id: "1148".into(),
+                name: "Free".into(),
+                business_type: "free".into(),
+                ..Default::default()
+            },
+        ]);
+
+        let response = channels(State(s)).await;
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let channels = json["channels"].as_array().unwrap();
+
+        let premium = channels.iter().find(|row| row["id"] == "154").unwrap();
+        let free = channels.iter().find(|row| row["id"] == "1148").unwrap();
+        assert_eq!(premium["requiresSubscription"], true);
+        assert_eq!(free["requiresSubscription"], false);
+    }
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_play_response_keeps_mpd_only_source_on_dash() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            mpd: crate::television::Mpd {
+                auto: "https://media.example/live/manifest.mpd".into(),
+                key: "https://license.example/widevine".into(),
+                ..Default::default()
+            },
+            is_drm: true,
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_mpd", "auto")).await;
+        assert_eq!(json["dash"], true);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.mpd?"));
+        assert!(json["license"].as_str().unwrap().starts_with("/drm?"));
+        assert!(json["hls"].is_null());
+    }
+
+    #[tokio::test]
+    async fn live_play_response_exposes_provider_hls_as_dash_alternative() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/master.m3u8".into(),
+                ..Default::default()
+            },
+            mpd: crate::television::Mpd {
+                auto: "https://media.example/live/manifest.mpd".into(),
+                key: "https://license.example/widevine".into(),
+                ..Default::default()
+            },
+            is_drm: true,
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_both", "auto")).await;
+        assert_eq!(json["dash"], true);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.mpd?"));
+        assert!(json["hls"].as_str().unwrap().starts_with("/render.m3u8?"));
+    }
+
+    #[tokio::test]
+    async fn live_play_response_marks_primary_hls_without_alternative() {
+        let s = state();
+        let live = crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/master.m3u8".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let json = response_json(live_play_response_from_live(&s, &live, "ex_hls", "auto")).await;
+        assert_eq!(json["dash"], false);
+        assert!(json["url"].as_str().unwrap().starts_with("/render.m3u8?"));
+        assert!(json["license"].is_null());
+        assert!(json["hls"].is_null());
+    }
+
+    fn two_quality_hls() -> crate::television::LiveUrlOutput {
+        crate::television::LiveUrlOutput {
+            bitrates: crate::television::Bitrates {
+                auto: "https://media.example/live/auto.m3u8".into(),
+                high: "https://media.example/live/high.m3u8".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn decrypted_hls(s: &AppState, url: &str) -> (String, String) {
+        let query = url.split_once('?').unwrap().1;
+        let param = |name: &str| {
+            query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+                .unwrap_or_default()
+                .to_string()
+        };
+        (s.secure.decrypt(&param("auth")).unwrap(), param("q"))
+    }
+
+    #[tokio::test]
+    async fn live_play_response_carries_forced_quality_into_the_hls_url() {
+        let s = state();
+        let json = response_json(live_play_response_from_live(
+            &s,
+            &two_quality_hls(),
+            "ex_hls",
+            "high",
+        ))
+        .await;
+        let (source, q) = decrypted_hls(&s, json["url"].as_str().unwrap());
+        assert!(source.ends_with("/high.m3u8"));
+        assert_eq!(q, "high");
+    }
+
+    #[tokio::test]
+    async fn live_play_response_keeps_audio_only_channels_on_auto() {
+        let s = state();
+        for id in ["1349", "1322"] {
+            let json = response_json(live_play_response_from_live(
+                &s,
+                &two_quality_hls(),
+                id,
+                "high",
+            ))
+            .await;
+            let (source, q) = decrypted_hls(&s, json["url"].as_str().unwrap());
+            assert!(source.ends_with("/auto.m3u8"), "channel {id}");
+            assert_eq!(q, "", "channel {id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn account_transitions_rotate_again_after_the_new_state_is_installed() {
+        let s = state();
+        let before = s.secure.current_epoch();
+        jiotv_logout(State(s.clone())).await;
+        assert_eq!(s.secure.current_epoch(), before + 2, "logout");
+
+        let before = s.secure.current_epoch();
+        extras_lock(State(s.clone())).await;
+        assert_eq!(s.secure.current_epoch(), before + 2, "extras lock");
+    }
+
+    #[test]
+    fn session_cookie_is_secure_only_for_tls_logins() {
+        assert!(session_cookie_header("abc", true).ends_with("; Secure"));
+        assert!(!session_cookie_header("abc", false).contains("Secure"));
+        assert!(session_cookie_header("abc", true).contains("HttpOnly; SameSite=Strict"));
     }
 }

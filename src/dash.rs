@@ -37,25 +37,67 @@ pub struct DrmMpdOutput {
 
 #[derive(Default)]
 pub struct DashState {
-    drm_mpd_cache: RwLock<std::collections::HashMap<String, (DrmMpdOutput, Instant)>>,
+    drm_mpd_cache: RwLock<std::collections::HashMap<String, (DrmMpdOutput, Instant, u64)>>,
+    live_cache: RwLock<std::collections::HashMap<String, (LiveUrlOutput, Instant, u64)>>,
+    /// Coalesces concurrent live-cache misses for the same channel.
+    live_locks: crate::keyed_locks::KeyedLocks,
     cdn_clock: Mutex<Option<(SystemTime, Instant)>>,
 }
 
 impl DashState {
-    fn get_cached(&self, key: &str) -> Option<DrmMpdOutput> {
+    /// Served only in the context epoch it was built in, so a hit racing an
+    /// account switch is a miss rather than the previous account's URLs.
+    fn get_cached(&self, key: &str, epoch: u64) -> Option<DrmMpdOutput> {
         let map = self.drm_mpd_cache.read().unwrap();
-        let (out, at) = map.get(key)?;
-        if at.elapsed() > DRM_MPD_CACHE_TTL {
-            return None;
-        }
-        Some(out.clone())
+        let (out, at, entry_epoch) = map.get(key)?;
+        (*entry_epoch == epoch && at.elapsed() <= DRM_MPD_CACHE_TTL).then(|| out.clone())
     }
 
-    fn set_cached(&self, key: &str, out: DrmMpdOutput) {
-        self.drm_mpd_cache
-            .write()
-            .unwrap()
-            .insert(key.to_string(), (out, Instant::now()));
+    /// Stores `out`, built under `epoch`, only if `current_epoch()` still
+    /// equals it, compared under the write lock that `clear` also takes after
+    /// the epoch rotates. Returns whether it was stored.
+    fn set_cached(
+        &self,
+        key: &str,
+        out: DrmMpdOutput,
+        epoch: u64,
+        current_epoch: impl FnOnce() -> u64,
+    ) -> bool {
+        let mut map = self.drm_mpd_cache.write().unwrap();
+        if current_epoch() != epoch {
+            return false;
+        }
+        map.insert(key.to_string(), (out, Instant::now(), epoch));
+        true
+    }
+
+    /// A cached entry is only served in the context epoch it was fetched in,
+    /// so a hit racing an account switch (epoch rotated, cache not yet
+    /// cleared) is a miss rather than the previous account's data.
+    fn get_live(&self, channel_id: &str, epoch: u64) -> Option<LiveUrlOutput> {
+        let map = self.live_cache.read().unwrap();
+        let (out, at, entry_epoch) = map.get(channel_id)?;
+        (*entry_epoch == epoch && at.elapsed() <= DRM_MPD_CACHE_TTL).then(|| out.clone())
+    }
+
+    /// Stores `out`, fetched under `epoch`, only if `current_epoch()` still
+    /// equals it. The comparison runs under the cache's write lock, which
+    /// `clear` also takes after the epoch rotates, so a fetch started before an
+    /// account switch cannot repopulate the cleared cache. Returns whether the
+    /// entry was stored.
+    fn set_live(
+        &self,
+        channel_id: &str,
+        out: LiveUrlOutput,
+        epoch: u64,
+        current_epoch: impl FnOnce() -> u64,
+    ) -> bool {
+        let mut map = self.live_cache.write().unwrap();
+        if current_epoch() != epoch {
+            return false;
+        }
+        map.insert(channel_id.to_string(), (out, Instant::now(), epoch));
+        true
     }
 
     fn record_publish_time(&self, t: SystemTime) {
@@ -71,6 +113,7 @@ impl DashState {
 
     pub fn clear(&self) {
         self.drm_mpd_cache.write().unwrap().clear();
+        self.live_cache.write().unwrap().clear();
         *self.cdn_clock.lock().unwrap() = None;
     }
 }
@@ -105,22 +148,67 @@ fn cdn_host_and_dir(url_str: &str) -> Option<(String, String)> {
     Some((host, dir))
 }
 
+/// The full playback response for the in-app player, cached for the same
+/// short window as the DASH output so reloads and concurrent viewers do not
+/// each hit the playback API. Returns the context epoch the response belongs
+/// to; callers that encrypt URLs from it must confirm the epoch is unchanged
+/// afterwards, or the previous account's data would be re-encrypted under the
+/// new epoch.
+pub(crate) async fn get_live_cached(
+    state: &AppState,
+    channel_id: &str,
+) -> anyhow::Result<(LiveUrlOutput, u64)> {
+    let epoch = state.secure.current_epoch();
+    if let Some(cached) = state.dash_state.get_live(channel_id, epoch) {
+        return Ok((cached, epoch));
+    }
+    let _guard = state.dash_state.live_locks.lock(channel_id).await;
+    // Retry once if an account/product switch lands mid-fetch.
+    for _ in 0..2 {
+        let epoch = state.secure.current_epoch();
+        // Another request may have filled the cache while this one waited.
+        if let Some(cached) = state.dash_state.get_live(channel_id, epoch) {
+            return Ok((cached, epoch));
+        }
+        let live = crate::stream::fetch_live(state, channel_id).await?;
+        if state
+            .dash_state
+            .set_live(channel_id, live.clone(), epoch, || {
+                state.secure.current_epoch()
+            })
+        {
+            return Ok((live, epoch));
+        }
+    }
+    anyhow::bail!("the active account changed while resolving channel {channel_id}; retry")
+}
+
 pub(crate) async fn get_drm_mpd(
     state: &AppState,
     channel_id: &str,
     quality: &str,
 ) -> anyhow::Result<DrmMpdOutput> {
+    let epoch = state.secure.current_epoch();
     let cache_key = format!("{channel_id}_{quality}");
-    if let Some(cached) = state.dash_state.get_cached(&cache_key) {
+    if let Some(cached) = state.dash_state.get_cached(&cache_key, epoch) {
         return Ok(cached);
     }
     let live = crate::stream::fetch_live(state, channel_id).await?;
     let out = build_drm_mpd_output(state, &live, channel_id, quality)?;
-    state.dash_state.set_cached(&cache_key, out.clone());
+    // If an account switch landed mid-fetch, `out` carries the old account's
+    // data under new-epoch URLs: neither cache it nor return it.
+    if !state
+        .dash_state
+        .set_cached(&cache_key, out.clone(), epoch, || {
+            state.secure.current_epoch()
+        })
+    {
+        anyhow::bail!("the active account changed while resolving channel {channel_id}; retry");
+    }
     Ok(out)
 }
 
-fn build_drm_mpd_output(
+pub(crate) fn build_drm_mpd_output(
     state: &AppState,
     live: &LiveUrlOutput,
     channel_id: &str,
@@ -200,6 +288,17 @@ pub async fn live_mpd_handler(
     axum::extract::Path(channel_id): axum::extract::Path<String>,
     Query(q): Query<QualityQuery>,
     State(state): State<Arc<AppState>>,
+    prefix: Option<axum::Extension<crate::api::KeyPrefix>>,
+) -> Response {
+    let epoch = state.secure.current_epoch();
+    let response = live_mpd_inner(channel_id, q, state.clone(), prefix).await;
+    state.stable_since(epoch, response)
+}
+
+async fn live_mpd_inner(
+    channel_id: String,
+    q: QualityQuery,
+    state: Arc<AppState>,
     prefix: Option<axum::Extension<crate::api::KeyPrefix>>,
 ) -> Response {
     let quality = q.q.unwrap_or_else(|| "auto".to_string());
@@ -301,16 +400,11 @@ async fn drm_license_impl(
     else {
         return (StatusCode::BAD_REQUEST, "channel_id is required").into_response();
     };
-    if !state.channel_allowed(&channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
-    }
     let decoded_url = match state.secure.decrypt(auth) {
         Ok(u) => u,
-        Err(_) => return (StatusCode::FORBIDDEN, "invalid auth parameter").into_response(),
+        // A 400, like `/render.mpd`: 403 on a media request must mean the
+        // provider refused, which the player UI reports as a denial.
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
     };
 
     // A extras channel's license is authorised by the token already in the
@@ -435,16 +529,15 @@ pub async fn render_mpd_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<RenderMpdQuery>,
 ) -> Response {
+    let epoch = state.secure.current_epoch();
+    let response = render_mpd_inner(state.clone(), q).await;
+    state.stable_since(epoch, response)
+}
+
+async fn render_mpd_inner(state: Arc<AppState>, q: RenderMpdQuery) -> Response {
     let Some(channel_id) = q.channel_id.as_deref().filter(|id| !id.is_empty()) else {
         return (StatusCode::BAD_REQUEST, "channel_id is required").into_response();
     };
-    if !state.channel_allowed(channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
-    }
     let mut decrypted = match state.secure.decrypt(&q.auth) {
         Ok(u) => u,
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid auth parameter").into_response(),
@@ -722,18 +815,11 @@ pub async fn render_dash_handler(
     State(state): State<Arc<AppState>>,
     uri: axum::http::Uri,
 ) -> Response {
-    let (channel_id, enc_host, enc_path, enc_hdnea, segment_path) =
+    let (_channel_id, enc_host, enc_path, enc_hdnea, segment_path) =
         match split_dash_path(uri.path()) {
             Some(v) => v,
             None => return (StatusCode::BAD_REQUEST, "malformed dash path").into_response(),
         };
-    if !state.channel_allowed(&channel_id).await {
-        return (
-            StatusCode::NOT_FOUND,
-            "channel is not available for the active account",
-        )
-            .into_response();
-    }
 
     let hdnea_token = enc_hdnea.and_then(|enc| {
         state
@@ -837,6 +923,91 @@ mod httpdate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn drm_output() -> DrmMpdOutput {
+        DrmMpdOutput {
+            play_url: "/render.mpd?x".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn drm_mpd_cache_is_bound_to_its_context_epoch() {
+        let state = DashState::default();
+        assert!(state.set_cached("154_auto", drm_output(), 1, || 1));
+        assert!(state.get_cached("154_auto", 1).is_some());
+        // Epoch rotated but `clear` has not run yet: a hit would be the
+        // previous account's URLs.
+        assert!(state.get_cached("154_auto", 2).is_none());
+    }
+
+    #[test]
+    fn drm_mpd_cache_discards_builds_that_outlived_their_context() {
+        let state = DashState::default();
+        assert!(!state.set_cached("154_auto", drm_output(), 1, || 2));
+        assert!(state.get_cached("154_auto", 1).is_none());
+        assert!(state.get_cached("154_auto", 2).is_none());
+    }
+
+    #[test]
+    fn live_cache_serves_recent_entries_and_clears_with_the_context() {
+        let state = DashState::default();
+        assert!(state.get_live("154", 1).is_none());
+        assert!(state.set_live(
+            "154",
+            LiveUrlOutput {
+                hdnea: "token".into(),
+                ..Default::default()
+            },
+            1,
+            || 1,
+        ));
+        assert_eq!(state.get_live("154", 1).unwrap().hdnea, "token");
+        assert!(state.get_live("155", 1).is_none());
+        state.clear();
+        assert!(state.get_live("154", 1).is_none());
+    }
+
+    #[test]
+    fn live_cache_discards_fetches_that_outlived_their_context() {
+        let state = DashState::default();
+        assert!(!state.set_live("154", LiveUrlOutput::default(), 1, || 2));
+        assert!(state.get_live("154", 1).is_none());
+        assert!(state.get_live("154", 2).is_none());
+    }
+
+    #[test]
+    fn live_cache_hit_in_a_newer_epoch_is_a_miss() {
+        let state = DashState::default();
+        assert!(state.set_live("154", LiveUrlOutput::default(), 1, || 1));
+        // The epoch rotated but `clear` has not run yet.
+        assert!(state.get_live("154", 2).is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_live_cache_misses_share_one_fetch() {
+        let state = Arc::new(DashState::default());
+        let fetches = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let viewer = |state: Arc<DashState>, fetches: Arc<std::sync::atomic::AtomicU32>| async move {
+            if state.get_live("154", 1).is_some() {
+                return;
+            }
+            let _guard = state.live_locks.lock("154").await;
+            if state.get_live("154", 1).is_some() {
+                return;
+            }
+            fetches.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            state.set_live("154", LiveUrlOutput::default(), 1, || 1);
+        };
+        let tasks: Vec<_> = (0..5)
+            .map(|_| tokio::spawn(viewer(state.clone(), fetches.clone())))
+            .collect();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        assert_eq!(fetches.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn parses_rfc3339_publish_time() {

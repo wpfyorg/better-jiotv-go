@@ -433,7 +433,7 @@ fn append_hdnea(u: &str, hdnea: &str) -> String {
         return u.to_string();
     }
     let sep = if u.contains('?') { '&' } else { '?' };
-    format!("{u}{sep}hdnea={hdnea}")
+    format!("{u}{sep}hdnea={}", urlencoding::encode(hdnea))
 }
 
 pub struct Television {
@@ -783,8 +783,9 @@ pub fn civil_from_unix(secs: u64) -> (i64, i64, i64, i64, i64, i64) {
     (y, m, d, hh, mm, ss)
 }
 
-fn finish_live_result(result: &mut LiveUrlOutput) {
-    let hdnea = [
+fn live_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for url in [
         &result.bitrates.auto,
         &result.bitrates.high,
         &result.bitrates.medium,
@@ -803,32 +804,149 @@ fn finish_live_result(result: &mut LiveUrlOutput) {
         &result.mpd.medium,
         &result.mpd.low,
         &result.mpd.result,
-    ]
-    .into_iter()
-    .find_map(|url| extract_hdnea_from_url(url))
-    .unwrap_or_default();
-    result.hdnea = hdnea.clone();
-    if !hdnea.is_empty() {
-        result.bitrates.auto = append_hdnea(&result.bitrates.auto, &hdnea);
-        result.bitrates.high = append_hdnea(&result.bitrates.high, &hdnea);
-        result.bitrates.medium = append_hdnea(&result.bitrates.medium, &hdnea);
-        result.bitrates.low = append_hdnea(&result.bitrates.low, &hdnea);
-        result.result = append_hdnea(&result.result, &hdnea);
-        result.m3u8.auto = append_hdnea(&result.m3u8.auto, &hdnea);
-        result.m3u8.high = append_hdnea(&result.m3u8.high, &hdnea);
-        result.m3u8.medium = append_hdnea(&result.m3u8.medium, &hdnea);
-        result.m3u8.low = append_hdnea(&result.m3u8.low, &hdnea);
-        result.mpd.bitrates.auto = append_hdnea(&result.mpd.bitrates.auto, &hdnea);
-        result.mpd.bitrates.high = append_hdnea(&result.mpd.bitrates.high, &hdnea);
-        result.mpd.bitrates.medium = append_hdnea(&result.mpd.bitrates.medium, &hdnea);
-        result.mpd.bitrates.low = append_hdnea(&result.mpd.bitrates.low, &hdnea);
-        result.mpd.auto = append_hdnea(&result.mpd.auto, &hdnea);
-        result.mpd.high = append_hdnea(&result.mpd.high, &hdnea);
-        result.mpd.medium = append_hdnea(&result.mpd.medium, &hdnea);
-        result.mpd.low = append_hdnea(&result.mpd.low, &hdnea);
-        result.mpd.result = append_hdnea(&result.mpd.result, &hdnea);
-        result.mpd.key = append_hdnea(&result.mpd.key, &hdnea);
+    ] {
+        if let Some(token) = extract_hdnea_from_url(url) {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
     }
+    tokens
+}
+
+fn live_hls_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut urls = vec![
+        &result.bitrates.auto,
+        &result.bitrates.high,
+        &result.bitrates.medium,
+        &result.bitrates.low,
+        &result.m3u8.auto,
+        &result.m3u8.high,
+        &result.m3u8.medium,
+        &result.m3u8.low,
+    ];
+    if result.result.to_lowercase().contains(".m3u8") {
+        urls.push(&result.result);
+    }
+    if result.mpd.result.to_lowercase().contains(".m3u8") {
+        urls.push(&result.mpd.result);
+    }
+    for url in urls {
+        if let Some(token) = extract_hdnea_from_url(url) {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
+fn live_dash_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut urls = vec![
+        &result.mpd.bitrates.auto,
+        &result.mpd.bitrates.high,
+        &result.mpd.bitrates.medium,
+        &result.mpd.bitrates.low,
+        &result.mpd.auto,
+        &result.mpd.high,
+        &result.mpd.medium,
+        &result.mpd.low,
+    ];
+    if result.result.to_lowercase().contains(".mpd") {
+        urls.push(&result.result);
+    }
+    if !result.mpd.result.to_lowercase().contains(".m3u8") {
+        urls.push(&result.mpd.result);
+    }
+    for url in urls {
+        if let Some(token) = extract_hdnea_from_url(url) {
+            if !tokens.contains(&token) {
+                tokens.push(token);
+            }
+        }
+    }
+    tokens
+}
+
+fn finish_live_result(result: &mut LiveUrlOutput) {
+    let tokens = live_hdnea_tokens(result);
+    let hls_tokens = live_hls_hdnea_tokens(result);
+    let dash_tokens = live_dash_hdnea_tokens(result);
+    let hdnea = if tokens.len() == 1 {
+        tokens[0].clone()
+    } else {
+        String::new()
+    };
+    result.hdnea = hdnea;
+
+    if hls_tokens.len() == 1 {
+        let token = &hls_tokens[0];
+        result.bitrates.auto = append_hdnea(&result.bitrates.auto, token);
+        result.bitrates.high = append_hdnea(&result.bitrates.high, token);
+        result.bitrates.medium = append_hdnea(&result.bitrates.medium, token);
+        result.bitrates.low = append_hdnea(&result.bitrates.low, token);
+        result.m3u8.auto = append_hdnea(&result.m3u8.auto, token);
+        result.m3u8.high = append_hdnea(&result.m3u8.high, token);
+        result.m3u8.medium = append_hdnea(&result.m3u8.medium, token);
+        result.m3u8.low = append_hdnea(&result.m3u8.low, token);
+        if result.result.to_lowercase().contains(".m3u8") {
+            result.result = append_hdnea(&result.result, token);
+        }
+        if result.mpd.result.to_lowercase().contains(".m3u8") {
+            result.mpd.result = append_hdnea(&result.mpd.result, token);
+        }
+    }
+
+    if dash_tokens.len() == 1 {
+        let token = &dash_tokens[0];
+        result.mpd.bitrates.auto = append_hdnea(&result.mpd.bitrates.auto, token);
+        result.mpd.bitrates.high = append_hdnea(&result.mpd.bitrates.high, token);
+        result.mpd.bitrates.medium = append_hdnea(&result.mpd.bitrates.medium, token);
+        result.mpd.bitrates.low = append_hdnea(&result.mpd.bitrates.low, token);
+        result.mpd.auto = append_hdnea(&result.mpd.auto, token);
+        result.mpd.high = append_hdnea(&result.mpd.high, token);
+        result.mpd.medium = append_hdnea(&result.mpd.medium, token);
+        result.mpd.low = append_hdnea(&result.mpd.low, token);
+        if !result.mpd.result.to_lowercase().contains(".m3u8") {
+            result.mpd.result = append_hdnea(&result.mpd.result, token);
+        }
+        if result.result.to_lowercase().contains(".mpd") {
+            result.result = append_hdnea(&result.result, token);
+        }
+    }
+}
+
+/// Chooses the HDNEA token for an HLS stream. During recovery, prefer a token
+/// attached to the selected stream unless it is the token that just failed;
+/// then use another token returned by the refreshed playback response.
+pub(crate) fn select_hls_hdnea_token(
+    live: &LiveUrlOutput,
+    quality: &str,
+    rejected_token: &str,
+) -> String {
+    let selected = select_best_live_hls_url(live, quality);
+    let selected_token = extract_hdnea_from_url(&selected);
+    if let Some(token) = selected_token.as_ref() {
+        if token != rejected_token {
+            return token.clone();
+        }
+    }
+    let hls_tokens = live_hls_hdnea_tokens(live);
+    if selected_token.is_none() {
+        return if hls_tokens.len() == 1 && hls_tokens[0] != rejected_token {
+            hls_tokens[0].clone()
+        } else {
+            String::new()
+        };
+    }
+    if let Some(token) = hls_tokens.into_iter().find(|token| token != rejected_token) {
+        return token;
+    }
+    selected_token
+        .filter(|token| !token.is_empty())
+        .unwrap_or_default()
 }
 
 /// Picks the best available HLS URL for a quality, mirroring
@@ -1090,20 +1208,73 @@ mod tests {
             finish_live_result(&mut live);
 
             assert_eq!(live.hdnea, "rotated-token", "source: {source}");
-            for url in [
-                &live.bitrates.auto,
-                &live.m3u8.auto,
-                &live.mpd.bitrates.auto,
-                &live.mpd.auto,
-                &live.mpd.result,
-                &live.mpd.key,
-            ] {
-                assert!(
+            let hls_source = matches!(source, "high" | "medium" | "low" | "result" | "m3u8_high");
+            for url in [&live.bitrates.auto, &live.m3u8.auto, &live.result] {
+                assert_eq!(
                     url.contains("hdnea=rotated-token"),
-                    "source {source} did not propagate to {url}"
+                    hls_source,
+                    "source {source} propagated to wrong HLS family URL {url}"
                 );
             }
+            for url in [&live.mpd.bitrates.auto, &live.mpd.auto, &live.mpd.result] {
+                assert_eq!(
+                    url.contains("hdnea=rotated-token"),
+                    !hls_source,
+                    "source {source} propagated to wrong DASH family URL {url}"
+                );
+            }
+            assert_eq!(
+                live.mpd.key, "https://dash.example/license",
+                "source: {source}"
+            );
         }
+    }
+
+    #[test]
+    fn dash_media_token_does_not_mutate_license_url() {
+        for key in [
+            "https://license.example/license?contentId=123",
+            "https://license.example/license?contentId=123&hdnea=license-only-token",
+        ] {
+            let mut live = LiveUrlOutput {
+                mpd: Mpd {
+                    high: "https://cdn.example/high.mpd?hdnea=dash-media-token".into(),
+                    auto: "https://cdn.example/auto.mpd".into(),
+                    key: key.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+
+            finish_live_result(&mut live);
+
+            assert_eq!(live.mpd.key, key);
+            assert_eq!(
+                live.mpd.auto,
+                "https://cdn.example/auto.mpd?hdnea=dash-media-token"
+            );
+        }
+    }
+
+    #[test]
+    fn dash_only_token_is_not_copied_to_hls_urls() {
+        let mut live = LiveUrlOutput {
+            bitrates: Bitrates {
+                auto: "https://cdn.example/auto.m3u8".into(),
+                ..Default::default()
+            },
+            mpd: Mpd {
+                high: "https://cdn.example/high.mpd?hdnea=dash-only-token".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        finish_live_result(&mut live);
+
+        assert_eq!(live.hdnea, "dash-only-token");
+        assert_eq!(live.bitrates.auto, "https://cdn.example/auto.m3u8");
+        assert!(select_hls_hdnea_token(&live, "auto", "").is_empty());
     }
 
     #[test]
@@ -1113,6 +1284,79 @@ mod tests {
             extract_hdnea_from_url(url).as_deref(),
             Some("st=100~exp=200~acl=/*~hmac=test")
         );
+    }
+
+    #[test]
+    fn append_hdnea_percent_encodes_reserved_query_delimiters() {
+        let token = "st=100~exp=200~acl=/*&scope=live#fragment";
+        let url = append_hdnea("https://cdn.example/live.m3u8?foo=bar", token);
+
+        assert!(!url.contains("&scope=live"));
+        assert!(!url.contains("#fragment"));
+        assert_eq!(extract_hdnea_from_url(&url).as_deref(), Some(token));
+    }
+
+    #[test]
+    fn conflicting_hdnea_tokens_prefer_rotated_token_after_rejection() {
+        let mut live = LiveUrlOutput {
+            bitrates: Bitrates {
+                auto: "https://cdn.example/auto.m3u8?hdnea=stale-token".into(),
+                high: "https://cdn.example/high.m3u8?hdnea=rotated-token".into(),
+                medium: "https://cdn.example/medium.m3u8".into(),
+                low: String::new(),
+            },
+            ..Default::default()
+        };
+
+        finish_live_result(&mut live);
+
+        assert!(live.hdnea.is_empty());
+        assert_eq!(
+            select_hls_hdnea_token(&live, "auto", "stale-token"),
+            "rotated-token"
+        );
+        assert_eq!(live.bitrates.medium, "https://cdn.example/medium.m3u8");
+    }
+
+    #[test]
+    fn hls_recovery_does_not_fall_back_to_dash_token() {
+        let mut live = LiveUrlOutput {
+            bitrates: Bitrates {
+                auto: "https://cdn.example/auto.m3u8?hdnea=stale-hls-token".into(),
+                ..Default::default()
+            },
+            mpd: Mpd {
+                high: "https://cdn.example/high.mpd?hdnea=dash-only-token".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        finish_live_result(&mut live);
+
+        assert!(live.hdnea.is_empty());
+        assert_eq!(
+            select_hls_hdnea_token(&live, "auto", "stale-hls-token"),
+            "stale-hls-token"
+        );
+    }
+
+    #[test]
+    fn tokenless_selected_rendition_stays_tokenless_when_siblings_conflict() {
+        let mut live = LiveUrlOutput {
+            bitrates: Bitrates {
+                auto: "https://cdn.example/auto.m3u8".into(),
+                high: "https://cdn.example/high.m3u8?hdnea=high-token".into(),
+                medium: String::new(),
+                low: "https://cdn.example/low.m3u8?hdnea=low-token".into(),
+            },
+            ..Default::default()
+        };
+
+        finish_live_result(&mut live);
+
+        assert_eq!(live.bitrates.auto, "https://cdn.example/auto.m3u8");
+        assert!(select_hls_hdnea_token(&live, "auto", "").is_empty());
     }
 
     #[tokio::test]

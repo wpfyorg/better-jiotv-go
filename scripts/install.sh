@@ -4,6 +4,15 @@ set -eu
 repo=${JIOTV_REPO:-wpfyorg/better-jiotv-go}
 variant=${JIOTV_VARIANT:-full}
 version=${JIOTV_VERSION:-latest}
+install_tls=${JIOTV_INSTALL_TLS:-1}
+start_service=${JIOTV_START_SERVICE:-1}
+ready_timeout=${JIOTV_READY_TIMEOUT:-15}
+case "$ready_timeout" in ''|*[!0-9]*) echo "JIOTV_READY_TIMEOUT must be a number of seconds" >&2; exit 2 ;; esac
+# Readiness needs two consecutive good checks, so fewer than two seconds can never succeed.
+[ "$ready_timeout" -ge 2 ] || ready_timeout=2
+
+case "$install_tls" in 0|1) ;; *) echo "JIOTV_INSTALL_TLS must be 0 or 1" >&2; exit 2 ;; esac
+case "$start_service" in 0|1) ;; *) echo "JIOTV_START_SERVICE must be 0 or 1" >&2; exit 2 ;; esac
 
 case "$variant" in full|slim) ;; *) echo "JIOTV_VARIANT must be full or slim" >&2; exit 2 ;; esac
 case "$repo" in */*) ;; *) echo "JIOTV_REPO must be owner/repository" >&2; exit 2 ;; esac
@@ -17,6 +26,9 @@ case "$sys" in Android) termux=true ;; esac
 tmp=${TMPDIR:-/tmp}/jiotv-install-$$
 mkdir -m 700 "$tmp"
 trap 'rm -rf "$tmp"' 0 HUP INT TERM
+
+say() { printf '==> %s\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
 
 download() {
   if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
@@ -36,6 +48,67 @@ verify_asset() {
   else echo "sha256sum or shasum is required to verify the download" >&2; exit 1
   fi
   [ "$(printf '%s' "$expected" | tr 'A-F' 'a-f')" = "$(printf '%s' "$actual" | tr 'A-F' 'a-f')" ] || { echo "checksum mismatch for $asset_name" >&2; exit 1; }
+}
+
+size_kib() { echo $(( $(wc -c <"$1") / 1024 )); }
+
+# True when JioTV listens on the TCP port. When the socket listing names the
+# owner it must be jiotv, so another daemon holding the port does not count;
+# without owner information, or without a listing tool, the port alone decides.
+port_listening() {
+  if command -v netstat >/dev/null 2>&1; then listing=$(netstat -ltnp 2>/dev/null || true)
+  elif command -v ss >/dev/null 2>&1; then listing=$(ss -ltnp 2>/dev/null || true)
+  else return 0
+  fi
+  [ -n "$listing" ] || return 0
+  owners=$(printf '%s\n' "$listing" | grep -E "[:.]$1[[:space:]]" || true)
+  [ -n "$owners" ] || return 1
+  if printf '%s\n' "$owners" | grep -Eq '[0-9]+/[^ ]+|pid='; then
+    printf '%s\n' "$owners" | grep -q jiotv
+  fi
+}
+
+# Process IDs of running jiotv servers (empty when pidof is unavailable).
+jiotv_pids() { pidof jiotv 2>/dev/null || true; }
+
+# Stop the service and wait until the process has really exited: procd only
+# signals it on stop, so a lingering old process could otherwise be mistaken for
+# a new one or overwrite state. Fails when it does not exit in time.
+stop_service() {
+  "$init_script" stop || return 1
+  waited=0
+  while [ "$waited" -lt "$ready_timeout" ]; do
+    if [ -z "$(jiotv_pids)" ] && ! "$init_script" running >/dev/null 2>&1; then return 0; fi
+    waited=$((waited + 1))
+    sleep 1
+  done
+  return 1
+}
+
+# Print one uci option of the jiotv service, or the default when unavailable.
+uci_opt() {
+  value=$(uci -q get "jiotv.main.$1" 2>/dev/null || true)
+  if [ -n "$value" ]; then echo "$value"; else echo "$2"; fi
+}
+
+# A uci boolean as 1 or 0, using the same spellings as OpenWrt's get_bool, so
+# this agrees with what the init script does with the value.
+uci_flag() {
+  case "$(uci_opt "$1" "$2")" in
+    1|on|true|yes|enabled) echo 1 ;;
+    0|off|false|no|disabled) echo 0 ;;
+    *) echo "$2" ;;
+  esac
+}
+
+# The router's LAN address, so the printed URLs can be opened as shown.
+router_ip() {
+  addr=$(uci -q get network.lan.ipaddr 2>/dev/null | head -n 1 || true)
+  if [ -z "$addr" ] && command -v ip >/dev/null 2>&1; then
+    addr=$(ip -4 addr show br-lan 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -n 1)
+  fi
+  addr=${addr%%/*}
+  if [ -n "$addr" ]; then echo "$addr"; else echo "<router-ip>"; fi
 }
 
 openwrt=false
@@ -70,6 +143,7 @@ if [ "$openwrt" = true ]; then
     *) echo "unsupported OpenWrt package architecture: ${package_arch:-unknown}" >&2; exit 1 ;;
   esac
 
+  say "OpenWrt detected: package manager $package_manager, architecture $package_arch"
   if [ "$version" = latest ]; then
     release_api="https://api.github.com/repos/${repo}/releases/latest"
   else
@@ -79,6 +153,7 @@ if [ "$openwrt" = true ]; then
   download "$release_api" "$tmp/release.json"
   tag=$(sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/release.json" | head -n 1)
   [ -n "$tag" ] || { echo "could not determine the release version" >&2; exit 1; }
+  say "Release $tag"
 
   package_name=jiotv
   [ "$variant" = slim ] && package_name=jiotv-slim
@@ -95,12 +170,21 @@ if [ "$openwrt" = true ]; then
   [ -n "$asset" ] || { echo "no $variant OpenWrt package found for $machine in $tag" >&2; exit 1; }
 
   base="https://github.com/${repo}/releases/download/${tag}"
+  say "Downloading $asset"
   download "$base/$asset" "$tmp/$asset"
+  note "$(size_kib "$tmp/$asset") KiB"
   download "$base/SHA256SUMS" "$tmp/SHA256SUMS"
   verify_asset "$asset" "$tmp/SHA256SUMS" "$tmp/$asset"
+  say "Checksum verified (SHA-256)"
 
   other_package=jiotv-slim
   [ "$variant" = slim ] && other_package=jiotv
+  init_script=${JIOTV_INIT_SCRIPT:-/etc/init.d/jiotv}
+  # Remember whether the service was already running: the package's own hook
+  # starts it on install, which JIOTV_START_SERVICE=0 must not leave behind.
+  was_running=false
+  if [ -x "$init_script" ] && "$init_script" running >/dev/null 2>&1; then was_running=true; fi
+  say "Installing with $package_manager"
   if [ "$package_manager" = apk ]; then
     if apk info -e "$other_package" >/dev/null 2>&1; then apk del "$other_package"; fi
     apk add --allow-untrusted "$tmp/$asset"
@@ -108,12 +192,105 @@ if [ "$openwrt" = true ]; then
     if opkg status "$other_package" 2>/dev/null | grep -q '^Status: .* installed$'; then opkg remove "$other_package"; fi
     opkg install "$tmp/$asset"
   fi
-  init_script=${JIOTV_INIT_SCRIPT:-/etc/init.d/jiotv}
+  say "Enabling the service at boot"
   "$init_script" enable
-  echo "Installed JioTV ($variant) for OpenWrt."
-  echo "Next: jiotv login otp"
-  echo "Then: jiotv admin password"
-  echo "Then: /etc/init.d/jiotv start"
+
+  running=false
+  kept_running=false
+  stop_failed=false
+  disabled=false
+  [ "$(uci_flag enabled 1)" = 1 ] || disabled=true
+  if [ "$start_service" = 0 ]; then
+    if [ "$was_running" != true ]; then
+      # The package hook may have started it, or left it between procd respawns where
+      # "running" is briefly false, so stop unconditionally rather than only if running.
+      say "Making sure the service is stopped (JIOTV_START_SERVICE=0)"
+      stop_service || stop_failed=true
+    fi
+    # What is left running now was running before and is deliberately untouched.
+    if [ "$stop_failed" != true ] && "$init_script" running >/dev/null 2>&1; then kept_running=true; fi
+  elif [ "$disabled" = true ]; then
+    # The setting wins over a process started earlier. Stop unconditionally: a respawning
+    # instance between attempts reports "not running" but would launch again.
+    say "The service is disabled in /etc/config/jiotv (option enabled '0'); making sure it is stopped"
+    stop_service || stop_failed=true
+  else
+    # Stop and wait before starting: an upgrade must replace the old process, and
+    # only a process started after the old one is gone proves the new binary runs.
+    say "Starting the service"
+    http_port=$(uci_opt port 5001)
+    if stop_service && "$init_script" start; then
+      tries=0
+      stable=0
+      while [ "$tries" -lt "$ready_timeout" ]; do
+        if "$init_script" running >/dev/null 2>&1 && port_listening "$http_port"; then stable=$((stable + 1)); else stable=0; fi
+        # Ready only once it has stayed up across two checks, not just bound the port once.
+        if [ "$stable" -ge 2 ]; then running=true; break; fi
+        tries=$((tries + 1))
+        sleep 1
+      done
+      if [ "$running" = true ]; then note "listening on port $http_port"
+      else echo "warning: the service is not listening on port $http_port after $ready_timeout seconds" >&2
+      fi
+    else
+      echo "warning: could not restart the service with '$init_script'" >&2
+    fi
+  fi
+
+  # The service binds the configured host; only a wildcard bind is reachable at
+  # the router's LAN address, so any other host is advertised as configured.
+  bind_host=$(uci_opt host 0.0.0.0)
+  case "$bind_host" in
+    0.0.0.0|::|'[::]'|'[::0]'|::0|0:0:0:0:0:0:0:0) ip=$(router_ip) ;;
+    \[*) ip=$bind_host ;;
+    *:*) ip="[$bind_host]" ;;
+    *) ip=$bind_host ;;
+  esac
+  tls_on=$(uci_flag tls 1)
+  http_port=$(uci_opt port 5001)
+  tls_port=$(uci_opt tls_port 5443)
+  echo
+  if [ "$stop_failed" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed, but the service could not be stopped: run '$init_script stop'."
+  elif [ "$running" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed and running."
+  elif [ "$kept_running" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed; the service that was already running was left as it was (JIOTV_START_SERVICE=0)."
+  elif [ "$disabled" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed; the service is disabled in /etc/config/jiotv."
+  elif [ "$start_service" = 1 ]; then echo "JioTV ($variant, ${tag#v}) is installed, but the service is not listening yet."
+  else echo "JioTV ($variant, ${tag#v}) is installed (not started: JIOTV_START_SERVICE=0)."
+  fi
+  echo
+  if [ "$variant" = slim ]; then
+    echo "  IPTV apps  : use the playlist URL the service logs when it starts (logread -e jiotv | grep -i playlist), on http://${ip}:${http_port}/. The slim build has no browser UI."
+  elif [ "$install_tls" = 1 ] && [ "$tls_on" = 1 ]; then
+    echo "  Browser UI : https://${ip}:${tls_port}/  (HTTPS, self-signed certificate; accept the one-time warning)"
+    echo "  IPTV apps  : http://${ip}:${http_port}/  (plain HTTP playlist)"
+  else
+    echo "  Browser UI : http://${ip}:${http_port}/  (browsers need HTTPS or localhost for DRM and encrypted HLS playback)"
+    [ "$install_tls" = 1 ] || echo "  HTTPS instructions are off (JIOTV_INSTALL_TLS=0); the service setting is unchanged, so HTTPS stays on unless 'option tls 0' is set in /etc/config/jiotv."
+  fi
+  echo
+  echo "Next steps:"
+  step=1
+  if [ "$disabled" = true ]; then
+    echo "  $step. Enable the service: uci set jiotv.main.enabled=1 && uci commit jiotv && $init_script start"
+    step=$((step + 1))
+  elif [ "$running" != true ] && [ "$kept_running" != true ]; then
+    echo "  $step. Start the service: $init_script start  (then check: logread -e jiotv)"
+    step=$((step + 1))
+  fi
+  if [ "$variant" = slim ]; then
+    echo "  $step. Sign in to JioTV from the terminal (you enter the OTP yourself). Stop the service first so it cannot overwrite the login:"
+    echo "       $init_script stop; while pidof jiotv >/dev/null; do sleep 1; done; jiotv login otp; $init_script start"
+  else
+    echo "  $step. Set the admin password: jiotv admin password"
+    step=$((step + 1))
+    echo "  $step. Open the browser UI, log in with that password, then sign in to JioTV (you enter the OTP yourself)."
+    echo "  To sign in to JioTV from the terminal instead, stop the service first so it cannot overwrite the login:"
+    echo "    $init_script stop; while pidof jiotv >/dev/null; do sleep 1; done; jiotv login otp; $init_script start"
+  fi
+  echo
+  echo "Service control: $init_script start|stop|restart    Logs: logread -e jiotv"
+  [ "$stop_failed" != true ] || exit 1
+  [ "$start_service" = 0 ] || [ "$disabled" = true ] || [ "$running" = true ] || exit 1
   exit 0
 fi
 
@@ -140,6 +317,7 @@ if [ "$termux" = true ]; then
   esac
 fi
 
+say "Detected $sys/$machine: installing the $variant build for $target"
 asset="jiotv-${variant}-${target}"
 if [ "$version" = latest ]; then
   base="https://github.com/${repo}/releases/latest/download"
@@ -147,9 +325,12 @@ else
   case "$version" in v*) tag=$version ;; *) tag="v${version}" ;; esac
   base="https://github.com/${repo}/releases/download/${tag}"
 fi
+say "Downloading $asset"
 download "$base/$asset" "$tmp/$asset"
+note "$(size_kib "$tmp/$asset") KiB"
 download "$base/SHA256SUMS" "$tmp/SHA256SUMS"
 verify_asset "$asset" "$tmp/SHA256SUMS" "$tmp/$asset"
+say "Checksum verified (SHA-256)"
 
 if [ -n "${JIOTV_INSTALL_DIR:-}" ]; then install_dir=$JIOTV_INSTALL_DIR
 elif [ "$termux" = true ]; then install_dir=${PREFIX}/bin
@@ -163,4 +344,20 @@ else cp "$tmp/$asset" "$install_dir/jiotv" && chmod 0755 "$install_dir/jiotv"
 fi
 echo "Installed jiotv ($variant, $target) to $install_dir/jiotv"
 case ":${PATH:-}:" in *":$install_dir:"*) ;; *) echo "Add $install_dir to PATH to run jiotv directly." ;; esac
-echo "Next: jiotv login otp; jiotv admin password; jiotv serve"
+if [ "$install_tls" = 1 ]; then
+  echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0 --tls"
+  if [ "$variant" = slim ]; then
+    echo "IPTV apps: use the playlist URL that jiotv serve prints when it starts, with localhost:5001 on this machine or this machine's address from other devices. The slim build has no browser UI."
+  else
+    echo "Browser UI on this machine (HTTPS, self-signed certificate; accept the one-time warning): https://localhost:5443/"
+    echo "From other devices on your network, use this machine's address instead of localhost: https://<this-machine-ip>:5443/ (browser), http://<this-machine-ip>:5001/ (IPTV apps, plain HTTP playlist)."
+  fi
+else
+  echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0"
+  if [ "$variant" = slim ]; then
+    echo "IPTV apps: use the playlist URL that jiotv serve prints when it starts, with localhost:5001 on this machine or this machine's address from other devices. The slim build has no browser UI."
+  else
+    echo "Browser UI on this machine: http://localhost:5001/ (browsers need HTTPS or localhost for DRM and encrypted HLS playback; add --tls to enable HTTPS)"
+    echo "From other devices on your network, use this machine's address instead of localhost: http://<this-machine-ip>:5001/"
+  fi
+fi

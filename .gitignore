@@ -14,6 +14,9 @@ jiotv_credentials.json
 web/ui/node_modules/
 web/node_modules/
 
+# Local playback / QA artifacts
+/qa-results/
+
 # config
 config.json
 config.yml

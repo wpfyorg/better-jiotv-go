@@ -19,3 +19,11 @@ By default it is under `~/.jiotv_go` (or the Windows profile directory if `HOME`
 ## Are the binaries signed?
 
 The macOS and Windows binaries are currently unsigned. The installers verify release checksums.
+
+## Why does the web UI ask for HTTPS?
+
+Browsers only expose Widevine (EME) and Web Crypto on HTTPS or `localhost`. Protected channels and AES-128 HLS therefore fail on plain `http://<LAN-IP>:5001/`. Use `https://<host>:5443/` (self-signed certificate, accept the one-time warning) or the `--tunnel` URL. See [HTTPS in Usage](usage.md#https).
+
+## Should my IPTV app use the HTTPS address?
+
+No. Keep the `http://<host>:5001/` playlist. Many IPTV apps reject self-signed certificates, and they do not need a secure context.

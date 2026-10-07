@@ -1,7 +1,14 @@
 <script>
   import { onDestroy, onMount } from "svelte";
-  import { api, keyBase, loadChannels, formatTime } from "../lib/api.js";
-  import { createShakaPlayer, isDrmPlaybackError, playWithAutoplay, widevineCapability } from "../lib/shakaPlayer.js";
+  import { api, loadChannels, formatTime } from "../lib/api.js";
+  import {
+    createShakaPlayer,
+    loadLiveSource,
+    playbackHttpStatus,
+    sourceDenialStatus,
+    sourceResolutionFailure,
+    widevineCapability,
+  } from "../lib/shakaPlayer.js";
 
   let { id } = $props();
 
@@ -24,7 +31,7 @@
   let activityTimer = null;
   let toastTimer = null;
 
-  const fullStageKinds = new Set(["offline", "playback", "no-stream", "protected", "subscription", "restricted", "extras-signin", "extras-status", "service"]);
+  const fullStageKinds = new Set(["offline", "playback", "secure", "protected", "subscription", "restricted", "extras-signin", "extras-status", "service"]);
 
   let currentProgramIndex = $derived(guide.findIndex((program) => isNow(program, clock)));
   let currentProgram = $derived(currentProgramIndex >= 0 ? guide[currentProgramIndex] : null);
@@ -35,13 +42,6 @@
     return Math.max(0, Math.min(100, ((clock - currentProgram.startEpoch) / duration) * 100));
   });
 
-  function gated(path) {
-    return keyBase ? keyBase + path.replace(/^\//, "") : path;
-  }
-
-  function hlsFallback(channelID, q) {
-    return gated(`/live/${encodeURIComponent(q)}/${encodeURIComponent(channelID)}.m3u8`);
-  }
 
   function isNow(program, now = Date.now()) {
     return program?.startEpoch <= now && program?.endEpoch > now;
@@ -51,29 +51,37 @@
     playerState = { kind, eyebrow, title, detail };
   }
 
-  function showPlaybackError(err, drmCapability = null) {
-    const message = String(err?.message || "").toLowerCase();
-    const status = Number(err?.status);
-
+  function showPlaybackFailure(kind, message = "", status = null) {
     if (!navigator.onLine) {
       setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
-    } else if (isDrmPlaybackError(err) && drmCapability && !drmCapability.usable) {
-      setPlayerState("protected", "Protected playback", "Protected playback unavailable", "This browser cannot play the protected stream. Try a supported browser or device, then retry.");
-    } else if (message.includes("extras is not connected") || message.includes("not logged in")) {
-      setPlayerState("extras-signin", "Extras", "Connect extras to play", "This channel comes from extras. Connect the extras account, then return here to start playback.");
-    } else if (message.includes("not in your extras plan") || message.includes("not subscribed")) {
-      setPlayerState("subscription", "Account access", "Subscription required", "This channel is not included with the current account. Choose another channel or retry after the account has access.");
-    } else if (status === 404 && message.includes("no stream")) {
-      setPlayerState("no-stream", "Live TV", "No live stream available", "This channel does not have a playable live stream right now.");
-    } else if (status === 404 && message.includes("active account")) {
-      setPlayerState("restricted", "Account access", "Not available on this account", "Playback was refused for this account. Access may depend on the active plan or provider entitlement.");
-    } else if (status === 403) {
-      setPlayerState("subscription", "Account access", "Subscription required", "This channel is not included with the current account. Choose another channel or retry after the account has access.");
-    } else if (status >= 500) {
-      setPlayerState("service", "Live TV", "Service temporarily unavailable", "The provider could not start this live stream. Wait a moment and try again.");
-    } else {
-      setPlayerState("playback", "Playback issue", "Playback unavailable", "The live stream could not be started. Check the connection or try again in a moment.");
+      return;
     }
+
+    if (kind === "insecure_context") {
+      setPlayerState("secure", "Secure connection", "Needs a secure connection", "Protected and encrypted streams require HTTPS or localhost in a browser. Open the app over HTTPS, then try again.");
+      return;
+    }
+    if (kind === "browser_unsupported") {
+      const detail = message.startsWith("DRM_ENVIRONMENT_BLOCKED")
+        ? "This browser does not have a working Widevine module for this protected stream. Try a supported browser or device."
+        : "This browser cannot decode this protected stream. Try a supported browser or device, or use the playlist in an IPTV app.";
+      setPlayerState("protected", "Protected playback", "Protected playback unavailable", detail);
+      return;
+    }
+    if (kind === "provider_unavailable") {
+      setPlayerState("service", "Live TV", "Stream unavailable from provider", "The provider is not serving this channel right now. Try again later or choose another channel.");
+      return;
+    }
+    if (kind === "provider_denied") {
+      const providerStatus = status ? ` Provider response: HTTP ${status}.` : "";
+      if (channel?.requiresSubscription) {
+        setPlayerState("subscription", "Account access", "Subscription required", `The provider refused this premium channel. The current account may not include it.${providerStatus}`);
+      } else {
+        setPlayerState("restricted", "Account access", "The provider refused playback", `The current account may not have access, or its session may need refreshing.${providerStatus}`);
+      }
+      return;
+    }
+    setPlayerState("playback", "Playback issue", "Playback unavailable", "The live stream could not be started. Check the connection or try again in a moment.");
   }
 
   function markActivity() {
@@ -101,7 +109,7 @@
       try {
         await video.play();
       } catch {
-        showPlaybackError(new Error("playback failed"));
+        showPlaybackFailure("generic");
       }
     } else {
       video.pause();
@@ -169,7 +177,7 @@
       setPlayerState("playing", "", "", "");
       markActivity();
     } catch {
-      showPlaybackError(new Error("playback failed"));
+      showPlaybackFailure("generic");
     }
   }
 
@@ -198,6 +206,7 @@
 
   async function start(channelID, q) {
     const thisRun = ++runID;
+    const isCurrent = () => thisRun === runID;
     await cleanup?.();
     cleanup = null;
     setPlayerState("loading", "Live TV", "Starting live TV…", "");
@@ -210,7 +219,7 @@
     try {
       if (channelID.startsWith("ex_")) {
         const status = await api("/api/extras/status").catch(() => null);
-        if (thisRun !== runID) return;
+        if (!isCurrent()) return;
         if (!status) {
           if (!navigator.onLine) {
             setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
@@ -229,27 +238,31 @@
         }
       }
 
-      const d = await api(`/api/live/play/${encodeURIComponent(channelID)}?q=${q}`);
-      if (thisRun !== runID) return;
+      const source = await api(`/api/live/play/${encodeURIComponent(channelID)}?q=${q}`);
+      if (!isCurrent()) return;
       const session = await createShakaPlayer(playerContainer, video, { controls: false });
+      if (!isCurrent()) {
+        await session.destroy().catch(() => {});
+        return;
+      }
       const player = session.player;
       const onPlaying = () => {
-        if (thisRun === runID) {
+        if (isCurrent()) {
           paused = false;
           setPlayerState("playing", "", "", "");
         }
       };
       const onPause = () => {
-        if (thisRun === runID) paused = true;
+        if (isCurrent()) paused = true;
       };
       const onVolumeChange = () => {
-        if (thisRun === runID) muted = Boolean(video?.muted);
+        if (isCurrent()) muted = Boolean(video?.muted);
       };
       const onWaiting = () => {
-        if (thisRun === runID && !fullStageKinds.has(playerState.kind)) setPlayerState("buffering", "Live TV", "Buffering…", "");
+        if (isCurrent() && !fullStageKinds.has(playerState.kind)) setPlayerState("buffering", "Live TV", "Buffering…", "");
       };
       const onStalled = () => {
-        if (thisRun === runID && !fullStageKinds.has(playerState.kind)) setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
+        if (isCurrent() && !fullStageKinds.has(playerState.kind)) setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
       };
       video.addEventListener("playing", onPlaying);
       video.addEventListener("pause", onPause);
@@ -264,64 +277,45 @@
         video?.removeEventListener("stalled", onStalled);
         await session.destroy().catch(() => {});
       };
-      const drmCapability = d.dash && d.license ? await widevineCapability() : null;
 
-      if (d.license) {
+      const drmCapability = source.dash && source.license ? await widevineCapability() : null;
+      if (!isCurrent()) return;
+      if (source.license) {
         player.configure({
           drm: {
-            servers: { "com.widevine.alpha": d.license },
+            servers: { "com.widevine.alpha": source.license },
             advanced: { "com.widevine.alpha": { videoRobustness: "SW_SECURE_CRYPTO", audioRobustness: "SW_SECURE_CRYPTO" } },
           },
           streaming: { bufferBehind: 2, bufferingGoal: 6, rebufferingGoal: 2 },
         });
       }
 
-      let fallingBack = false;
-      const fallbackToHls = async () => {
-        if (fallingBack) return;
-        fallingBack = true;
-        setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
-        await player.unload();
-        await player.load(hlsFallback(channelID, q));
-        const played = await playWithAutoplay(video, { allowMutedFallback: false });
-        if (thisRun !== runID) return;
-        setPlayerState(played ? "playing" : "tap", "", played ? "" : "Tap to play", "");
-      };
-
-      player.addEventListener("error", (event) => {
-        if (thisRun !== runID) return;
-        const detail = event.detail;
-        if (d.dash && d.license && isDrmPlaybackError(detail)) {
-          fallbackToHls().catch(() => showPlaybackError(detail, drmCapability));
-        } else {
-          showPlaybackError(detail, drmCapability);
-        }
-      });
-
       player.addEventListener("buffering", (event) => {
-        if (thisRun !== runID || fullStageKinds.has(playerState.kind)) return;
+        if (!isCurrent() || fullStageKinds.has(playerState.kind)) return;
         const buffering = event?.buffering ?? event?.detail?.buffering;
         setPlayerState(buffering ? "buffering" : "playing", "Live TV", buffering ? "Buffering…" : "", "");
       });
 
-      try {
-        await player.load(d.url);
-      } catch (err) {
-        if (d.dash && d.license && isDrmPlaybackError(err)) {
-          try {
-            await fallbackToHls();
-          } catch {
-            showPlaybackError(err, drmCapability);
-          }
-          return;
-        }
-        throw err;
-      }
-      const played = await playWithAutoplay(video, { allowMutedFallback: false });
-      if (thisRun !== runID) return;
-      setPlayerState(played ? "playing" : "tap", "", played ? "" : "Tap to play", "");
+      await loadLiveSource({
+        player,
+        video,
+        source,
+        drmCapability,
+        isCurrent,
+        allowMutedFallback: false,
+        onAutoplayResult: (played) => {
+          if (isCurrent()) setPlayerState(played ? "playing" : "tap", "", played ? "" : "Tap to play", "");
+        },
+        onTerminalError: (message, info) => {
+          if (!isCurrent()) return;
+          const status = playbackHttpStatus(info?.hlsError ?? info?.dashError);
+          showPlaybackFailure(info?.kind ?? "generic", message, status);
+        },
+      });
     } catch (err) {
-      if (thisRun === runID) showPlaybackError(err);
+      if (isCurrent()) {
+        showPlaybackFailure(sourceResolutionFailure(err), err?.message || String(err), sourceDenialStatus(err));
+      }
     }
   }
 
@@ -459,12 +453,12 @@
         <h2 id="player-error-title">{playerState.title}</h2>
         <p class="error-detail">{playerState.detail}</p>
         <div class="error-actions">
-          {#if playerState.kind === "extras-signin" || playerState.kind === "extras-status"}
+          {#if ["extras-signin", "extras-status", "secure", "protected"].includes(playerState.kind)}
             <a class="retry-button" href="#/settings">Open account settings</a>
           {:else}
             <button class="retry-button" onclick={() => start(id, quality)}>Try again</button>
           {/if}
-          {#if playerState.kind !== "service"}<a class="channels-button" href="#/">All channels</a>{/if}
+          <a class="channels-button" href="#/">All channels</a>
         </div>
       </section>
     {/if}
@@ -477,7 +471,7 @@
         <h1>{channel?.name ?? id}</h1>
         <p class="muted">
           {[channel?.category, channel?.language].filter(Boolean).join(" · ")}
-          {#if channel?.premium}<span class="badge premium">Premium</span>{/if}
+          {#if channel?.requiresSubscription}<span class="badge premium">Premium</span>{/if}
           {#if channel?.extras}<span class="badge extras">Extra</span>{/if}
         </p>
       </div>
@@ -818,6 +812,14 @@
   @media (max-width: 1050px) {
     .layout { grid-template-columns: 1fr; gap: 20px; }
     aside { width: min(100%, 760px); }
+  }
+
+  @media (orientation: landscape) and (max-height: 500px) {
+    .stage { width: min(100%, calc((100dvh - 100px) * 16 / 9)); margin-inline: auto; }
+  }
+  @media (max-width: 420px) {
+    .player-error { padding: 12px; }
+    .error-detail { font-size: 11px; }
   }
 
   @media (max-width: 640px) {

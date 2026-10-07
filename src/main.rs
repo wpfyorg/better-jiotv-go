@@ -18,6 +18,7 @@ mod state;
 mod store;
 mod stream;
 mod television;
+mod tls;
 mod token_refresh;
 mod tunnel;
 mod unlock;
@@ -69,7 +70,7 @@ fn main() -> anyhow::Result<()> {
         cli::Command::LoginReset => login_reset(&store),
         cli::Command::ExtrasLogin => runtime.block_on(extras_login_cli(&store)),
         cli::Command::ExtrasLogout => extras_logout_cli(&store),
-        cli::Command::AdminPassword => admin_password(&access),
+        cli::Command::AdminPassword => admin_password(&access, &path_prefix),
         cli::Command::KeyShow => show_key(&access),
         cli::Command::KeyRotate => rotate_key(&access),
         cli::Command::EpgGenerate => {
@@ -246,12 +247,33 @@ fn resolve_path_prefix(cfg: &config::Config) -> anyhow::Result<String> {
     } else {
         default_path_prefix()?
     };
-    std::fs::create_dir_all(&prefix)?;
+    // The OpenWrt default lives outside /root, so a directory created by a raw
+    // install must not be readable by other users (the package applies 0700).
+    if cfg.path_prefix.is_empty() && is_openwrt() {
+        create_private_dir(&prefix)?;
+    } else {
+        std::fs::create_dir_all(&prefix)?;
+    }
     Ok(if prefix.ends_with('/') {
         prefix
     } else {
         format!("{prefix}/")
     })
+}
+
+fn create_private_dir(path: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
 }
 
 fn default_path_prefix() -> anyhow::Result<String> {
@@ -325,15 +347,25 @@ async fn serve(
         );
     }
 
+    // Validating the XMLTV cache needs the active channel catalogue, which can
+    // mean remote API calls with no timeout, so it runs off the startup path:
+    // the server must listen even if an upstream stalls. `/epg.xml.gz` answers
+    // 503 until validation has set the current fingerprint, so nothing stale is
+    // served in the meantime.
     let epg_path = format!("{path_prefix}epg.xml.gz");
-    if cfg.epg || std::path::Path::new(&epg_path).exists() {
-        if let Err(e) = epg::prepare_cache_for_state(&state).await {
-            state.epg_state.invalidate();
-            tracing::warn!("cannot validate the EPG cache for the active account: {e}");
-        }
-    }
-    if cfg.epg {
-        tokio::spawn(epg_task_loop(state.clone()));
+    let epg_enabled = cfg.epg;
+    if epg_enabled || std::path::Path::new(&epg_path).exists() {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let epoch = state.context_epoch();
+            if let Err(e) = epg::prepare_cache_for_state(&state).await {
+                epg::invalidate_if_current(&state, epoch);
+                tracing::warn!("cannot validate the EPG cache for the active account: {e}");
+            }
+            if epg_enabled {
+                epg_task_loop(state).await;
+            }
+        });
     }
 
     if !cfg.disable_auth {
@@ -346,17 +378,50 @@ async fn serve(
         #[cfg(feature = "full")]
         if !access.has_password() {
             let setup = playlist.trim_end_matches("playlist.m3u").to_string();
-            println!(
-                "Web setup: http://{}:{}{setup} (or run: jiotv admin password)",
-                display_host(&args.host),
-                args.port
-            );
+            // The setup link carries the access key and takes the new admin
+            // password, so with TLS enabled it must be the HTTPS one.
+            let origin = if args.tls {
+                format!("https://{}:{}", reachable_host(&args.host), args.tls_port)
+            } else {
+                format!("http://{}:{}", display_host(&args.host), args.port)
+            };
+            println!("Web setup: {origin}{setup} (or run: jiotv admin password)");
         }
     } else {
         println!("Auth is disabled: playlist at /playlist.m3u");
     }
 
+    if let Ok(http) = args.port.parse::<u16>() {
+        let tls = args
+            .tls
+            .then(|| args.tls_port.parse::<u16>().ok())
+            .flatten();
+        let _ = state.listen.set(state::ListenPorts { http, tls });
+    }
     let service = server::GatedService::new(state);
+
+    let tls = if args.tls {
+        if args.tls_port == args.port {
+            anyhow::bail!("--tls-port must differ from --port");
+        }
+        let material =
+            tls::load_or_create(&args.tls_cert, &args.tls_key, &path_prefix, &args.host)?;
+        let tls_listener =
+            tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.tls_port)).await?;
+        let origin = format!("https://{}:{}", reachable_host(&args.host), args.tls_port);
+        if material.generated {
+            println!("Generated a self-signed TLS certificate in {path_prefix}tls/");
+        }
+        println!("HTTPS: {origin}/ (browser UI; IPTV clients should keep using plain HTTP)");
+        println!("TLS certificate SHA-256: {}", material.fingerprint);
+        Some((tls_listener, material.config))
+    } else {
+        if !args.tls_cert.is_empty() || !args.tls_key.is_empty() {
+            eprintln!("Warning: --tls-cert/--tls-key are ignored without --tls");
+        }
+        None
+    };
+
     let listener = tokio::net::TcpListener::bind(format!("{}:{}", args.host, args.port)).await?;
 
     let mut tunnel_handle = None;
@@ -380,9 +445,31 @@ async fn serve(
     }
 
     tracing::info!("listening");
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let signal_tx = stop_tx.clone();
+    tokio::spawn(async move {
+        shutdown_signal().await;
+        let _ = signal_tx.send(true);
+    });
+    let tls_task = tls.map(|(tls_listener, config)| {
+        let svc = service.clone();
+        tokio::spawn(tls::serve(
+            tls_listener,
+            config,
+            move |peer| server::connection_service(svc.clone(), peer, true),
+            stop_rx.clone(),
+        ))
+    });
+    let mut http_stop = stop_rx;
     let serve_result = axum::serve(listener, server::WithConnectInfo::new(service))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            let _ = http_stop.wait_for(|s| *s).await;
+        })
         .await;
+    let _ = stop_tx.send(true);
+    if let Some(task) = tls_task {
+        let _ = task.await;
+    }
 
     if let Some(t) = tunnel_handle {
         t.kill().await;
@@ -446,11 +533,21 @@ fn build_app_state(
         vod_state: Default::default(),
         public_ip: Arc::new(unlock::PublicIp::new(http)),
         unlock_limiter: Arc::new(unlock::AttemptLimiter::default()),
+        listen: Default::default(),
     }))
 }
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// The host to print in a URL meant to be opened from another device. A
+/// wildcard bind address names no machine, so it becomes a placeholder.
+fn reachable_host(host: &str) -> String {
+    match host {
+        "0.0.0.0" | "[::]" | "::" | "[::0]" | "0:0:0:0:0:0:0:0" => "<server-ip>".to_string(),
+        other => display_host(other),
+    }
 }
 
 fn display_host(host: &str) -> String {
@@ -545,8 +642,9 @@ async fn extras_login_cli(store: &store::Store) -> anyhow::Result<()> {
     let mut otp = String::new();
     std::io::stdin().read_line(&mut otp)?;
 
+    // The CLI has no running server whose caches need invalidating.
     let result = client
-        .verify_otp(&number, &resp.identifier, otp.trim())
+        .verify_otp(&number, &resp.identifier, otp.trim(), || {})
         .await;
     if let Some(cr) = client.credentials() {
         cr.save(store)?;
@@ -571,30 +669,67 @@ fn login_reset(store: &store::Store) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn admin_password(access: &access::Access) -> anyhow::Result<()> {
+fn admin_password(access: &access::Access, path_prefix: &str) -> anyhow::Result<()> {
     let password = rpassword_prompt("New admin password: ")?;
-    access.set_password(&password)?;
-    if restart_openwrt_service()? {
-        println!("Admin password set. JioTV service restarted.");
-    } else {
-        println!("Admin password set.");
+    let init = std::path::Path::new("/etc/init.d/jiotv");
+    if is_openwrt() && init.exists() {
+        // The running service caches the store in memory and rewrites the whole
+        // file on every update, so the password must be written while it is
+        // stopped, through a freshly loaded store.
+        let restarted = with_service_stopped(init, std::time::Duration::from_secs(10), || {
+            let store = Arc::new(store::Store::open(path_prefix)?);
+            access::Access::new(store).set_password(&password)?;
+            Ok(())
+        })?;
+        if restarted {
+            println!("Admin password set. JioTV service restarted.");
+        } else {
+            println!("Admin password set.");
+        }
+        return Ok(());
     }
+    access.set_password(&password)?;
+    println!("Admin password set.");
     Ok(())
 }
 
-fn restart_openwrt_service() -> anyhow::Result<bool> {
-    if !is_openwrt() {
-        return Ok(false);
+/// Runs `change` with the init-script service stopped, then starts it again
+/// only if it was running. Returns whether the service was restarted.
+fn with_service_stopped(
+    init: &std::path::Path,
+    stop_timeout: std::time::Duration,
+    change: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<bool> {
+    let is_running = || -> std::io::Result<bool> {
+        Ok(std::process::Command::new(init)
+            .arg("running")
+            .status()?
+            .success())
+    };
+    let was_running = is_running()?;
+    if was_running {
+        let stop = std::process::Command::new(init).arg("stop").status()?;
+        if !stop.success() {
+            anyhow::bail!("could not stop the JioTV service ({stop}); nothing was changed");
+        }
+        // procd only signals the process on `stop`; wait until it has exited so
+        // its cached store cannot be written over the new one.
+        let deadline = std::time::Instant::now() + stop_timeout;
+        while is_running()? {
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!("the JioTV service did not stop in time; nothing was changed");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
     }
-    let init = std::path::Path::new("/etc/init.d/jiotv");
-    if !init.exists() {
-        return Ok(false);
+    let result = change();
+    if was_running {
+        let start = std::process::Command::new(init).arg("start").status()?;
+        if !start.success() {
+            anyhow::bail!("the change was applied, but starting the JioTV service failed: {start}");
+        }
     }
-    let status = std::process::Command::new(init).arg("restart").status()?;
-    if !status.success() {
-        anyhow::bail!("admin password was saved, but restarting the JioTV service failed: {status}");
-    }
-    Ok(true)
+    result.map(|()| was_running)
 }
 
 fn rpassword_prompt(prompt: &str) -> anyhow::Result<String> {
@@ -624,7 +759,12 @@ fn print_help() {
         "jiotv - Stream JioTV on any device\n\n\
          USAGE:\n  jiotv [--config PATH] [--skip-update-check] <command>\n\n\
          COMMANDS:\n  \
-         serve [--host H] [--port P] [--public] [--tls] [--tls-cert] [--tls-key] [--tunnel] [--tunnel-token T]\n  \
+         serve [--host H] [--port P] [--public] [--tls [--tls-port P] [--tls-cert F --tls-key F]] [--tunnel] [--tunnel-token T]\n  \
+         \x20 --tls            also serve HTTPS (default port 5443) next to plain HTTP; browsers need\n  \
+         \x20                  HTTPS for DRM/encrypted-HLS playback, IPTV apps can keep using HTTP\n  \
+         \x20 --tls-port P     HTTPS port (default 5443)\n  \
+         \x20 --tls-cert/--tls-key  PEM files to use (both or neither); without them a self-signed\n  \
+         \x20                  certificate is created in <data dir>/tls/ on first start and reused\n  \
          login otp | login reset\n  \
          extras login | extras logout   (off by default; needs extras = true / JIOTV_EXTRAS=true)\n  \
          epg generate | epg delete\n  \
@@ -634,4 +774,130 @@ fn print_help() {
          update [--version vX.Y.Z]      (needs JIOTV_UPDATE_TOKEN for a private repo)\n  \
          autostart [--args \"...\"] | autostart remove   (systemd service; Termux: shell rc)\n"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    mod service {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+        /// A fake init script that logs each action and reports `running`
+        /// according to the presence of a `running` marker file.
+        fn fake_init(dir: &std::path::Path, running: bool) -> std::path::PathBuf {
+            let marker = dir.join("running");
+            if running {
+                std::fs::write(&marker, "").unwrap();
+            }
+            let script = dir.join("jiotv.init");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\necho \"$1\" >> '{log}'\ncase \"$1\" in\n running) [ -f '{m}' ] ;;\n stop) rm -f '{m}' ;;\n start) : > '{m}' ;;\nesac\n",
+                    log = dir.join("calls").display(),
+                    m = marker.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            script
+        }
+
+        /// The stop/start actions issued, ignoring `running` status polls.
+        fn actions(dir: &std::path::Path) -> Vec<String> {
+            std::fs::read_to_string(dir.join("calls"))
+                .unwrap_or_default()
+                .lines()
+                .filter(|l| *l != "running")
+                .map(str::to_owned)
+                .collect()
+        }
+
+        #[test]
+        fn running_service_is_stopped_for_the_change_then_started() {
+            let dir = tempfile::tempdir().unwrap();
+            let init = fake_init(dir.path(), true);
+            let marker = dir.path().join("running");
+            let restarted = with_service_stopped(&init, TIMEOUT, || {
+                assert!(
+                    !marker.exists(),
+                    "service must be stopped during the change"
+                );
+                Ok(())
+            })
+            .unwrap();
+            assert!(restarted);
+            assert_eq!(actions(dir.path()), ["stop", "start"]);
+        }
+
+        #[test]
+        fn change_waits_for_the_service_to_exit_and_is_skipped_if_it_never_does() {
+            let dir = tempfile::tempdir().unwrap();
+            let init = fake_init(dir.path(), true);
+            // `stop` succeeds but the process lingers: make it a no-op.
+            std::fs::write(
+                &init,
+                format!(
+                    "#!/bin/sh\necho \"$1\" >> '{}'\ncase \"$1\" in running) exit 0 ;; esac\n",
+                    dir.path().join("calls").display()
+                ),
+            )
+            .unwrap();
+            let mut changed = false;
+            let err = with_service_stopped(&init, std::time::Duration::from_millis(300), || {
+                changed = true;
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(err.to_string().contains("did not stop in time"));
+            assert!(
+                !changed,
+                "must not touch the store while the service lingers"
+            );
+            assert!(!actions(dir.path()).contains(&"start".to_string()));
+        }
+
+        #[test]
+        fn private_dir_is_created_with_owner_only_access() {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("etc").join("jiotv");
+            create_private_dir(target.to_str().unwrap()).unwrap();
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "group/other must have no access");
+        }
+
+        #[test]
+        fn stopped_service_stays_stopped() {
+            let dir = tempfile::tempdir().unwrap();
+            let init = fake_init(dir.path(), false);
+            let restarted = with_service_stopped(&init, TIMEOUT, || Ok(())).unwrap();
+            assert!(!restarted);
+            assert!(actions(dir.path()).is_empty());
+        }
+
+        #[test]
+        fn failed_change_still_restores_a_running_service() {
+            let dir = tempfile::tempdir().unwrap();
+            let init = fake_init(dir.path(), true);
+            let err =
+                with_service_stopped(&init, TIMEOUT, || anyhow::bail!("disk full")).unwrap_err();
+            assert!(err.to_string().contains("disk full"));
+            assert_eq!(actions(dir.path()), ["stop", "start"]);
+        }
+    }
+
+    #[test]
+    fn wildcard_binds_print_a_placeholder_instead_of_the_bind_address() {
+        for wildcard in ["0.0.0.0", "[::]", "::"] {
+            assert_eq!(reachable_host(wildcard), "<server-ip>", "{wildcard}");
+        }
+        assert_eq!(reachable_host("localhost"), "localhost");
+        assert_eq!(reachable_host(""), "localhost");
+        assert_eq!(reachable_host("192.168.1.10"), "192.168.1.10");
+    }
 }

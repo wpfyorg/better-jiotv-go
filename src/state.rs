@@ -26,7 +26,7 @@ impl ActiveProduct {
 
 pub struct AppState {
     pub config: Config,
-    /// The resolved data directory (`config.path_prefix`, or `~/.jiotv_go`),
+    /// The resolved data directory (`config.path_prefix`, or `~/.jiotv_go`; `/etc/jiotv` on OpenWrt),
     /// always ending in `/`. Used for `epg.xml.gz` and similar data files.
     pub path_prefix: String,
     pub access: Arc<Access>,
@@ -50,9 +50,40 @@ pub struct AppState {
     /// unlock code. See `unlock.rs`.
     pub public_ip: Arc<crate::unlock::PublicIp>,
     pub unlock_limiter: Arc<crate::unlock::AttemptLimiter>,
+    /// The ports `serve` listens on, recorded once the listeners are chosen so
+    /// the UI can offer the plain-HTTP playlist origin from an HTTPS page.
+    pub listen: std::sync::OnceLock<ListenPorts>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListenPorts {
+    pub http: u16,
+    pub tls: Option<u16>,
 }
 
 impl AppState {
+    /// Returns `response` only if no account or product transition rotated the
+    /// context epoch since `epoch` was captured at the start of the request.
+    /// A handler that mints encrypted URLs from account-scoped data must be
+    /// wrapped in this: if the epoch moved meanwhile, the response could carry
+    /// the previous context's data under URLs encrypted for the new one.
+    pub fn stable_since(
+        &self,
+        epoch: u64,
+        response: axum::response::Response,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        if self.secure.current_epoch() == epoch {
+            response
+        } else {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "The active account changed while this request was running; retry",
+            )
+                .into_response()
+        }
+    }
+
     /// Process-local account/mode epoch shared by all encrypted playback
     /// artifacts. Rotating it makes previously issued manifest, segment,
     /// key and license URLs unusable immediately.
@@ -164,5 +195,53 @@ impl AppState {
             ActiveProduct::Extras => self.extras.connected(),
             ActiveProduct::Tv => self.tv.logged_in(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    fn state() -> Arc<AppState> {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
+        std::mem::forget(dir);
+        Arc::new(AppState {
+            config: Config::default(),
+            path_prefix: String::new(),
+            access: Arc::new(Access::new(store.clone())),
+            store,
+            tv: Arc::new(Television::new(reqwest::Client::new())),
+            secure: Arc::new(SecureUrl::new(false)),
+            http: reqwest::Client::new(),
+            drm_channels: Default::default(),
+            custom_channels: Arc::new(CustomChannels::new()),
+            render_caches: Default::default(),
+            dash_state: Default::default(),
+            epg_state: Default::default(),
+            extras: Arc::new(ExtrasState::new(false, None)),
+            vod_state: Default::default(),
+            public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
+            unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
+            listen: Default::default(),
+        })
+    }
+
+    #[test]
+    fn stable_since_keeps_a_response_from_an_unchanged_context() {
+        let s = state();
+        let epoch = s.secure.current_epoch();
+        let resp = s.stable_since(epoch, axum::http::StatusCode::OK.into_response());
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
+
+    #[test]
+    fn stable_since_discards_a_response_that_straddled_a_context_switch() {
+        let s = state();
+        let epoch = s.secure.current_epoch();
+        s.invalidate_context();
+        let resp = s.stable_since(epoch, axum::http::StatusCode::OK.into_response());
+        assert_eq!(resp.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
     }
 }

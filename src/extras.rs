@@ -377,11 +377,15 @@ impl Client {
         Ok(resp.json().await?)
     }
 
+    /// `on_installed` runs right after the verified credentials replace the
+    /// client's current ones, before the token exchange's network round trip.
+    /// It is not called when the OTP is rejected, because nothing was installed.
     pub async fn verify_otp(
         &self,
         number: &str,
         identifier: &str,
         otp: &str,
+        on_installed: impl FnOnce(),
     ) -> Result<Credentials, ExtrasError> {
         let n = normalize_number(number)?;
         #[derive(Serialize)]
@@ -474,6 +478,7 @@ impl Client {
             ..Default::default()
         };
         self.set_credentials(Some(cr.clone()));
+        on_installed();
         match self.exchange_token().await {
             Ok(()) => {
                 cr = self.credentials().unwrap();
@@ -1604,7 +1609,7 @@ mod tests {
         assert_eq!(sent.identifier, "redacted-identifier");
 
         let creds = client
-            .verify_otp("9876543210", &sent.identifier, "0000")
+            .verify_otp("9876543210", &sent.identifier, "0000", || {})
             .await
             .unwrap();
         assert_eq!(creds.sso_token, "redacted-sso");

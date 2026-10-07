@@ -49,6 +49,7 @@
   async function signOut() {
     await api("/api/auth/logout", { method: "POST" }).catch(() => {});
     auth = { ...auth, authenticated: false };
+    extrasActive = false;
   }
 
   onMount(() => {
@@ -147,7 +148,8 @@
     display: flex;
     min-width: 0;
     align-items: center;
-    justify-content: flex-end;
+    /* flex-end would clip the first links when the row overflows on narrow phones. */
+    justify-content: flex-start;
     gap: 3px;
     overflow-x: auto;
     scrollbar-width: none;
@@ -170,12 +172,17 @@
   main { width: 100%; max-width: 1500px; margin: 0 auto; padding: 24px 18px 56px; }
 
   @media (max-width: 640px) {
-    .bar { gap: 6px; padding: 9px 10px; }
+    .bar { gap: 10px; padding: 9px 12px; }
     .brand-group { gap: 4px; }
     .brand { font-size: 15px; }
     .extras-active { width: 14px; height: 14px; }
     .extras-active svg { width: 9px; height: 9px; }
-    nav a, .link { padding: 6px 5px; font-size: 12px; }
+    nav a, .link { display: inline-flex; align-items: center; min-height: 40px; padding: 0 8px; font-size: 12px; }
     main { padding: 14px 10px 40px; }
+  }
+  @media (max-width: 380px) {
+    .bar { gap: 6px; }
+    nav { gap: 0; }
+    nav a, .link { padding: 0 6px; }
   }
 </style>

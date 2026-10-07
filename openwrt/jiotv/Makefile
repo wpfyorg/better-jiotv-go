@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=jiotv
-PKG_VERSION?=1.1.0
+PKG_VERSION?=1.3.3
 PKG_RELEASE:=1
 PKGARCH:=$(ARCH_PACKAGES)
 
@@ -40,16 +40,6 @@ endef
 
 define Package/jiotv-slim/conffiles
 /etc/config/jiotv
-endef
-
-define Package/jiotv/postinst
-#!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /etc/uci-defaults/99-jiotv
-endef
-
-define Package/jiotv-slim/postinst
-#!/bin/sh
-[ -n "$${IPKG_INSTROOT}" ] || /etc/uci-defaults/99-jiotv
 endef
 
 define Package/jiotv/install

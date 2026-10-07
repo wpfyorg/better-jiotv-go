@@ -8,6 +8,8 @@ curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/script
 
 The default location is `$HOME/.local/bin`. Set `JIOTV_INSTALL_DIR` to change it, and add that directory to `PATH` if needed. Use `JIOTV_VARIANT=slim` for a headless install or `JIOTV_VERSION` to pin a release.
 
-The release binaries are unsigned and macOS may show a Gatekeeper warning. Review the release checksum and use the system's normal approval process before launching. No built-in macOS service manager is provided; run `jiotv serve` in a terminal or configure a launchd job separately.
+The release binaries are unsigned and macOS may show a Gatekeeper warning. Review the release checksum and use the system's normal approval process before launching. No built-in macOS service manager is provided; run `jiotv serve --host 0.0.0.0 --tls` in a terminal or configure a launchd job separately.
+
+On this Mac, open `https://localhost:5443/` and accept the one-time self-signed certificate warning (browsers need HTTPS or `localhost` for protected playback). Other devices on your network use `https://<mac-ip>:5443/`, and IPTV apps use the `http://<mac-ip>:5001/` playlist; find it with `ipconfig getifaddr en0` (or the interface your network uses). See [HTTPS in Usage](usage.md#https). The installer accepts `JIOTV_INSTALL_TLS=0` to omit the HTTPS instructions from its output.
 
 Data defaults to `$HOME/.jiotv_go`. Run `jiotv login otp` and `jiotv admin password` before starting the server. Update with `jiotv update`; uninstall by removing the executable and, if desired, the data directory.

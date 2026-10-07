@@ -62,6 +62,12 @@ pub struct ExtrasState {
     dash: RwLock<HashMap<String, bool>>,
     pending: Mutex<PendingLogin>,
     locks: KeyedLocks,
+    /// Bumped, under `commit`, every time the account-scoped caches are
+    /// cleared. A fetch captures it first and commits its result only if it is
+    /// unchanged, so a request that outlived an account switch cannot write the
+    /// previous account's catalogue or stream URLs back into the cleared caches.
+    generation: std::sync::atomic::AtomicU64,
+    commit: Mutex<()>,
 }
 
 impl ExtrasState {
@@ -88,6 +94,8 @@ impl ExtrasState {
             dash: RwLock::new(HashMap::new()),
             pending: Mutex::new(PendingLogin::default()),
             locks: KeyedLocks::default(),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            commit: Mutex::new(()),
         }
     }
 
@@ -111,7 +119,29 @@ impl ExtrasState {
         self.init(http, store);
     }
 
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Runs `commit` only if no clear happened since `generation` was read.
+    /// The check and the writes share the lock `clear_catalogue_state` holds
+    /// while it bumps the generation, so they cannot interleave.
+    fn commit_if_current<R>(&self, generation: u64, commit: impl FnOnce() -> R) -> Option<R> {
+        let _guard = self.commit.lock().unwrap();
+        (self.generation() == generation).then(commit)
+    }
+
+    fn clear_live(&self) {
+        let _guard = self.commit.lock().unwrap();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.live.write().unwrap().clear();
+    }
+
     fn clear_catalogue_state(&self) {
+        let _guard = self.commit.lock().unwrap();
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.catalogue.write().unwrap().clear();
         *self.catalogue_fetched_at.write().unwrap() = None;
         *self.subscriptions.write().unwrap() = None;
@@ -127,6 +157,16 @@ impl ExtrasState {
 
     pub fn invalidate_account_context(&self) {
         self.clear_catalogue_state();
+    }
+
+    /// Identifies the credentials currently installed on the client, so a
+    /// caller can tell whether an operation replaced them, even partway (an OTP
+    /// that verifies but fails its token exchange has already swapped the
+    /// account while leaving it without an auth token).
+    pub fn credentials_marker(&self) -> Option<(String, String, String)> {
+        self.client()?
+            .credentials()
+            .map(|c| (c.number, c.sso_token, c.auth_token))
     }
 
     /// Loads (or creates) the device and any saved login from the store.
@@ -154,7 +194,7 @@ impl ExtrasState {
         if let Some(client) = self.client.read().unwrap().as_ref() {
             client.set_credentials(creds.clone());
         }
-        self.live.write().unwrap().clear();
+        self.clear_live();
         // `extras_stream_kinds` is the current store key; `tvplus_dash` is
         // read as a fallback so an existing store's learned map survives
         // the rename, and gets migrated forward on the next save below.
@@ -221,6 +261,7 @@ impl ExtrasState {
         {
             return;
         }
+        let generation = self.generation();
         let fresh = self
             .catalogue_fetched_at
             .read()
@@ -252,16 +293,21 @@ impl ExtrasState {
                 (None, EntitlementStatus::UpstreamFailure)
             }
         };
-        *self.subscriptions.write().unwrap() = subscriptions.clone();
-        *self.entitlement_status.write().unwrap() = entitlement_status;
-        self.entitlements_applied
-            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let stored = self.commit_if_current(generation, || {
+            *self.subscriptions.write().unwrap() = subscriptions.clone();
+            *self.entitlement_status.write().unwrap() = entitlement_status;
+            self.entitlements_applied
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+        });
+        if stored.is_none() {
+            return;
+        }
         match client.channels().await {
             Ok(mut fetched) => {
+                let mut applied = false;
                 if let Some(map) = subscriptions.as_ref() {
                     fetched.retain(|ch| ch.allowed_by_subscriptions(map));
-                    self.entitlements_applied
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    applied = true;
                 }
                 let mirrors = match tv.channels().await {
                     Ok(jiotv) => Some(crate::extras::mirrors(&fetched, &jiotv.result)),
@@ -270,18 +316,24 @@ impl ExtrasState {
                         None
                     }
                 };
-                let mut ext_ids = self.ext_ids.write().unwrap();
-                for ch in &fetched {
-                    if !ch.ext_id.is_empty() {
-                        ext_ids.insert(ch.content_id.clone(), ch.ext_id.clone());
+                self.commit_if_current(generation, || {
+                    let mut ext_ids = self.ext_ids.write().unwrap();
+                    for ch in &fetched {
+                        if !ch.ext_id.is_empty() {
+                            ext_ids.insert(ch.content_id.clone(), ch.ext_id.clone());
+                        }
                     }
-                }
-                drop(ext_ids);
-                if let Some(m) = mirrors {
-                    *self.mirrors.write().unwrap() = m;
-                }
-                *self.catalogue.write().unwrap() = fetched;
-                *self.catalogue_fetched_at.write().unwrap() = Some(Instant::now());
+                    drop(ext_ids);
+                    if let Some(m) = mirrors {
+                        *self.mirrors.write().unwrap() = m;
+                    }
+                    *self.catalogue.write().unwrap() = fetched;
+                    *self.catalogue_fetched_at.write().unwrap() = Some(Instant::now());
+                    // Committed with the catalogue it describes, so an obsolete
+                    // refresh cannot mark a cleared state as entitlement-filtered.
+                    self.entitlements_applied
+                        .store(applied, std::sync::atomic::Ordering::Relaxed);
+                });
             }
             Err(e) => tracing::warn!("extras: cannot fetch channels: {e}"),
         }
@@ -419,6 +471,7 @@ impl ExtrasState {
         let client = self
             .client()
             .ok_or_else(|| anyhow::anyhow!("extras is not enabled"))?;
+        let generation = self.generation();
         if let Some((result, at)) = self.live.read().unwrap().get(content_id).cloned() {
             if at.elapsed() < LIVE_TTL {
                 return Ok(result);
@@ -444,23 +497,30 @@ impl ExtrasState {
         };
         let result = resp.to_live_url_output();
 
-        if !resp.data.ext_id.is_empty() {
-            self.ext_ids
-                .write()
-                .unwrap()
-                .insert(content_id.to_string(), resp.data.ext_id.clone());
-        }
-        for stream in [&result.mpd.auto, &result.result] {
-            if let Ok(u) = url::Url::parse(stream) {
-                if let Some(host) = u.host_str() {
-                    self.cdn_hosts.write().unwrap().insert(host.to_string());
+        // An account switch during the fetch leaves `result` belonging to the
+        // previous account: do not cache it and do not hand it to the caller.
+        let stored = self.commit_if_current(generation, || {
+            if !resp.data.ext_id.is_empty() {
+                self.ext_ids
+                    .write()
+                    .unwrap()
+                    .insert(content_id.to_string(), resp.data.ext_id.clone());
+            }
+            for stream in [&result.mpd.auto, &result.result] {
+                if let Ok(u) = url::Url::parse(stream) {
+                    if let Some(host) = u.host_str() {
+                        self.cdn_hosts.write().unwrap().insert(host.to_string());
+                    }
                 }
             }
+            self.live
+                .write()
+                .unwrap()
+                .insert(content_id.to_string(), (result.clone(), Instant::now()));
+        });
+        if stored.is_none() {
+            anyhow::bail!("the active account changed while resolving {content_id}; retry");
         }
-        self.live
-            .write()
-            .unwrap()
-            .insert(content_id.to_string(), (result.clone(), Instant::now()));
 
         let has_dash = has_dash(&result);
         let mut dash_map = self.dash.write().unwrap();
@@ -604,11 +664,14 @@ impl ExtrasState {
         })
     }
 
+    /// `on_installed` is forwarded to the client and runs as soon as the
+    /// verified credentials are installed (see `Client::verify_otp`).
     pub async fn verify_otp(
         &self,
         number: &str,
         otp: &str,
         store: &crate::store::Store,
+        on_installed: impl FnOnce(),
     ) -> anyhow::Result<bool> {
         let client = self
             .client()
@@ -625,7 +688,10 @@ impl ExtrasState {
             }
             p.identifier.clone()
         };
-        let result = client.verify_otp(&number, &identifier, otp).await;
+        let before = self.credentials_marker();
+        let result = client
+            .verify_otp(&number, &identifier, otp, on_installed)
+            .await;
         // Save even on a failed exchange: the SSO token is valid and the
         // exchange can be retried without another OTP.
         if let Some(cr) = client.credentials() {
@@ -641,7 +707,15 @@ impl ExtrasState {
                 self.init(&reqwest::Client::new(), store);
                 Ok(true)
             }
-            Err(_) => Ok(false),
+            Err(_) => {
+                // The OTP can verify and the token exchange still fail, which
+                // has already replaced the account's credentials; the previous
+                // account's caches must not outlive that.
+                if self.credentials_marker() != before {
+                    self.clear_catalogue_state();
+                }
+                Ok(false)
+            }
         }
     }
 
@@ -690,6 +764,12 @@ impl ExtrasState {
 
 #[cfg(test)]
 impl ExtrasState {
+    pub fn set_endpoints_for_test(&self, endpoints: crate::extras::Endpoints) {
+        self.client()
+            .expect("test extras client must be initialized")
+            .set_endpoints(endpoints);
+    }
+
     pub fn prime_for_test(
         &self,
         credentials: Credentials,
@@ -725,6 +805,86 @@ use crate::television::has_dash;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn obsolete_catalogue_refresh_cannot_mark_cleared_state_as_filtered() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user/v2/subscription"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200,
+                "data": {"subscriptions": {"JioCinema-Premium": true}}
+            })))
+            .mount(&server)
+            .await;
+        // The channel fetch is slow enough for an account switch to land mid-flight.
+        Mock::given(method("GET"))
+            .and(path("/metadata/v2/livechannels"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"data": {}}))
+                    .set_delay(std::time::Duration::from_millis(400)),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().to_str().unwrap()).unwrap();
+        let s = Arc::new(ExtrasState::new(true, None));
+        s.init(&reqwest::Client::new(), &store);
+        s.set_endpoints_for_test(crate::extras::Endpoints {
+            content: server.uri(),
+            user_api: server.uri(),
+            ..Default::default()
+        });
+        s.client().unwrap().set_credentials(Some(Credentials {
+            sso_token: "redacted-sso".into(),
+            subscriber_id: "redacted-sub".into(),
+            user_id: "redacted-user".into(),
+            auth_token: "redacted-access".into(),
+            ..Default::default()
+        }));
+        let tv = Arc::new(Television::new(reqwest::Client::new()));
+        tv.set_channels_for_test(Vec::new());
+
+        let refresh = {
+            let (s, tv) = (s.clone(), tv.clone());
+            tokio::spawn(async move { s.refresh_catalogue_if_needed(&tv).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        s.invalidate_account_context();
+        refresh.await.unwrap();
+
+        assert!(!s.entitlements_applied(), "obsolete refresh set the flag");
+        assert!(s.catalogue_channels().is_empty());
+        assert_eq!(s.entitlement_status(), EntitlementStatus::Unknown);
+    }
+
+    #[test]
+    fn commits_apply_only_in_the_generation_they_started_in() {
+        let s = ExtrasState::new(false, None);
+        let started = s.generation();
+        assert_eq!(s.commit_if_current(started, || 7), Some(7));
+        // An account switch clears the caches and bumps the generation.
+        s.invalidate_account_context();
+        assert_ne!(s.generation(), started);
+        assert_eq!(
+            s.commit_if_current(started, || unreachable!("stale fetch must not commit")),
+            None
+        );
+        assert_eq!(s.commit_if_current(s.generation(), || 1), Some(1));
+    }
+
+    #[test]
+    fn clearing_the_live_cache_also_invalidates_in_flight_fetches() {
+        let s = ExtrasState::new(false, None);
+        let started = s.generation();
+        s.clear_live();
+        assert_eq!(s.commit_if_current(started, || ()), None);
+    }
 
     #[test]
     fn disabled_state_reports_not_connected() {

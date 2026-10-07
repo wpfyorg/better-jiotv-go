@@ -99,22 +99,14 @@ export async function createShakaPlayer(container, video) {
   const ui = new shaka.ui.Overlay(player, container, video);
   ui.configure({
     addBigPlayButton: false,
+    addSeekBar: false,
     fadeDelay: 3,
-    enableKeyboardPlaybackControls: true,
-    enableTooltips: true,
-    singleClickForPlayAndPause: true,
-    doubleClickForFullscreen: true,
-    controlPanelElements: ["play_pause", "time_and_duration", "spacer", "mute", "volume", "quality", "fullscreen", "overflow_menu"],
-    overflowMenuButtons: ["captions", "language", "picture_in_picture", "playback_rate"],
-    seekBarColors: {
-      base: "rgba(255,255,255,.22)",
-      buffered: "rgba(255,255,255,.48)",
-      played: "#5b8cff",
-    },
-    volumeBarColors: {
-      base: "rgba(255,255,255,.28)",
-      level: "#ffffff",
-    },
+    enableKeyboardPlaybackControls: false,
+    enableTooltips: false,
+    singleClickForPlayAndPause: false,
+    doubleClickForFullscreen: false,
+    controlPanelElements: [],
+    overflowMenuButtons: [],
   });
 
   player.configure({

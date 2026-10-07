@@ -15,6 +15,10 @@
   let showMeta = $state(true);
   let clock = $state(Date.now());
   let programToast = $state("");
+  let paused = $state(false);
+  let muted = $state(false);
+  let showQualityMenu = $state(false);
+  let showMoreMenu = $state(false);
   let cleanup = null;
   let runID = 0;
   let activityTimer = null;
@@ -24,6 +28,12 @@
 
   let currentProgramIndex = $derived(guide.findIndex((program) => isNow(program, clock)));
   let currentProgram = $derived(currentProgramIndex >= 0 ? guide[currentProgramIndex] : null);
+  let programProgress = $derived.by(() => {
+    if (!currentProgram) return 0;
+    const duration = currentProgram.endEpoch - currentProgram.startEpoch;
+    if (duration <= 0) return 0;
+    return Math.max(0, Math.min(100, ((clock - currentProgram.startEpoch) / duration) * 100));
+  });
 
   function gated(path) {
     return keyBase ? keyBase + path.replace(/^\//, "") : path;
@@ -70,6 +80,62 @@
     showMeta = true;
     clearTimeout(activityTimer);
     activityTimer = setTimeout(() => (showMeta = false), 3000);
+  }
+
+  function formatElapsed(ms) {
+    const seconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(seconds / 60);
+    return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+  }
+
+  async function togglePlayback() {
+    if (!video) return;
+    markActivity();
+    if (video.paused) {
+      try {
+        await video.play();
+      } catch {
+        showPlaybackError(new Error("playback failed"));
+      }
+    } else {
+      video.pause();
+    }
+  }
+
+  function toggleMute() {
+    if (!video) return;
+    video.muted = !video.muted;
+    muted = video.muted;
+    markActivity();
+  }
+
+  async function toggleFullscreen() {
+    markActivity();
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen?.();
+      } else {
+        await playerContainer?.requestFullscreen?.();
+      }
+    } catch {}
+  }
+
+  async function togglePictureInPicture() {
+    showMoreMenu = false;
+    markActivity();
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture?.();
+      } else {
+        await video?.requestPictureInPicture?.();
+      }
+    } catch {}
+  }
+
+  function chooseQuality(option) {
+    quality = option;
+    showQualityMenu = false;
+    markActivity();
   }
 
   function updateClock() {
@@ -125,6 +191,10 @@
     await cleanup?.();
     cleanup = null;
     setPlayerState("loading", "Live TV", "Starting live TV…", "");
+    paused = false;
+    muted = Boolean(video?.muted);
+    showQualityMenu = false;
+    showMoreMenu = false;
     markActivity();
 
     try {
@@ -150,7 +220,16 @@
       const session = await createShakaPlayer(playerContainer, video);
       const player = session.player;
       const onPlaying = () => {
-        if (thisRun === runID) setPlayerState("playing", "", "", "");
+        if (thisRun === runID) {
+          paused = false;
+          setPlayerState("playing", "", "", "");
+        }
+      };
+      const onPause = () => {
+        if (thisRun === runID) paused = true;
+      };
+      const onVolumeChange = () => {
+        if (thisRun === runID) muted = Boolean(video?.muted);
       };
       const onWaiting = () => {
         if (thisRun === runID && !fullStageKinds.has(playerState.kind)) setPlayerState("buffering", "Live TV", "Buffering…", "");
@@ -159,10 +238,14 @@
         if (thisRun === runID && !fullStageKinds.has(playerState.kind)) setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
       };
       video.addEventListener("playing", onPlaying);
+      video.addEventListener("pause", onPause);
+      video.addEventListener("volumechange", onVolumeChange);
       video.addEventListener("waiting", onWaiting);
       video.addEventListener("stalled", onStalled);
       cleanup = async () => {
         video?.removeEventListener("playing", onPlaying);
+        video?.removeEventListener("pause", onPause);
+        video?.removeEventListener("volumechange", onVolumeChange);
         video?.removeEventListener("waiting", onWaiting);
         video?.removeEventListener("stalled", onStalled);
         await session.destroy().catch(() => {});
@@ -267,17 +350,72 @@
     bind:this={playerContainer}
     onpointermove={markActivity}
     onpointerdown={markActivity}
+    ontouchstart={markActivity}
     onkeydown={markActivity}
     onfocusin={markActivity}
   >
     <!-- svelte-ignore a11y_media_has_caption -->
     <video bind:this={video} autoplay playsinline></video>
-    {#if showMeta && !fullStageKinds.has(playerState.kind)}
-      <div class="player-meta" aria-hidden="true">
-        <span class="live-pill"><span></span>LIVE</span>
-        <div class="player-copy">
-          <strong>{channel?.name ?? id}</strong>
-          {#if currentProgram}<small>{currentProgram.showname}</small>{/if}
+    {#if showMeta && playerState.kind === "playing"}
+      <div class="player-controls">
+        <div class="controls-scrim" aria-hidden="true"></div>
+        <div class="player-meta" aria-hidden="true">
+          <div class="player-meta-top">
+            <span class="live-pill"><span></span>LIVE</span>
+            <strong>{channel?.name ?? id}</strong>
+          </div>
+          {#if currentProgram}<strong class="player-program">{currentProgram.showname}</strong>{/if}
+          {#if currentProgram?.description}<span class="player-program-description">{currentProgram.description}</span>{/if}
+        </div>
+        <div class="player-seek" aria-hidden="true"><span style:width={`${programProgress}%`}></span></div>
+        <div class="player-control-row">
+          <div class="player-control-left">
+            <button class="icon-control" onclick={togglePlayback} aria-label={paused ? "Resume live playback" : "Pause live playback"}>
+              {#if paused}
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z" /></svg>
+              {:else}
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>
+              {/if}
+            </button>
+            <button class="icon-control" onclick={toggleMute} aria-label={muted ? "Unmute" : "Mute"}>
+              {#if muted}
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4Z" /><path fill="none" d="m17 9 4 6M21 9l-4 6" /></svg>
+              {:else}
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4Z" /><path fill="none" d="M16 9.5a4 4 0 0 1 0 5M18.5 7a7.5 7.5 0 0 1 0 10" /></svg>
+              {/if}
+            </button>
+            <span class="player-live-clock">LIVE <span aria-hidden="true">•</span> {formatElapsed(currentProgram ? clock - currentProgram.startEpoch : 0)}</span>
+          </div>
+          <div class="player-control-right">
+            <div class="control-menu-wrap">
+              <button class="quality-control" onclick={() => { showQualityMenu = !showQualityMenu; showMoreMenu = false; markActivity(); }} aria-haspopup="menu" aria-expanded={showQualityMenu}>
+                {channel?.hd ? "HD" : quality === "auto" ? "Auto" : quality[0].toUpperCase() + quality.slice(1)}
+              </button>
+              {#if showQualityMenu}
+                <div class="control-menu quality-menu" role="menu" aria-label="Playback quality">
+                  {#each ["auto", "high", "medium", "low"] as option}
+                    <button class:active={quality === option} role="menuitemradio" aria-checked={quality === option} onclick={() => chooseQuality(option)}>{option === "auto" ? "Auto" : option[0].toUpperCase() + option.slice(1)}</button>
+                  {/each}
+                </div>
+              {/if}
+            </div>
+            <div class="control-menu-wrap">
+              <button class="icon-control" onclick={() => { showMoreMenu = !showMoreMenu; showQualityMenu = false; markActivity(); }} aria-label="More player options" aria-haspopup="menu" aria-expanded={showMoreMenu}>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="12" cy="19" r="1.5" /></svg>
+              </button>
+              {#if showMoreMenu}
+                <div class="control-menu more-menu" role="menu" aria-label="More player options">
+                  {#if video?.requestPictureInPicture || document.pictureInPictureElement}
+                    <button role="menuitem" onclick={togglePictureInPicture}>Picture in picture</button>
+                  {/if}
+                  <button role="menuitem" onclick={() => { showMoreMenu = false; start(id, quality); }}>Restart stream</button>
+                </div>
+              {/if}
+            </div>
+            <button class="icon-control" onclick={toggleFullscreen} aria-label="Toggle fullscreen">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" /></svg>
+            </button>
+          </div>
         </div>
       </div>
     {/if}
@@ -380,22 +518,64 @@
     box-shadow: 0 22px 60px rgba(0, 0, 0, .28);
   }
   video { width: 100%; height: 100%; display: block; background: #000; }
-  .player-meta {
+  .player-controls {
     position: absolute;
-    z-index: 2;
-    top: 16px;
-    left: 16px;
+    z-index: 12;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 0 24px 23px;
+    pointer-events: none;
+    color: #fff;
+  }
+  .controls-scrim {
+    position: absolute;
+    z-index: -1;
+    inset: 0;
+    background: linear-gradient(180deg, transparent 58%, rgba(0, 0, 0, .16) 68%, rgba(0, 0, 0, .72) 100%);
+  }
+  .player-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: min(76%, 700px);
+    margin-bottom: 16px;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, .7);
+  }
+  .player-meta-top {
     display: flex;
     align-items: center;
-    gap: 10px;
-    max-width: min(70%, 520px);
-    padding: 8px 11px;
-    border: 1px solid rgba(255, 255, 255, .11);
-    border-radius: 12px;
-    color: #fff;
-    background: rgba(8, 10, 14, .62);
-    backdrop-filter: blur(12px);
-    pointer-events: none;
+    gap: 8px;
+    min-width: 0;
+  }
+  .player-meta-top > strong {
+    overflow: hidden;
+    color: #d4dae4;
+    font-size: 11px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .player-program {
+    max-width: 100%;
+    overflow: hidden;
+    font-size: 20px;
+    line-height: 1.15;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .player-program-description {
+    width: min(100%, 481px);
+    overflow: hidden;
+    color: #8c96a8;
+    font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1.35;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .live-pill {
     display: inline-flex;
@@ -404,16 +584,62 @@
     flex: 0 0 auto;
     padding: 3px 7px;
     border-radius: 999px;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 800;
-    letter-spacing: .08em;
+    letter-spacing: .04em;
     background: rgba(220, 38, 38, .92);
   }
-  .live-pill span { width: 5px; height: 5px; border-radius: 50%; background: #fff; box-shadow: 0 0 0 3px rgba(255, 255, 255, .15); }
-  .player-copy { min-width: 0; display: flex; flex-direction: column; line-height: 1.2; }
-  .player-copy strong, .player-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .player-copy strong { font-size: 13px; }
-  .player-copy small { margin-top: 2px; color: rgba(255, 255, 255, .72); font-size: 11px; }
+  .live-pill span { width: 5px; height: 5px; border-radius: 50%; background: #fff; }
+  .player-seek {
+    width: 100%;
+    height: 3px;
+    overflow: hidden;
+    margin-bottom: 14px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .22);
+  }
+  .player-seek span { display: block; height: 100%; border-radius: inherit; background: #6c8fff; }
+  .player-control-row { display: flex; align-items: center; justify-content: space-between; min-height: 52px; gap: 16px; }
+  .player-control-left, .player-control-right { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .player-control-row button { pointer-events: auto; }
+  .icon-control, .quality-control {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 38px;
+    min-width: 38px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    color: #fff;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+  }
+  .icon-control:hover, .quality-control:hover, .icon-control:focus-visible, .quality-control:focus-visible { border-color: rgba(255, 255, 255, .14); background: rgba(255, 255, 255, .08); }
+  .icon-control:focus-visible, .quality-control:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  .icon-control svg { width: 22px; height: 22px; fill: currentColor; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-control svg path[fill="none"] { fill: none; }
+  .player-live-clock { margin-left: 2px; color: #d4dae4; font-size: 11px; font-weight: 600; letter-spacing: .01em; white-space: nowrap; }
+  .quality-control { height: 30px; min-width: 38px; padding: 0 9px; border-color: rgba(255, 255, 255, .13); background: rgba(255, 255, 255, .09); font-size: 10px; font-weight: 800; }
+  .control-menu-wrap { position: relative; pointer-events: auto; }
+  .control-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 8px);
+    display: flex;
+    min-width: 150px;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+    border: 1px solid rgba(255, 255, 255, .12);
+    border-radius: 10px;
+    background: rgba(8, 10, 14, .96);
+    box-shadow: 0 14px 36px rgba(0, 0, 0, .34);
+    backdrop-filter: blur(14px);
+  }
+  .control-menu button { min-height: 34px; padding: 0 10px; border: 0; border-radius: 7px; color: #d4dae4; background: transparent; text-align: left; font: inherit; font-size: 11px; cursor: pointer; }
+  .control-menu button:hover, .control-menu button.active { color: #fff; background: rgba(255, 255, 255, .08); }
   .player-progress {
     position: absolute;
     z-index: 8;
@@ -581,11 +807,23 @@
   @media (max-width: 640px) {
     .layout { gap: 14px; }
     .stage { border-radius: 12px; box-shadow: 0 14px 36px rgba(0, 0, 0, .22); }
-    .player-meta { top: 10px; left: 10px; max-width: calc(100% - 20px); padding: 6px 8px; border-radius: 9px; }
     .live-pill { padding: 2px 6px; font-size: 9px; }
-    .player-copy strong { font-size: 12px; }
-    .player-copy small { display: none; }
-    .program-toast { left: 10px; bottom: 56px; max-width: calc(100% - 20px); }
+    .player-controls { padding: 0 10px 9px; }
+    .player-meta { gap: 2px; max-width: 82%; margin-bottom: 9px; }
+    .player-meta-top { gap: 6px; }
+    .player-meta-top > strong { font-size: 8.5px; }
+    .player-program { font-size: 13px; }
+    .player-program-description { font-size: 8px; line-height: 1.3; }
+    .player-seek { height: 2px; margin-bottom: 6px; }
+    .player-control-row { min-height: 28px; gap: 8px; }
+    .player-control-left, .player-control-right { gap: 2px; }
+    .icon-control { width: 28px; min-width: 28px; height: 28px; border-radius: 7px; }
+    .icon-control svg { width: 14px; height: 14px; }
+    .quality-control { height: 24px; min-width: 30px; padding: 0 6px; border-radius: 7px; font-size: 8px; }
+    .player-live-clock { margin-left: 1px; font-size: 7.5px; }
+    .control-menu { min-width: 132px; bottom: calc(100% + 5px); }
+    .control-menu button { min-height: 30px; font-size: 10px; }
+    .program-toast { left: 10px; bottom: 92px; max-width: calc(100% - 20px); }
     .error-detail { font-size: 12px; }
     .error-actions { margin-top: 18px; }
     aside { gap: 16px; padding-top: 0; }

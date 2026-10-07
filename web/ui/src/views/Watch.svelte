@@ -19,11 +19,11 @@
   let runID = 0;
   let activityTimer = null;
   let toastTimer = null;
-  let lastProgram = "";
 
   const fullStageKinds = new Set(["offline", "playback", "no-stream", "protected", "subscription", "restricted", "extras-signin", "extras-status", "service"]);
 
-  let currentProgram = $derived(guide.find((program) => isNow(program, clock)) ?? null);
+  let currentProgramIndex = $derived(guide.findIndex((program) => isNow(program, clock)));
+  let currentProgram = $derived(currentProgramIndex >= 0 ? guide[currentProgramIndex] : null);
 
   function gated(path) {
     return keyBase ? keyBase + path.replace(/^\//, "") : path;
@@ -72,6 +72,18 @@
     activityTimer = setTimeout(() => (showMeta = false), 3000);
   }
 
+  function updateClock() {
+    const previousTitle = currentProgram?.showname || "";
+    const nextClock = Date.now();
+    const nextTitle = guide.find((program) => isNow(program, nextClock))?.showname || "";
+    clock = nextClock;
+    if (previousTitle && nextTitle && previousTitle !== nextTitle) {
+      programToast = nextTitle;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => (programToast = ""), 4200);
+    }
+  }
+
   async function tapToPlay() {
     if (!video) return;
     video.muted = false;
@@ -95,7 +107,6 @@
     channel = null;
     guide = [];
     guideError = "";
-    lastProgram = "";
     programToast = "";
     loadChannels()
       .then((list) => (channel = list.find((c) => c.id === current) ?? null))
@@ -106,17 +117,6 @@
         guide = (d?.epg ?? []).filter((p) => p.endEpoch > now).slice(0, 8);
       })
       .catch((err) => (guideError = err.message));
-  });
-
-  $effect(() => {
-    const title = currentProgram?.showname || "";
-    if (!title) return;
-    if (lastProgram && lastProgram !== title) {
-      programToast = title;
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => (programToast = ""), 4200);
-    }
-    lastProgram = title;
   });
 
   async function start(channelID, q) {
@@ -228,7 +228,7 @@
   });
 
   onMount(() => {
-    const clockTimer = setInterval(() => (clock = Date.now()), 15000);
+    const clockTimer = setInterval(updateClock, 15000);
     const onOffline = () => setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
     const onOnline = () => {
       setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
@@ -343,17 +343,17 @@
     {:else}
       <ol class="guide">
         {#each guide as p, i}
-          <li class:now={isNow(p)}>
+          <li class:now={isNow(p, clock)}>
             <span class="time">
-              {#if isNow(p)}<span class="status-dot"></span>{/if}
+              {#if isNow(p, clock)}<span class="status-dot"></span>{/if}
               {formatTime(p.startEpoch)}
             </span>
             <span class="program-copy">
               <span class="program-line">
                 <strong>{p.showname}</strong>
-                {#if isNow(p)}<em>NOW</em>{:else if i === 1}<em class="next">NEXT</em>{/if}
+                {#if isNow(p, clock)}<em>NOW</em>{:else if i === currentProgramIndex + 1}<em class="next">NEXT</em>{/if}
               </span>
-              {#if isNow(p) && p.description}<span class="desc muted">{p.description}</span>{/if}
+              {#if isNow(p, clock) && p.description}<span class="desc muted">{p.description}</span>{/if}
             </span>
           </li>
         {/each}

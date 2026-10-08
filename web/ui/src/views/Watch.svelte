@@ -16,6 +16,7 @@
   let channel = $state(null);
   let guide = $state([]);
   let guideError = $state("");
+  let guideLoading = $state(true);
   let playerContainer = $state();
   let video = $state();
   let playerState = $state({ kind: "loading", eyebrow: "Live TV", title: "Starting live TV…", detail: "" });
@@ -234,6 +235,7 @@
     channel = null;
     guide = [];
     guideError = "";
+    guideLoading = true;
     programToast = "";
     loadChannels()
       .then((list) => (channel = list.find((c) => c.id === current) ?? null))
@@ -242,8 +244,12 @@
       .then((d) => {
         const now = Date.now();
         guide = (d?.epg ?? []).filter((p) => p.endEpoch > now).slice(0, 8);
+        guideLoading = false;
       })
-      .catch((err) => (guideError = err.message));
+      .catch((err) => {
+        guideError = err.message;
+        guideLoading = false;
+      });
   });
 
   async function start(channelID, q) {
@@ -536,8 +542,10 @@
     <div class="section-title guide-title"><span>Program guide</span><small class="muted">Live schedule</small></div>
     {#if guideError}
       <p class="empty muted">No guide for this channel.</p>
-    {:else if guide.length === 0}
+    {:else if guideLoading}
       <p class="empty muted">Loading schedule…</p>
+    {:else if guide.length === 0}
+      <p class="empty muted">No schedule available.</p>
     {:else}
       <ol class="guide">
         {#each guide as p, i}

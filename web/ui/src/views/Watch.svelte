@@ -106,7 +106,7 @@
         return;
       }
       showMeta = false;
-    }, 3000);
+    }, 8000);
   }
 
   function handlePlayerKeydown(event) {
@@ -559,7 +559,7 @@
                 <strong>{p.showname}</strong>
                 {#if isNow(p, clock)}<em>NOW</em>{:else if i === currentProgramIndex + 1}<em class="next">NEXT</em>{/if}
               </span>
-              {#if isNow(p, clock) && p.description}<span class="desc muted">{p.description}</span>{/if}
+              {#if p.description}<span class="desc">{p.description}</span>{/if}
             </span>
           </li>
         {/each}
@@ -593,6 +593,8 @@
     pointer-events: none;
     color: #fff;
   }
+  /* Shaka's built-in spinner otherwise appears behind our loading status. */
+  .stage :global(.shaka-spinner-container) { display: none !important; }
   .controls-scrim {
     position: absolute;
     z-index: -1;
@@ -603,10 +605,17 @@
     display: flex;
     flex-direction: column;
     align-items: flex-start;
-    gap: 2px;
-    width: min(76%, 700px);
+    gap: 5px;
+    width: min(100%, 760px);
+    max-height: min(48%, 320px);
+    overflow-y: auto;
     margin-bottom: 16px;
-    text-shadow: 0 1px 4px rgba(0, 0, 0, .7);
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 255, 255, .14);
+    border-radius: 12px;
+    background: rgba(0, 0, 0, .84);
+    text-shadow: 0 1px 3px rgba(0, 0, 0, .85);
+    pointer-events: auto;
   }
   .player-meta-top {
     display: flex;
@@ -615,31 +624,26 @@
     min-width: 0;
   }
   .player-meta-top > strong {
-    overflow: hidden;
     color: #d4dae4;
     font-size: 11px;
     font-weight: 600;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
   }
   .player-program {
     max-width: 100%;
-    overflow: hidden;
     font-size: 20px;
-    line-height: 1.15;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
   }
   .player-program-description {
-    width: min(100%, 481px);
-    overflow: hidden;
-    color: #8c96a8;
+    width: 100%;
+    color: #e2e7f0;
     font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 400;
-    line-height: 1.35;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    line-height: 1.55;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .live-pill {
     display: inline-flex;
@@ -808,7 +812,7 @@
   }
   .channel-card img { width: 58px; height: 42px; flex: 0 0 auto; object-fit: contain; background: var(--surface-2); border-radius: 10px; padding: 6px; }
   .channel-copy { min-width: 0; }
-  h1 { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 20px; line-height: 1.2; letter-spacing: -.02em; }
+  h1 { margin: 0; font-size: 20px; line-height: 1.3; letter-spacing: -.02em; overflow-wrap: anywhere; }
   .subscription-notice { margin: 8px 0 0; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); border-radius: 8px; color: var(--danger); font-size: 13px; }
   h1 + p { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; font-size: 12px; }
   .section-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px; font-weight: 750; letter-spacing: .035em; }
@@ -844,11 +848,11 @@
   .time { display: flex; align-items: flex-start; gap: 6px; padding-top: 1px; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
   .status-dot { width: 6px; height: 6px; margin-top: 5px; border-radius: 50%; background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .13); }
   .program-copy { min-width: 0; }
-  .program-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
-  .program-line strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 1.35; }
+  .program-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; min-width: 0; }
+  .program-line strong { min-width: 0; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
   .program-line em { flex: 0 0 auto; padding: 1px 5px; border-radius: 999px; color: #fff; background: #dc2626; font-size: 8px; font-style: normal; font-weight: 800; letter-spacing: .06em; }
   .program-line em.next { color: var(--muted); background: var(--surface); }
-  .desc { display: -webkit-box; overflow: hidden; margin-top: 4px; font-size: 11.5px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .desc { display: block; margin-top: 5px; color: #c5cedd; font-size: 13px; line-height: 1.6; white-space: normal; overflow-wrap: anywhere; }
   .back-link {
     display: inline-flex;
     align-items: center;
@@ -867,27 +871,30 @@
 
   @media (max-width: 1050px) {
     .layout { grid-template-columns: 1fr; gap: 20px; }
-    aside { width: min(100%, 760px); }
+    aside { width: 100%; }
   }
 
   @media (orientation: landscape) and (max-height: 500px) {
     .stage { width: min(100%, calc((100dvh - 100px) * 16 / 9)); margin-inline: auto; }
   }
-  @media (max-width: 420px) {
-    .player-error { padding: 12px; }
-    .error-detail { font-size: 11px; }
-  }
-
   @media (max-width: 640px) {
     .layout { gap: 14px; }
     .stage { border-radius: 12px; box-shadow: 0 14px 36px rgba(0, 0, 0, .22); }
+    .stage.has-overlay { width: 100%; min-height: 350px; aspect-ratio: auto; }
+    .player-error { padding: 18px 14px; }
+    .error-mark { width: 34px; height: 34px; margin-bottom: 10px; }
+    .error-eyebrow { margin-bottom: 5px; font-size: 10px; }
+    .player-error h2 { font-size: 21px; }
+    .error-detail { margin-top: 9px; font-size: 13px; line-height: 1.5; }
+    .error-actions { gap: 8px; margin-top: 15px; max-width: 100%; }
+    .error-actions button, .error-actions a { max-width: 100%; padding: 8px 12px; text-align: center; }
     .live-pill { padding: 2px 6px; font-size: 9px; }
     .player-controls { padding: 0 10px 9px; }
-    .player-meta { gap: 2px; max-width: 82%; margin-bottom: 9px; }
+    .player-meta { gap: 4px; width: 100%; max-height: 46%; margin-bottom: 9px; padding: 8px 10px; }
     .player-meta-top { gap: 6px; }
-    .player-meta-top > strong { font-size: 8.5px; }
-    .player-program { font-size: 13px; }
-    .player-program-description { font-size: 8px; line-height: 1.3; }
+    .player-meta-top > strong { font-size: 11px; }
+    .player-program { font-size: 15px; }
+    .player-program-description { font-size: 12px; line-height: 1.45; }
     .player-seek { height: 2px; margin-bottom: 6px; }
     .player-control-row { min-height: 28px; gap: 8px; }
     .player-control-left, .player-control-right { gap: 2px; }
@@ -898,14 +905,16 @@
     .control-menu { min-width: 132px; bottom: calc(100% + 5px); }
     .control-menu button { min-height: 30px; font-size: 10px; }
     .program-toast { left: 10px; bottom: 92px; max-width: calc(100% - 20px); }
-    .error-detail { font-size: 12px; }
-    .error-actions { margin-top: 18px; }
     aside { gap: 16px; padding-top: 0; }
     .channel-card { padding: 8px; }
     .channel-card img { width: 52px; height: 38px; }
     h1 { font-size: 18px; }
     .quality-options button { padding: 7px 3px; font-size: 10.5px; }
     .guide li { grid-template-columns: 56px minmax(0, 1fr); padding: 8px; }
-    .desc { -webkit-line-clamp: 3; }
+  }
+  @media (max-width: 360px) {
+    .stage.has-overlay { min-height: 380px; }
+    .error-actions { flex-direction: column; width: 100%; }
+    .error-actions button, .error-actions a { width: 100%; }
   }
 </style>

@@ -88,7 +88,7 @@
       <a class="brand" href="#/">JioTV Go</a>
       {#if extrasActive}
         <span class="extras-active" role="img" aria-label="Extras connected" title="Extras connected">
-          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.2 6.2 11 13 4.8" /></svg>
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
         </span>
       {/if}
     </div>

@@ -1,0 +1,201 @@
+#!/bin/sh
+set -eu
+
+umask 077
+
+STORE=${JIOTV_STORE:-/etc/jiotv/store_v4.toml}
+DATA_DIR=${JIOTV_DATA_DIR:-/etc/jiotv}
+TV_TOKEN="$DATA_DIR/token-tv"
+EXTRA_TOKEN="$DATA_DIR/token-extra"
+SERVICE=${JIOTV_SERVICE:-/etc/init.d/jiotv}
+
+TV_RE='^(ssoToken|crm|uniqueId|accessToken|refreshToken|lastTokenRefreshTime|lastSSOTokenRefreshTime)[[:space:]]*='
+EXTRA_RE='^(extras_credentials|extras_device|extras_stream_kinds|extras_unlocked)[[:space:]]*='
+ALL_RE='^(ssoToken|crm|uniqueId|accessToken|refreshToken|lastTokenRefreshTime|lastSSOTokenRefreshTime|extras_credentials|extras_device|extras_stream_kinds|extras_unlocked)[[:space:]]*='
+
+die() {
+  echo "jiotv-token: $*" >&2
+  exit 1
+}
+
+require_store() {
+  [ -f "$STORE" ] || die "store not found: $STORE"
+}
+
+service_running() {
+  "$SERVICE" status >/dev/null 2>&1
+}
+
+key_count() {
+  file=$1
+  re=$2
+  [ -f "$file" ] || {
+    echo 0
+    return
+  }
+  awk -v re="$re" '$0 ~ re { n++ } END { print n + 0 }' "$file"
+}
+
+save_tv() {
+  require_store
+  if ! grep -Eq '^(ssoToken|accessToken)[[:space:]]*=' "$STORE"; then
+    die "no TV credentials are present; log in to JioTV first"
+  fi
+  tmp="$TV_TOKEN.new.$$"
+  awk -v re="$TV_RE" '$0 ~ re { print }' "$STORE" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$TV_TOKEN"
+  echo "saved TV snapshot: $(key_count "$TV_TOKEN" "$TV_RE") credential keys"
+}
+
+save_extra() {
+  require_store
+  if ! grep -Eq '^extras_credentials[[:space:]]*=' "$STORE"; then
+    die "no Extra credentials are present; connect Extra channels first"
+  fi
+  tmp="$EXTRA_TOKEN.new.$$"
+  awk -v re="$EXTRA_RE" '$0 ~ re { print }' "$STORE" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$EXTRA_TOKEN"
+  echo "saved Extra snapshot: $(key_count "$EXTRA_TOKEN" "$EXTRA_RE") state keys"
+}
+
+restore_uci() {
+  previous=$1
+  if [ "$previous" = __unset__ ]; then
+    uci -q delete jiotv.main.extras >/dev/null 2>&1 || true
+  else
+    uci set "jiotv.main.extras=$previous"
+  fi
+  uci commit jiotv
+}
+
+switch_mode() {
+  mode=$1
+  require_store
+
+  case "$mode" in
+    tv)
+      snapshot=$TV_TOKEN
+      [ -s "$snapshot" ] || die "TV snapshot missing; run: jiotv-token save tv"
+      grep -Eq '^(ssoToken|accessToken)[[:space:]]*=' "$snapshot" || die "TV snapshot is incomplete"
+      extras_value=0
+      ;;
+    extra)
+      snapshot=$EXTRA_TOKEN
+      [ -s "$snapshot" ] || die "Extra snapshot missing; run: jiotv-token save extra"
+      grep -Eq '^extras_credentials[[:space:]]*=' "$snapshot" || die "Extra snapshot is incomplete"
+      extras_value=1
+      ;;
+    *)
+      die "unknown mode: $mode"
+      ;;
+  esac
+
+  previous_extras=$(uci -q get jiotv.main.extras 2>/dev/null || echo __unset__)
+
+  "$SERVICE" stop
+  n=0
+  while service_running && [ "$n" -lt 10 ]; do
+    sleep 1
+    n=$((n + 1))
+  done
+  if service_running; then
+    "$SERVICE" start >/dev/null 2>&1 || true
+    die "service did not stop"
+  fi
+
+  stamp=$(date +%Y%m%d-%H%M%S)-$$
+  backup="$DATA_DIR/store_v4.toml.bak.$stamp"
+  cp -p "$STORE" "$backup"
+
+  tmp="$STORE.new.$$"
+  if ! awk -v re="$ALL_RE" '$0 !~ re { print }' "$STORE" > "$tmp"; then
+    cp -p "$backup" "$STORE"
+    "$SERVICE" start >/dev/null 2>&1 || true
+    die "could not prepare store"
+  fi
+  if ! cat "$snapshot" >> "$tmp"; then
+    cp -p "$backup" "$STORE"
+    "$SERVICE" start >/dev/null 2>&1 || true
+    die "could not restore snapshot"
+  fi
+  chmod 600 "$tmp"
+  mv "$tmp" "$STORE"
+
+  if ! uci set "jiotv.main.extras=$extras_value" || ! uci commit jiotv; then
+    cp -p "$backup" "$STORE"
+    restore_uci "$previous_extras"
+    "$SERVICE" start >/dev/null 2>&1 || true
+    die "could not update UCI; previous store restored"
+  fi
+
+  if ! "$SERVICE" start; then
+    cp -p "$backup" "$STORE"
+    restore_uci "$previous_extras"
+    "$SERVICE" start >/dev/null 2>&1 || true
+    die "new mode failed to start; previous store restored"
+  fi
+  sleep 2
+  if ! service_running; then
+    cp -p "$backup" "$STORE"
+    restore_uci "$previous_extras"
+    "$SERVICE" start >/dev/null 2>&1 || true
+    die "new mode is not running; previous store restored"
+  fi
+
+  echo "mode=$mode"
+  echo "backup=$backup"
+  status
+}
+
+status() {
+  require_store
+  tv_count=$(key_count "$STORE" "$TV_RE")
+  extra_count=$(key_count "$STORE" "$EXTRA_RE")
+  tv_saved=$(key_count "$TV_TOKEN" "$TV_RE")
+  extra_saved=$(key_count "$EXTRA_TOKEN" "$EXTRA_RE")
+  extras_uci=$(uci -q get jiotv.main.extras 2>/dev/null || echo unset)
+  if service_running; then
+    service=running
+  else
+    service=stopped
+  fi
+  echo "service=$service"
+  echo "uci_extras=$extras_uci"
+  echo "store_tv_keys=$tv_count"
+  echo "store_extra_keys=$extra_count"
+  echo "saved_tv_keys=$tv_saved"
+  echo "saved_extra_keys=$extra_saved"
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  jiotv-token save tv
+  jiotv-token save extra
+  jiotv-token tv
+  jiotv-token extra
+  jiotv-token status
+EOF
+}
+
+case "${1:-}" in
+  save)
+    case "${2:-}" in
+      tv) save_tv ;;
+      extra) save_extra ;;
+      *) usage; exit 2 ;;
+    esac
+    ;;
+  tv|extra)
+    switch_mode "$1"
+    ;;
+  status)
+    status
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

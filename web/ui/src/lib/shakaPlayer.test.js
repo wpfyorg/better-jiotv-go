@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyPlaybackFailure, loadLiveSource, playbackHttpStatus, sourceDenialStatus, sourceResolutionFailure } from "./shakaPlayer.js";
+import { classifyPlaybackFailure, loadLiveSource, playbackHttpStatus, playWithAutoplay, sourceDenialStatus, sourceResolutionFailure } from "./shakaPlayer.js";
 
 function deferred() {
   let resolve;
@@ -407,4 +407,25 @@ test("recognizes the server's normalized extras subscription denial", () => {
   const notInPlan = { status: 500, message: "channel 301201 is not in your extras plan" };
   assert.equal(sourceDenialStatus(notInPlan), 401);
   assert.equal(sourceResolutionFailure(notInPlan), "provider_denied");
+});
+
+test("live autoplay can require an explicit user gesture without muting", async () => {
+  const blocked = { muted: true, play: async () => { throw new Error("autoplay blocked"); } };
+  assert.equal(await playWithAutoplay(blocked, { allowMutedFallback: false }), false);
+  assert.equal(blocked.muted, false);
+});
+
+test("live source reports autoplay result to custom controls", async () => {
+  const player = fakePlayer(() => Promise.resolve());
+  const blocked = { muted: false, play: async () => { throw new Error("autoplay blocked"); } };
+  const results = [];
+  await loadLiveSource({
+    player,
+    video: blocked,
+    source: { dash: false, url: "hls" },
+    allowMutedFallback: false,
+    onAutoplayResult: (played) => results.push(played),
+  });
+  assert.deepEqual(results, [false]);
+  assert.equal(blocked.muted, false);
 });

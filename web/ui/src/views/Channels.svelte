@@ -162,7 +162,7 @@
             {#if (mixedSources && c.extras) || c.requiresSubscription}
               <span class="flags">
                 {#if mixedSources && c.extras}<span class="flag flag-extras">Extra</span>{/if}
-                {#if c.requiresSubscription}<span class="flag flag-premium">Premium</span>{/if}
+                {#if c.requiresSubscription}<span class="flag flag-premium">Subscription required</span>{/if}
               </span>
             {/if}
           </span>
@@ -248,7 +248,7 @@
     font-size: 13px;
     font-weight: 600;
     line-height: 1.3;
-    min-height: 2.6em; /* reserve two lines so cards align */
+    min-height: 2.6em;
     overflow: hidden;
     overflow-wrap: anywhere;
     display: -webkit-box;
@@ -257,8 +257,6 @@
     line-clamp: 2;
   }
   .tags { display: flex; gap: 4px; min-height: 20px; margin-top: auto; }
-  /* Extras/Premium pills overlay the logo corner. The logo area is dark in both
-     themes, so these use fixed solid colours with high-contrast text. */
   .flags { position: absolute; top: 6px; right: 6px; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; max-width: calc(100% - 12px); }
   .flag { padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; line-height: 1.4; letter-spacing: 0.02em; white-space: nowrap; }
   .flag-extras { background: #7ea3ff; color: #0b1020; }

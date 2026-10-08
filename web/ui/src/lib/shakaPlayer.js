@@ -141,7 +141,7 @@ export function sourceDenialStatus(error) {
   return null;
 }
 
-export async function loadLiveSource({ player, video, source, drmCapability = null, secureContext = globalThis.isSecureContext ?? true, isCurrent = () => true, onTerminalError = () => {} }) {
+export async function loadLiveSource({ player, video, source, drmCapability = null, secureContext = globalThis.isSecureContext ?? true, isCurrent = () => true, allowMutedFallback = true, onAutoplayResult = () => {}, onTerminalError = () => {} }) {
   let fallbackPromise = null;
   let usingHls = false;
   let fallbackSettled = false;
@@ -187,7 +187,8 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
           await player.load(source.hls);
         }
         if (!isCurrent()) return false;
-        await playWithAutoplay(video);
+        const played = await playWithAutoplay(video, { allowMutedFallback });
+        if (isCurrent()) onAutoplayResult(played);
         return true;
       } finally {
         fallbackSettled = true;
@@ -236,10 +237,13 @@ export async function loadLiveSource({ player, video, source, drmCapability = nu
     return;
   }
 
-  if (isCurrent()) await playWithAutoplay(video);
+  if (isCurrent()) {
+    const played = await playWithAutoplay(video, { allowMutedFallback });
+    if (isCurrent()) onAutoplayResult(played);
+  }
 }
 
-export async function createShakaPlayer(container, video) {
+export async function createShakaPlayer(container, video, { controls = true } = {}) {
   await Promise.all([
     loadScript("/static/external/shaka-player.ui.js"),
     loadStylesheet("/static/external/shaka-player-controls.css"),
@@ -254,7 +258,7 @@ export async function createShakaPlayer(container, video) {
   const player = new shaka.Player();
   await player.attach(video);
   const ui = new shaka.ui.Overlay(player, container, video);
-  ui.configure({
+  ui.configure(controls ? {
     addBigPlayButton: false,
     fadeDelay: 3,
     enableKeyboardPlaybackControls: true,
@@ -272,6 +276,16 @@ export async function createShakaPlayer(container, video) {
       base: "rgba(255,255,255,.28)",
       level: "#ffffff",
     },
+  } : {
+    addBigPlayButton: false,
+    addSeekBar: false,
+    fadeDelay: 3,
+    enableKeyboardPlaybackControls: false,
+    enableTooltips: false,
+    singleClickForPlayAndPause: false,
+    doubleClickForFullscreen: false,
+    controlPanelElements: [],
+    overflowMenuButtons: [],
   });
 
   player.configure({
@@ -293,12 +307,19 @@ export async function createShakaPlayer(container, video) {
   };
 }
 
-export async function playWithAutoplay(video) {
+export async function playWithAutoplay(video, { allowMutedFallback = true } = {}) {
   video.muted = false;
   try {
     await video.play();
+    return true;
   } catch {
+    if (!allowMutedFallback) return false;
     video.muted = true;
-    await video.play().catch(() => {});
+    try {
+      await video.play();
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

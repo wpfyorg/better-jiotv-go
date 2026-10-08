@@ -84,12 +84,14 @@
 
   const categories = $derived([...new Set(channels.map((c) => c.category).filter(Boolean))].sort());
   const languages = $derived([...new Set(channels.map((c) => c.language).filter(Boolean))].sort());
+  const playableCount = $derived(channels.filter((c) => c.playable).length);
+  const nonePlayable = $derived(channels.length > 0 && playableCount === 0);
 
   const visible = $derived.by(() => {
     const q = query.trim().toLowerCase();
     return channels.filter(
       (c) =>
-        (showUnplayable || c.playable) &&
+        (showUnplayable || nonePlayable || c.playable) &&
         (!extrasOnly || c.extras) &&
         (!hdOnly || c.hd) &&
         (!category || c.category === category) &&
@@ -152,11 +154,17 @@
 {:else if error}
   <p class="error">Couldn't load channels: {error}</p>
 {:else}
+  {#if nonePlayable}
+    <p class="availability-note">
+      Nothing in this catalogue is currently available to play. Showing the channels so the catalogue stays visible.
+      Check <a href="#/settings">Settings</a> to connect JioTV or Extra channels.
+    </p>
+  {/if}
   <p class="muted count">{visible.length} of {channels.length} channels</p>
   <ul class="grid">
     {#each visible as c (c.id)}
       <li>
-        <a class="tile" class:off={!c.playable} href={"#/watch/" + encodeURIComponent(c.id)} title={c.playable ? c.name : c.name + " (needs a JioTV login)"}>
+        <a class="tile" class:off={!c.playable} href={"#/watch/" + encodeURIComponent(c.id)} title={c.playable ? c.name : c.name + " (unavailable for the current account)"}>
           <span class="logo">
             <img src={c.logo} alt="" loading="lazy" decoding="async" />
             {#if (mixedSources && c.extras) || c.requiresSubscription}
@@ -219,6 +227,16 @@
   .search { flex: 1 1 240px; }
   .toggle { display: inline-flex; gap: 6px; align-items: center; min-height: 40px; color: var(--muted); padding: 0 6px; }
   .count { margin: 4px 0 12px; font-size: 13px; }
+  .availability-note {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--surface);
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .availability-note a { color: var(--text); font-weight: 600; }
   .grid {
     list-style: none;
     margin: 0;

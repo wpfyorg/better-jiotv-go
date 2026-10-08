@@ -474,6 +474,10 @@ fn extras_status(state: &AppState) -> serde_json::Value {
     json!({"enabled": state.extras.enabled(), "connected": state.extras.connected()})
 }
 
+pub async fn extras_status_get(State(state): State<SharedState>) -> Response {
+    Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
+}
+
 /// `POST /api/extras/unlock`. Only reached when the channel search box's
 /// own shape test decided the query looked like an unlock code (see
 /// `unlock.rs`), so this never sees an ordinary search. Rate-limited per IP
@@ -753,7 +757,10 @@ mod tests {
         let json = response_json(resp).await;
         assert_eq!(json["status"], false);
         assert!(s.secure.current_epoch() > before, "context was not rotated");
-        assert!(!s.extras.connected(), "no auth token after a failed exchange");
+        assert!(
+            !s.extras.connected(),
+            "no auth token after a failed exchange"
+        );
     }
 
     #[tokio::test]
@@ -768,7 +775,10 @@ mod tests {
             async move { verify(&s).await }
         });
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        assert!(!task.is_finished(), "the exchange should still be in flight");
+        assert!(
+            !task.is_finished(),
+            "the exchange should still be in flight"
+        );
         assert!(
             s.secure.current_epoch() > before,
             "context was not rotated while the exchange was in flight"
@@ -844,6 +854,25 @@ mod tests {
         .await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         assert_eq!(s.secure.current_epoch(), before);
+    }
+
+    #[test]
+    fn channel_serializes_subscription_requirement_for_the_ui() {
+        let channel = ApiChannel {
+            id: "1".into(),
+            name: "Example".into(),
+            logo: String::new(),
+            category: String::new(),
+            language: String::new(),
+            hd: false,
+            extras: false,
+            catchup: false,
+            requires_subscription: true,
+            playable: true,
+        };
+        let json = serde_json::to_value(channel).unwrap();
+        assert_eq!(json["requiresSubscription"], true);
+        assert!(json.get("requires_subscription").is_none());
     }
 
     #[tokio::test]

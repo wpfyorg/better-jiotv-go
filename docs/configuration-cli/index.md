@@ -14,7 +14,7 @@ Run `jiotv --help` to see the installed binary's command list. These commands ar
 | `jiotv serve` | Start the HTTP server. Also accepted: `jiotv run`, `jiotv start` or no command. |
 | `jiotv login otp` | Sign in to the JioTV provider account by OTP from the server terminal. |
 | `jiotv login reset` | Clear JioTV login state. |
-| `jiotv extras login` / `jiotv extras logout` | Connect/disconnect the optional Extras source when built/enabled. |
+| `jiotv tv+ login` / `jiotv tv+ logout` | Connect/disconnect the optional JioTV+ account when `tv_plus` is enabled. `jiotv extras login` is still accepted. |
 | `jiotv admin password` | Set an admin password from the CLI. |
 | `jiotv key show` / `jiotv key rotate` | Show or replace the IPTV access key. Treat its output as confidential. |
 | `jiotv epg generate` / `jiotv epg delete` | Generate the current guide or remove its cache. |
@@ -36,6 +36,8 @@ All commands accept `--config PATH`. `--skip-update-check` suppresses the startu
 | `--tls-cert` / `--tls-key` | generated cert | Supply both PEM files with `--tls`. |
 | `--tunnel` | off | Start a Cloudflare tunnel where supported. |
 | `--tunnel-token` | unset | Named tunnel token; keep private. |
+
+`--tunnel-token` is visible in the process list. Prefer `JIOTV_TUNNEL_TOKEN`, which the guided installer and the OpenWrt service use. `jiotv autostart` records the current `JIOTV_*` variables in a private environment file for the service, so that is where an installer-set account or tunnel choice persists across restarts.
 
 Example: `jiotv serve --host 127.0.0.1 --port 5001 --tls`. This serves HTTP on 5001 and HTTPS on 5443. When no certificate files are supplied, the server generates a self-signed certificate; browsers may show a warning until you trust it.
 

@@ -7,13 +7,13 @@ keywords: [requirements, CPU architecture, OpenWrt, Android, Raspberry Pi, brows
 
 # Requirements and Supported Devices
 
-You need a device that can run the Rust `jiotv` binary, network access to the content service, and a modern web browser or compatible IPTV application. Watching account-restricted streams requires an eligible JioTV or Extras account.
+You need a device that can run the Rust `jiotv` binary, network access to the content service, and a modern web browser or compatible IPTV application. Watching account-restricted streams requires an eligible JioTV or JioTV+ account.
 
 ## Where you can run the server
 
 The repository supplies installers/build or packaging support for Linux, macOS, Windows, OpenWrt, Raspberry Pi and other Linux single-board computers, and Android through **Termux**. It also supplies a Docker image. Exact CPU architecture support varies by release; check the [platform-specific instructions](../installations/index.md) before downloading.
 
-The **full** build serves the browser UI. The **slim** build omits browser assets and is intended for IPTV clients. Extras also requires a build with the `extras` feature; the default Cargo feature set does not include Extras.
+The **full** build serves the browser UI. The **slim** build omits browser assets and is intended for IPTV clients. JioTV+ is a runtime switch (`tv_plus = true` or `JIOTV_TVPLUS=true`), not a separate build.
 
 ## Where you can watch
 

@@ -15,7 +15,25 @@ Open PowerShell and run:
 irm https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.ps1 | iex
 ```
 
-Close and reopen PowerShell if `jiotv` is not found. Then sign in and start the server:
+Close and reopen PowerShell if `jiotv` is not found.
+
+## Guided setup
+
+In a PowerShell window, the installer switches to a guided setup after downloading: build (`full` or `slim`), account (JioTV, JioTV+, or Fastway when the release supports it), the address other devices will use, whether to expose the server through Cloudflare, and then the account sign-in. Use the arrow keys (or `j`/`k`, or the number keys) and press Enter.
+
+The sign-in step asks for the mobile number and the one-time password inside the wizard, where the OTP is entered masked and the provider's own output is captured rather than printed over the screen. For JioTV+ the wizard lists the connections registered to the number and asks which one to use; Fastway signs in with a username and password instead. Nothing is stored by the installer itself, and a failed sign-in leaves the binary installed with the command to retry printed at the end.
+
+Skip the questions by setting the environment before running the script, or turn the flow off entirely:
+
+```powershell
+$env:JIOTV_VARIANT = 'slim'
+$env:JIOTV_PROVIDER = 'jiotv'
+$env:JIOTV_TUNNEL = 'none'
+```
+
+`JIOTV_ONBOARD=never` keeps the plain non-interactive install. Redirected output (CI, scheduled tasks) skips the flow automatically.
+
+Then start the server if you exited before that step:
 
 ```powershell
 jiotv login otp

@@ -2,7 +2,7 @@
 //! playback/catalogue caches, and the learned DASH/HLS stream-type map.
 //! Mirrors the `extras_state`/package-level functions in
 //! `internal/handlers/extras.go`. Only active when `config.extras` is true
-//! and a login has been completed (`extras login`); otherwise every
+//! and a login has been completed (`tv+ login`); otherwise every
 //! function here is a cheap no-op, matching the Go version's behaviour when
 //! `extras.client == nil`.
 

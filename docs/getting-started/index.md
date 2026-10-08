@@ -14,7 +14,7 @@ First install JioTV, connect your account, and learn your way around.
 - [Getting Started in 5 Minutes](../getting-started-in-5-minutes/index.md)
 - [What Is JioTV?](../getting-started-what-is-jiotv/index.md)
 - [Requirements and Supported Devices](../getting-started-requirements/index.md)
-- [JioTV and Extras: Which Account Do You Need?](../getting-started-jiotv-and-extras/index.md)
+- [JioTV and JioTV+: Which Account Do You Need?](../getting-started-jiotv-and-extras/index.md)
 - [Choose the Right Installation Method](../getting-started-installation-overview/index.md)
 - [First Launch and Admin Setup](../getting-started-first-launch/index.md)
 - [Find Your Way Around the Web Interface](../getting-started-navigate-interface/index.md)

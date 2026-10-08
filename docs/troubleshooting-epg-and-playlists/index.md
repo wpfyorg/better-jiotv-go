@@ -2,7 +2,7 @@
 title: Fix EPG, playlists and channel mode problems
 description: Diagnose stale guide data, missing playlist channels, empty M3U output and source changes.
 category: Troubleshooting
-keywords: [EPG, XMLTV, M3U, playlist, missing channels, Extras, mode]
+keywords: [EPG, XMLTV, M3U, playlist, missing channels, JioTV+, mode]
 ---
 
 # EPG, playlists and source changes
@@ -79,7 +79,7 @@ The guide data exists but programmes do not appear beside channels in an IPTV ap
 
 ### Diagnosis
 
-Refresh both playlist and guide from the URLs currently shown in Settings. Compare a channel's displayed name and guide mapping in the IPTV app. Check whether Extras is included in the playlist and whether the matching source/account is connected.
+Refresh both playlist and guide from the URLs currently shown in Settings. Compare a channel's displayed name and guide mapping in the IPTV app. Check whether JioTV+ is included in the playlist and whether the matching source/account is connected.
 
 ### Solution
 
@@ -93,15 +93,15 @@ Confirm at least one known channel shows programmes after the client's next guid
 
 Include IPTV app/version, affected channel names (no secret links), and whether both URLs were refreshed. See [IPTV guide](../using-iptv-playlists/index.md).
 
-## Channel list changes after switching account or Extras mode
+## Channel list changes after switching account or JioTV+ mode
 
 ### Symptoms
 
-Channels or EPG entries disappear or change after JioTV login/logout, Extras login/logout, or locking Extras.
+Channels or EPG entries disappear or change after JioTV login/logout, JioTV+ login/logout, or locking JioTV+.
 
 ### Possible causes
 
-- The active source catalogue changed with the account or Extras state.
+- The active source catalogue changed with the account or JioTV+ state.
 - The IPTV playlist or guide has not been refreshed.
 - The selected filter hides the newly active set.
 
@@ -111,7 +111,7 @@ Check **Settings** connection states and the Channels filters. The app combines 
 
 ### Solution
 
-Confirm the intended account is connected and Extras is enabled/unlocked if required. Refresh Channels, then refresh the M3U and XMLTV data in each IPTV client. If the change is unexpected, restart only after checking logs and persistent state.
+Confirm the intended account is connected and JioTV+ is enabled/unlocked if required. Refresh Channels, then refresh the M3U and XMLTV data in each IPTV client. If the change is unexpected, restart only after checking logs and persistent state.
 
 ### Verification
 
@@ -119,4 +119,4 @@ Confirm source status and channel list in the web UI, then refresh the IPTV clie
 
 ### Further help
 
-Report which source was changed, current Settings labels and which view is stale. See [account and Extras troubleshooting](../troubleshooting-accounts-and-extras/index.md), [Extras guide](../account-extras/index.md), and [IPTV playlists](../using-iptv-playlists/index.md).
+Report which source was changed, current Settings labels and which view is stale. See [account and JioTV+ troubleshooting](../troubleshooting-accounts-and-extras/index.md), [JioTV+ guide](../account-extras/index.md), and [IPTV playlists](../using-iptv-playlists/index.md).

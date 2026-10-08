@@ -3,10 +3,20 @@ set -eu
 
 repo=${JIOTV_REPO:-wpfyorg/better-jiotv-go}
 variant=${JIOTV_VARIANT:-full}
+variant_explicit=0
+[ -n "${JIOTV_VARIANT:-}" ] && variant_explicit=1
 version=${JIOTV_VERSION:-latest}
 install_tls=${JIOTV_INSTALL_TLS:-1}
 start_service=${JIOTV_START_SERVICE:-1}
 ready_timeout=${JIOTV_READY_TIMEOUT:-15}
+# Onboarding: auto asks when a terminal is available, always forces it, never
+# keeps the plain non-interactive install. Piped, redirected and CI runs get
+# the old behaviour because they have no usable terminal.
+onboard=${JIOTV_ONBOARD:-auto}
+provider=${JIOTV_PROVIDER:-}
+public_host=${JIOTV_PUBLIC_HOST:-}
+tunnel=${JIOTV_TUNNEL:-}
+tunnel_token=${JIOTV_TUNNEL_TOKEN:-}
 case "$ready_timeout" in ''|*[!0-9]*) echo "JIOTV_READY_TIMEOUT must be a number of seconds" >&2; exit 2 ;; esac
 # Readiness needs two consecutive good checks, so fewer than two seconds can never succeed.
 [ "$ready_timeout" -ge 2 ] || ready_timeout=2
@@ -16,6 +26,10 @@ case "$start_service" in 0|1) ;; *) echo "JIOTV_START_SERVICE must be 0 or 1" >&
 
 case "$variant" in full|slim) ;; *) echo "JIOTV_VARIANT must be full or slim" >&2; exit 2 ;; esac
 case "$repo" in */*) ;; *) echo "JIOTV_REPO must be owner/repository" >&2; exit 2 ;; esac
+case "$onboard" in auto|always|never) ;; *) echo "JIOTV_ONBOARD must be auto, always or never" >&2; exit 2 ;; esac
+case "$provider" in tv+|tvplus) provider=extras ;; esac
+case "$provider" in ''|jiotv|extras|fastway) ;; *) echo "JIOTV_PROVIDER must be jiotv, tv+ or fastway" >&2; exit 2 ;; esac
+case "$tunnel" in ''|none|temp|named) ;; *) echo "JIOTV_TUNNEL must be none, temp or named" >&2; exit 2 ;; esac
 
 sys=$(uname -s 2>/dev/null || echo unknown)
 machine=$(uname -m 2>/dev/null || echo unknown)
@@ -25,9 +39,17 @@ case "$sys" in Android) termux=true ;; esac
 
 tmp=${TMPDIR:-/tmp}/jiotv-install-$$
 mkdir -m 700 "$tmp"
-trap 'rm -rf "$tmp"' 0 HUP INT TERM
 
-say() { printf '==> %s\n' "$*"; }
+# Restores the terminal and removes the working directory on every exit path,
+# including a half-entered prompt.
+ui_cleanup() {
+  ui_raw_leave 2>/dev/null || true
+  [ -z "${ob_fifo:-}" ] || exec 5>&- 2>/dev/null || true
+  rm -rf "${tmp:-}" 2>/dev/null || true
+}
+trap 'ui_cleanup' 0 HUP INT TERM
+
+say() { printf '%s==>%s %s\n' "$ui_grey" "$ui_reset" "$*"; }
 note() { printf '    %s\n' "$*"; }
 
 download() {
@@ -111,6 +133,582 @@ router_ip() {
   if [ -n "$addr" ]; then echo "$addr"; else echo "<router-ip>"; fi
 }
 
+# ---------------------------------------------------------------------------
+# Terminal UI
+#
+# The onboarding flow is additive: every function below is only reached after
+# `onboard_enabled` says there is a terminal and stdin is not the `curl | sh`
+# pipe. Colours are plain ANSI so a shell script can do this without a Rust
+# dependency, and every prompt reads from /dev/tty rather than stdin.
+ui_esc=$(printf '\033')
+ui_color=0
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then ui_color=1; fi
+case "${FORCE_COLOR:-}" in 1) ui_color=1 ;; 0) ui_color=0 ;; esac
+if [ "$ui_color" = 1 ]; then
+  ui_bold=$(printf '\033[1m')
+  ui_dim=$(printf '\033[2m')
+  ui_red=$(printf '\033[31m')
+  ui_green=$(printf '\033[32m')
+  ui_yellow=$(printf '\033[33m')
+  ui_cyan=$(printf '\033[36m')
+  ui_grey=$(printf '\033[90m')
+  ui_reset=$(printf '\033[0m')
+else
+  ui_bold=''
+  ui_dim=''
+  ui_red=''
+  ui_green=''
+  ui_yellow=''
+  ui_cyan=''
+  ui_grey=''
+  ui_reset=''
+fi
+
+ui_stty_saved=
+ui_raw_enter() {
+  ui_stty_saved=$(stty -g </dev/tty 2>/dev/null) || { ui_stty_saved=; return 1; }
+  [ -n "$ui_stty_saved" ] || return 1
+  stty -icanon -echo min 1 time 0 </dev/tty 2>/dev/null && return 0
+  stty raw -echo </dev/tty 2>/dev/null && return 0
+  return 1
+}
+ui_raw_leave() {
+  [ -z "${ui_stty_saved:-}" ] && return 0
+  stty "$ui_stty_saved" </dev/tty 2>/dev/null || true
+  ui_stty_saved=
+}
+ui_byte() { LC_ALL=C dd if=/dev/tty bs=1 count=1 2>/dev/null || true; }
+
+ui_rule() { printf '%s  ────────────────────────────────────────────%s\n' "$ui_grey" "$ui_reset"; }
+ui_ok() { printf '  %s✔%s %s\n' "$ui_green" "$ui_reset" "$*"; }
+ui_warn() { printf '  %s!%s %s\n' "$ui_yellow" "$ui_reset" "$*"; }
+ui_note() { printf '  %s%s%s\n' "$ui_grey" "$*" "$ui_reset"; }
+ui_fail() { printf '  %s✘%s %s\n' "$ui_red" "$ui_reset" "$*"; }
+ui_step() { printf '\n  %s%s◆%s %s\n\n' "$ui_bold" "$ui_cyan" "$ui_reset" "$*"; }
+
+ui_banner() {
+  printf '\n  %s%sJioTV%s %s%s installer%s\n' "$ui_bold" "$ui_cyan" "$ui_reset" "$ui_grey" "$1" "$ui_reset"
+  ui_rule
+}
+
+# Draws the current menu into globals so a redraw never re-runs the prompt.
+ui_menu_draw() {
+  ui_i=1
+  while [ "$ui_i" -le "$ui_n" ]; do
+    ui_lbl=$(printf '%s' "$ui_labels" | awk -F'|' -v k="$ui_i" '{print $k}')
+    if [ "$ui_i" -eq "$ui_idx" ]; then
+      printf '  %s❯%s %s%s%s\n' "$ui_cyan" "$ui_reset" "$ui_bold" "$ui_lbl" "$ui_reset"
+    else
+      printf '    %s\n' "$ui_lbl"
+    fi
+    ui_i=$((ui_i + 1))
+  done
+}
+ui_menu_redraw() {
+  printf '%s[%dA' "$ui_esc" "$ui_n"
+  ui_menu_draw
+}
+
+# Arrow keys, j/k, digits and Enter; Esc is deliberately not a cancel key
+# because a bare escape byte cannot be told apart from the start of an arrow
+# sequence without a read timeout, which POSIX sh has no portable way to set.
+ui_choose_key() {
+  ui_raw_enter || return 1
+  ui_cr=$(printf '\r')
+  ui_lf=$(printf '\n')
+  ui_etx=$(printf '\003')
+  while :; do
+    ui_b=$(ui_byte)
+    [ -n "$ui_b" ] || break
+    case "$ui_b" in
+      "$ui_cr"|"$ui_lf") break ;;
+      "$ui_etx") ui_raw_leave; printf '\n'; exit 130 ;;
+      "$ui_esc")
+        ui_b2=$(ui_byte)
+        if [ "$ui_b2" = '[' ]; then
+          ui_b3=$(ui_byte)
+          case "$ui_b3" in
+            A) [ "$ui_idx" -gt 1 ] && ui_idx=$((ui_idx - 1)) ;;
+            B) [ "$ui_idx" -lt "$ui_n" ] && ui_idx=$((ui_idx + 1)) ;;
+          esac
+        fi
+        ui_menu_redraw
+        ;;
+      [1-9])
+        if [ "$ui_b" -le "$ui_n" ]; then ui_idx=$ui_b; ui_menu_redraw; fi
+        ;;
+      j|J) [ "$ui_idx" -lt "$ui_n" ] && { ui_idx=$((ui_idx + 1)); ui_menu_redraw; } ;;
+      k|K) [ "$ui_idx" -gt 1 ] && { ui_idx=$((ui_idx - 1)); ui_menu_redraw; } ;;
+    esac
+  done
+  ui_raw_leave
+  return 0
+}
+
+# ui_select "question" "value|value" "label|label" -> ui_sel_value, ui_sel_label
+ui_select() {
+  ui_prompt=$1
+  ui_values=$2
+  ui_labels=$3
+  ui_n=$(printf '%s' "$ui_labels" | awk -F'|' '{print NF}')
+  ui_idx=${ui_sel_default:-1}
+  [ "$ui_idx" -ge 1 ] && [ "$ui_idx" -le "$ui_n" ] || ui_idx=1
+  printf '  %s%s%s\n\n' "$ui_cyan" "$ui_prompt" "$ui_reset"
+  ui_menu_draw
+  ui_drawn=1
+  if ! ui_choose_key; then
+    ui_drawn=0
+    # No raw mode here (no stty, odd terminal): numbered entry still works.
+    printf '  %s1-%d then Enter:%s ' "$ui_dim" "$ui_n" "$ui_reset"
+    ui_line=
+    IFS= read -r ui_line </dev/tty || ui_line=
+    case "$ui_line" in
+      ''|*[!0-9]*) : ;;
+      *)
+        if [ "$ui_line" -ge 1 ] && [ "$ui_line" -le "$ui_n" ]; then ui_idx=$ui_line; fi
+        ;;
+    esac
+  fi
+  ui_sel_value=$(printf '%s' "$ui_values" | awk -F'|' -v k="$ui_idx" '{print $k}')
+  ui_sel_label=$(printf '%s' "$ui_labels" | awk -F'|' -v k="$ui_idx" '{print $k}')
+  if [ "$ui_drawn" = 1 ]; then
+    printf '\033[%dA\033[J' "$ui_n"
+  fi
+  ui_ok "$ui_sel_label"
+}
+
+# ui_input "question" "default" -> ui_result
+ui_input() {
+  ui_result=
+  ui_default=${2:-}
+  printf '  %s%s%s\n  %s❯%s ' "$ui_cyan" "$1" "$ui_reset" "$ui_cyan" "$ui_reset"
+  IFS= read -r ui_result </dev/tty || ui_result=
+  ui_result=$(printf '%s' "$ui_result" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  [ -n "$ui_result" ] || ui_result=$ui_default
+  if [ -n "$ui_result" ]; then
+    printf '\033[1A\033[J  %s✔%s %s %s%s%s\n' "$ui_green" "$ui_reset" "$1" "$ui_bold" "$ui_result" "$ui_reset"
+  fi
+}
+
+# ui_password "question" -> ui_result, never echoed, never stored in a shell log
+ui_password() {
+  ui_result=
+  printf '  %s%s%s\n  %s❯%s ' "$ui_cyan" "$1" "$ui_reset" "$ui_cyan" "$ui_reset"
+  ui_echo_off=0
+  if stty -echo </dev/tty 2>/dev/null; then ui_echo_off=1; fi
+  IFS= read -r ui_result </dev/tty || ui_result=
+  [ "$ui_echo_off" = 0 ] || stty echo </dev/tty 2>/dev/null || true
+  printf '\n'
+  if [ -n "$ui_result" ]; then
+    printf '\033[1A\033[J  %s✔%s %s %s(hidden)%s\n' "$ui_green" "$ui_reset" "$1" "$ui_dim" "$ui_reset"
+  fi
+}
+
+ui_confirm() {
+  if [ "${2:-yes}" = yes ]; then
+    ui_sel_default=1
+    ui_select "$1" "yes|no" "Yes|No"
+  else
+    ui_sel_default=2
+    ui_select "$1" "yes|no" "Yes|No"
+  fi
+  unset ui_sel_default
+  [ "$ui_sel_value" = yes ]
+}
+
+# A terminal we can drive, and a stdin that is not the install script itself.
+onboard_enabled() {
+  [ "$onboard" != never ] || return 1
+  [ -r /dev/tty ] || return 1
+  [ -t 1 ] || return 1
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Onboarding questions
+ob_vals=
+ob_lbls=
+ob_add() {
+  if [ -z "$ob_vals" ]; then
+    ob_vals=$1
+    ob_lbls=$2
+  else
+    ob_vals="$ob_vals|$1"
+    ob_lbls="$ob_lbls|$2"
+  fi
+}
+
+ob_reset() { ob_vals=; ob_lbls=; }
+
+ob_choose_variant() {
+  [ "$variant_explicit" = 0 ] || return 0
+  ob_reset
+  ob_add full "Full   browser UI plus IPTV, needs the most space"
+  ob_add slim "Slim   IPTV only, no browser UI, smallest download"
+  if [ "$variant" = slim ]; then ui_sel_default=2; else ui_sel_default=1; fi
+  ui_select "Which build?" "$ob_vals" "$ob_lbls"
+  unset ui_sel_default
+  variant=$ui_sel_value
+}
+
+# The downloaded binary decides which providers exist, so an unreleased one
+# never shows up as a dead menu entry. `tv+ login` is the current name and
+# `extras login` the previous one, which older binaries still use.
+ob_binary_supports() {
+  "$1" --help 2>/dev/null | grep -q -- "$2"
+}
+
+ob_choose_provider() {
+  ob_bin=$1
+  ob_reset
+  ob_tvplus_args=
+  if ob_binary_supports "$ob_bin" 'tv+ login'; then
+    ob_tvplus_args='tv+ login'
+  elif ob_binary_supports "$ob_bin" 'extras login'; then
+    ob_tvplus_args='extras login'
+  fi
+  ob_add jiotv "JioTV       live channels and programme guide - any network"
+  [ -n "$ob_tvplus_args" ] &&
+    ob_add extras "JioTV+      extra channels, movies and shows - JioFiber/AirFiber"
+  ob_binary_supports "$ob_bin" 'fastway' &&
+    ob_add fastway "Fastway     live TV from a Fastway subscription - Fastway/ACT"
+  if [ -n "$provider" ]; then
+    case "|$ob_vals|" in
+      *"|$provider|"*) return 0 ;;
+      *) provider= ;;
+    esac
+  fi
+  case "$ob_vals" in
+    *'|'*) ;;
+    *) provider=$ob_vals; ob_name=$ob_vals; [ "$provider" = extras ] && ob_name='JioTV+'; ui_step "Using $ob_name (the only provider this build supports)"; return 0 ;;
+  esac
+  ui_note "Which login you have depends on your network: JioTV works anywhere,"
+  ui_note "JioTV+ needs a JioFiber or AirFiber login, Fastway needs Fastway or ACT."
+  printf '\n'
+  ui_select "Which account are you setting up?" "$ob_vals" "$ob_lbls"
+  provider=$ui_sel_value
+}
+
+# Best-effort LAN address so the summary shows a URL that actually opens.
+detect_lan_ip() {
+  ob_addr=
+  if [ "$openwrt" = true ]; then
+    router_ip
+    return 0
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    ob_addr=$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \([0-9.]*\).*/\1/p' | head -n 1 || true)
+    [ -n "$ob_addr" ] || ob_addr=$(ip -4 addr show scope global 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -n 1 || true)
+  fi
+  if [ -z "$ob_addr" ] && command -v ifconfig >/dev/null 2>&1; then
+    ob_nif=$(route -n get default 2>/dev/null | sed -n 's/.*interface: //p' | head -n 1 || true)
+    if [ -n "$ob_nif" ] && command -v ipconfig >/dev/null 2>&1; then
+      ob_addr=$(ipconfig getifaddr "$ob_nif" 2>/dev/null || true)
+    fi
+    [ -n "$ob_addr" ] || ob_addr=$(ifconfig 2>/dev/null | sed -n 's/.*inet \([0-9.]*\) .*/\1/p' | grep -v '^127\.' | head -n 1 || true)
+  fi
+  if [ -n "$ob_addr" ]; then printf '%s\n' "$ob_addr"; else printf 'localhost\n'; fi
+}
+
+ob_choose_host() {
+  [ -z "$public_host" ] || return 0
+  ob_detected=$(detect_lan_ip)
+  ui_step "Address other devices will use"
+  ui_input "This machine's address on your network" "$ob_detected"
+  case "$ui_result" in
+    ''|*' '*|*/*) ui_warn "That is not an address; keeping $ob_detected"; public_host=$ob_detected ;;
+    *) public_host=$ui_result ;;
+  esac
+  if [ "$public_host" = localhost ]; then
+    ui_warn "Only this machine will be able to connect until you bind to a network address"
+  fi
+}
+
+ob_choose_tunnel() {
+  [ -z "$tunnel" ] || return 0
+  ui_step "Access from outside your network"
+  ui_select "Open JioTV up beyond your LAN?" \
+    "none|temp|named" \
+    "No, LAN only|Temporary Cloudflare URL, no account, new address every start|Permanent Cloudflare tunnel, needs a tunnel token"
+  tunnel=$ui_sel_value
+  case "$tunnel" in
+    none) return 0 ;;
+    temp)
+      ui_warn "Anyone with the address can reach the sign-in page. Keep the admin password strong."
+      ;;
+    named)
+      printf '  %sCreate a tunnel at dash.cloudflare.com, point its public hostname at\n  http://localhost:5001, then copy the token from the tunnel%s\n' "$ui_dim" "$ui_reset"
+      ui_warn "Anyone with that hostname can reach the sign-in page. Keep the admin password strong."
+      ui_password "Cloudflare tunnel token"
+      tunnel_token=$ui_result
+      case "$tunnel_token" in
+        eyJ*) ;;
+        '') ui_fail "No token entered; using a temporary URL instead"; tunnel=temp ;;
+        *) ui_warn "That does not look like a Cloudflare tunnel token"; tunnel=temp ;;
+      esac
+      ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# Credentials
+#
+# The login commands read their answers from stdin, and the installer's stdin
+# is the `curl | sh` pipe, so they are driven through a FIFO instead of being
+# handed the terminal. That keeps one continuous wizard and never lets the
+# child read the rest of this script as an answer.
+ob_dialog_start() {
+  ob_fifo=$tmp/login.fifo
+  ob_log=$tmp/login.log
+  rm -f "$ob_fifo"
+  mkfifo "$ob_fifo"
+  : >"$ob_log"
+  "$@" <"$ob_fifo" >"$ob_log" 2>&1 &
+  ob_pid=$!
+  exec 5>"$ob_fifo"
+}
+ob_dialog_send() { printf '%s\n' "$1" >&5; }
+ob_dialog_expect() {
+  ob_waited=0
+  while [ "$ob_waited" -lt "${2:-20}" ]; do
+    grep -Eqi -- "$1" "$ob_log" 2>/dev/null && return 0
+    if ! kill -0 "$ob_pid" 2>/dev/null; then
+      grep -Eqi -- "$1" "$ob_log" 2>/dev/null && return 0
+      return 1
+    fi
+    ob_waited=$((ob_waited + 1))
+    sleep 1
+  done
+  return 1
+}
+ob_dialog_finish() {
+  exec 5>&- 2>/dev/null || true
+  ob_fifo=
+  ob_status=0
+  wait "$ob_pid" || ob_status=$?
+  return "$ob_status"
+}
+ob_dialog_show() {
+  [ -s "$ob_log" ] || return 0
+  printf '%s\n' "$ui_dim"
+  sed 's/^/  │ /' "$ob_log"
+  printf '%s\n' "$ui_reset"
+}
+
+ob_creds_jiotv() {
+  ob_bin=$1
+  ui_step "Sign in to JioTV"
+  ui_input "Mobile number registered with JioTV (+91)" ""
+  ob_number=$ui_result
+  case "$ob_number" in
+    ''|*[!0-9]*) ui_fail "A mobile number is required for the OTP"; return 1 ;;
+  esac
+  ob_dialog_start "$ob_bin" login otp
+  ob_dialog_send "$ob_number"
+  if ob_dialog_expect 'OTP:' 40; then
+    ui_ok "OTP sent to +91$ob_number"
+    ui_password "Enter the OTP"
+    ob_dialog_send "$ui_result"
+  fi
+  if ob_dialog_finish; then
+    if grep -qi "Login successful" "$ob_log"; then ui_ok "Signed in to JioTV"; return 0; fi
+  fi
+  ob_dialog_show
+  ui_fail "JioTV sign-in did not complete"
+  return 1
+}
+
+ob_creds_extras() {
+  ob_bin=$1
+  ui_step "Sign in to JioTV+"
+  ui_note "Use the JioFiber or AirFiber login for this connection."
+  ui_input "Mobile number registered to the fibre account (+91)" ""
+  ob_number=$ui_result
+  case "$ob_number" in
+    ''|*[!0-9]*) ui_fail "A mobile number is required for the OTP"; return 1 ;;
+  esac
+  [ -n "$ob_tvplus_args" ] || ob_tvplus_args='extras login'
+  # shellcheck disable=SC2086  # tv+ is one argument pair, not a filename
+  ob_dialog_start "$ob_bin" $ob_tvplus_args
+  ob_dialog_send "$ob_number"
+  # A number with no selectable connections goes straight to the OTP prompt.
+  ob_ready=0
+  if ob_dialog_expect 'Choose a connection:|OTP:' 40; then
+    if grep -qi 'Choose a connection:' "$ob_log"; then
+      ob_reset
+      ob_i=1
+      while :; do
+        ob_line=$(sed -n "s/^  $ob_i\. \(.*\)$/\1/p" "$ob_log")
+        [ -n "$ob_line" ] || break
+        ob_add "$ob_i" "$ob_line"
+        ob_i=$((ob_i + 1))
+      done
+      if [ -n "$ob_vals" ]; then
+        ui_select "Choose the connection" "$ob_vals" "$ob_lbls"
+        ob_dialog_send "$ui_sel_value"
+      fi
+      ob_dialog_expect 'OTP:' 40 && ob_ready=1
+    else
+      ob_ready=1
+    fi
+  fi
+  if [ "$ob_ready" = 1 ]; then
+    ui_ok "OTP sent to +91$ob_number"
+    ui_password "Enter the OTP"
+    ob_dialog_send "$ui_result"
+  fi
+  if ob_dialog_finish; then
+    if grep -qi "login saved" "$ob_log"; then ui_ok "Signed in to JioTV+"; return 0; fi
+  fi
+  ob_dialog_show
+  ui_fail "JioTV+ sign-in did not complete"
+  return 1
+}
+
+ob_creds_fastway() {
+  ob_bin=$1
+  ui_step "Sign in to Fastway"
+  ui_input "Fastway username" ""
+  ob_user=$ui_result
+  [ -n "$ob_user" ] || { ui_fail "A username is required"; return 1; }
+  ui_password "Fastway password"
+  ob_pass=$ui_result
+  [ -n "$ob_pass" ] || { ui_fail "A password is required"; return 1; }
+  ob_dialog_start "$ob_bin" fastway login
+  ob_dialog_send "$ob_user"
+  ob_dialog_send "$ob_pass"
+  if ob_dialog_finish; then
+    ui_ok "Signed in to Fastway"
+    return 0
+  fi
+  ob_dialog_show
+  ui_fail "Fastway sign-in did not complete"
+  return 1
+}
+
+ob_admin_password() {
+  ob_bin=$1
+  [ "$variant" = full ] || return 0
+  ui_step "Protect the browser interface"
+  ui_password "Choose an admin password"
+  ob_pass=$ui_result
+  if [ -n "$ob_pass" ]; then
+    if printf '%s\n' "$ob_pass" | "$ob_bin" admin password >/dev/null 2>&1; then
+      ui_ok "Admin password saved"
+    else
+      ui_fail "Could not save the admin password; run: jiotv admin password"
+    fi
+  else
+    ui_warn "No password set; run: jiotv admin password"
+  fi
+}
+
+# Sign-in is part of the flow, so a failure is retried before the install is
+# reported as incomplete rather than silently left half-configured.
+ob_credentials() {
+  ob_bin=$1
+  ob_done=0
+  ob_tries=0
+  while [ "$ob_tries" -lt 3 ]; do
+    case "$provider" in
+      extras) ob_creds_extras "$ob_bin" && ob_done=1 ;;
+      fastway) ob_creds_fastway "$ob_bin" && ob_done=1 ;;
+      *) ob_creds_jiotv "$ob_bin" && ob_done=1 ;;
+    esac
+    [ "$ob_done" = 1 ] && break
+    ob_tries=$((ob_tries + 1))
+    [ "$ob_tries" -ge 3 ] && break
+    ui_confirm "Try again?" yes || break
+  done
+  [ "$ob_done" = 1 ]
+}
+
+# ---------------------------------------------------------------------------
+# Persisting the answers
+ob_write_uci() {
+  uci set jiotv.main.tv_plus="$( [ "$provider" = extras ] && echo 1 || echo 0 )"
+  uci set jiotv.main.fastway="$( [ "$provider" = fastway ] && echo 1 || echo 0 )"
+  case "$tunnel" in
+    none) uci set jiotv.main.tunnel=0; uci delete jiotv.main.tunnel_token 2>/dev/null || true ;;
+    temp) uci set jiotv.main.tunnel=1; uci delete jiotv.main.tunnel_token 2>/dev/null || true ;;
+    named) uci set jiotv.main.tunnel=1; uci set jiotv.main.tunnel_token="$tunnel_token" ;;
+  esac
+  uci commit jiotv
+}
+
+ob_serve_args() {
+  ob_args="--host 0.0.0.0"
+  [ "$install_tls" = 1 ] && ob_args="$ob_args --tls"
+  [ "$tunnel" = none ] || ob_args="$ob_args --tunnel"
+  printf '%s\n' "$ob_args"
+}
+
+ob_install_service() {
+  ob_bin=$1
+  ob_service=0
+  [ "$start_service" = 1 ] || return 0
+  JIOTV_TVPLUS=$( [ "$provider" = extras ] && echo true || echo false )
+  JIOTV_FASTWAY=$( [ "$provider" = fastway ] && echo true || echo false )
+  export JIOTV_TVPLUS JIOTV_FASTWAY
+  if [ -n "$tunnel_token" ]; then export JIOTV_TUNNEL_TOKEN="$tunnel_token"; fi
+  if "$ob_bin" autostart --args "$(ob_serve_args)" >"$tmp/autostart.log" 2>&1; then
+    ui_ok "Installed as a service and started"
+    ob_service=1
+  else
+    ob_service=0
+    ui_warn "Could not install a boot service here; start it yourself with: jiotv $(ob_serve_args)"
+  fi
+}
+
+ob_summary() {
+  ob_bin=$1
+  ob_ip=${public_host:-localhost}
+  ob_http=5001
+  ob_https=5443
+  if [ "$openwrt" = true ]; then
+    ob_http=$(uci_opt port 5001)
+    ob_https=$(uci_opt tls_port 5443)
+  fi
+  printf '\n'
+  ui_rule
+  printf '  %s%sInstallation complete%s\n' "$ui_bold" "$ui_green" "$ui_reset"
+  ui_rule
+  printf '  %sbuild%s     %s %s%s%s\n' "$ui_dim" "$ui_reset" "$variant" "$ui_grey" "$sys/$machine" "$ui_reset"
+  case "$provider" in
+    extras) printf '  %saccount%s   JioTV+\n' "$ui_dim" "$ui_reset" ;;
+    fastway) printf '  %saccount%s   Fastway\n' "$ui_dim" "$ui_reset" ;;
+    *) printf '  %saccount%s   JioTV\n' "$ui_dim" "$ui_reset" ;;
+  esac
+  if [ "$variant" = full ]; then
+    if [ "$install_tls" = 1 ] && [ "${ob_tls:-1}" = 1 ]; then
+      printf '  %sbrowser%s   %shttps://%s:%s/%s\n' "$ui_dim" "$ui_reset" "$ui_bold" "$ob_ip" "$ob_https" "$ui_reset"
+    else
+      printf '  %sbrowser%s   %shttp://%s:%s/%s\n' "$ui_dim" "$ui_reset" "$ui_bold" "$ob_ip" "$ob_http" "$ui_reset"
+    fi
+  fi
+  printf '  %splaylist%s  http://%s:%s/\n' "$ui_dim" "$ui_reset" "$ob_ip" "$ob_http"
+  case "$tunnel" in
+    temp) printf '  %sremote%s    a trycloudflare.com address, printed by the service each start\n' "$ui_dim" "$ui_reset" ;;
+    named) printf '  %sremote%s    your Cloudflare hostname\n' "$ui_dim" "$ui_reset" ;;
+  esac
+  if "$ob_bin" key show >"$tmp/key.log" 2>&1; then
+    if [ -s "$tmp/key.log" ]; then
+      printf '  %saccess%s    %s\n' "$ui_dim" "$ui_reset" "$(cat "$tmp/key.log")"
+    fi
+  fi
+  printf '\n'
+  if [ "$ob_service" != 1 ]; then
+    printf '  Start it with: %sjiotv %s%s\n' "$ui_bold" "$(ob_serve_args)" "$ui_reset"
+  fi
+  if [ "$variant" = full ]; then
+    printf '  Open the address above and sign in with the admin password.\n'
+  else
+    printf '  The slim build has no browser interface; use the playlist above in your IPTV app.\n'
+  fi
+  printf '\n'
+}
+
+# ---------------------------------------------------------------------------
 openwrt=false
 if [ "${JIOTV_PLATFORM:-}" = openwrt ] || [ -r /etc/openwrt_release ]; then openwrt=true; fi
 
@@ -142,6 +740,11 @@ if [ "$openwrt" = true ]; then
     x86_64|aarch64_cortex-a53|arm_cortex-a7_neon-vfpv4) ;;
     *) echo "unsupported OpenWrt package architecture: ${package_arch:-unknown}" >&2; exit 1 ;;
   esac
+
+  if onboard_enabled; then
+    ui_banner "OpenWrt · $package_manager · $package_arch"
+    ob_choose_variant
+  fi
 
   say "OpenWrt detected: package manager $package_manager, architecture $package_arch"
   if [ "$version" = latest ]; then
@@ -195,6 +798,21 @@ if [ "$openwrt" = true ]; then
   say "Enabling the service at boot"
   "$init_script" enable
 
+  # Onboarding runs while the service is installed but not yet restarted, so a
+  # terminal login cannot overwrite the state the server writes at start.
+  ob_creds_done=0
+  if onboard_enabled; then
+    if "$init_script" running >/dev/null 2>&1; then stop_service || true; fi
+    ob_choose_provider /usr/bin/jiotv
+    ob_choose_host
+    ob_choose_tunnel
+    if ob_credentials /usr/bin/jiotv; then ob_creds_done=1; else
+      ui_fail "The install is complete but the account is not connected"
+    fi
+    ob_admin_password /usr/bin/jiotv
+    ob_write_uci
+  fi
+
   running=false
   kept_running=false
   stop_failed=false
@@ -246,9 +864,21 @@ if [ "$openwrt" = true ]; then
     *:*) ip="[$bind_host]" ;;
     *) ip=$bind_host ;;
   esac
+  [ -z "$public_host" ] || ip=$public_host
   tls_on=$(uci_flag tls 1)
   http_port=$(uci_opt port 5001)
   tls_port=$(uci_opt tls_port 5443)
+  ob_tls=$tls_on
+
+  if [ "${ob_creds_done:-0}" = 1 ]; then
+    ob_service=1
+    [ "$running" = true ] || ob_service=0
+    ob_summary /usr/bin/jiotv
+    [ "$stop_failed" != true ] || exit 1
+    [ "$start_service" = 0 ] || [ "$disabled" = true ] || [ "$running" = true ] || exit 1
+    exit 0
+  fi
+
   echo
   if [ "$stop_failed" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed, but the service could not be stopped: run '$init_script stop'."
   elif [ "$running" = true ]; then echo "JioTV ($variant, ${tag#v}) is installed and running."
@@ -317,6 +947,11 @@ if [ "$termux" = true ]; then
   esac
 fi
 
+if onboard_enabled; then
+  ui_banner "$sys/$machine"
+  ob_choose_variant
+fi
+
 say "Detected $sys/$machine: installing the $variant build for $target"
 asset="jiotv-${variant}-${target}"
 if [ "$version" = latest ]; then
@@ -338,12 +973,45 @@ elif [ "$(id -u 2>/dev/null || echo 1)" = 0 ] && [ -w /usr/local/bin ]; then ins
 else install_dir=${HOME:-}/.local/bin
 fi
 [ -n "$install_dir" ] || { echo "HOME is unset; set JIOTV_INSTALL_DIR" >&2; exit 1; }
+was_installed=false
+[ -x "$install_dir/jiotv" ] && was_installed=true
 mkdir -p "$install_dir"
 if command -v install >/dev/null 2>&1; then install -m 0755 "$tmp/$asset" "$install_dir/jiotv"
 else cp "$tmp/$asset" "$install_dir/jiotv" && chmod 0755 "$install_dir/jiotv"
 fi
 echo "Installed jiotv ($variant, $target) to $install_dir/jiotv"
 case ":${PATH:-}:" in *":$install_dir:"*) ;; *) echo "Add $install_dir to PATH to run jiotv directly." ;; esac
+
+if onboard_enabled; then
+  jiotv_bin=$install_dir/jiotv
+  if [ "$was_installed" = true ]; then
+    ui_step "JioTV is already installed here"
+    if ! ui_confirm "Update it in place and keep the current account?" yes; then
+      ui_ok "Left as it was"
+      exit 0
+    fi
+  fi
+  ob_choose_provider "$jiotv_bin"
+  ob_choose_host
+  ob_choose_tunnel
+  if ob_credentials "$jiotv_bin"; then
+    ob_admin_password "$jiotv_bin"
+    ob_install_service "$jiotv_bin"
+    ob_summary "$jiotv_bin"
+    exit 0
+  fi
+  ob_dialog_show
+  ob_dialog_show
+  ui_fail "The install is complete but the account is not connected"
+  case "$provider" in
+    extras) ob_login_cmd=${ob_tvplus_args:-'extras login'} ;;
+    fastway) ob_login_cmd='fastway login' ;;
+    *) ob_login_cmd='login otp' ;;
+  esac
+  printf '\n  Sign in when you are ready: %sjiotv %s%s\n\n' "$ui_bold" "$ob_login_cmd" "$ui_reset"
+  exit 1
+fi
+
 if [ "$install_tls" = 1 ]; then
   echo "Next: jiotv login otp; jiotv admin password; jiotv serve --host 0.0.0.0 --tls"
   if [ "$variant" = slim ]; then

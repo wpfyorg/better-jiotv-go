@@ -102,12 +102,12 @@
 
     {#if status.extras.enabled}
       <section class="card">
-        <h2>Extra channels</h2>
+        <h2>JioTV+</h2>
         {#if status.extras.connected}
           <p class="ok">Connected</p>
           {#if !status.logoutDisabled}<button class="btn" onclick={() => logout("extras")}>Disconnect</button>{/if}
         {:else}
-          <p class="muted">Use the registered mobile number for the extra source.</p>
+          <p class="muted">Use the JioFiber or AirFiber mobile number.</p>
           <ExtrasLogin ondone={loginChanged} />
         {/if}
         <button class="btn" onclick={lockExtras}>Lock</button>

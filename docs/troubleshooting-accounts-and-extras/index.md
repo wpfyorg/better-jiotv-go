@@ -1,11 +1,11 @@
 ---
-title: Fix JioTV login and Extras problems
-description: Diagnose OTP delivery, rejected codes, browser sessions, expired logins and Extras access.
+title: Fix JioTV login and JioTV+ problems
+description: Diagnose OTP delivery, rejected codes, browser sessions, expired logins and JioTV+ access.
 category: Troubleshooting
-keywords: [login, OTP, session, token, Extras, account]
+keywords: [login, OTP, session, token, JioTV+, account]
 ---
 
-# JioTV login, sessions and Extras
+# JioTV login, sessions and JioTV+
 
 ## OTP is not received or is rejected
 
@@ -18,23 +18,23 @@ The OTP request fails, no code arrives, or verification reports an invalid code.
 - Number is mistyped or not in the format expected by the provider.
 - Delivery is delayed, the code expired, or a newer request invalidated an earlier code.
 - The provider rejected the request or verification temporarily failed.
-- The Extras account has multiple eligible connections and the wrong one was selected.
+- The JioTV+ account has multiple eligible connections and the wrong one was selected.
 
 ### Diagnosis
 
-Check the phone number, the visible app error and server output. The CLI flow is `jiotv login otp`; it prompts in the terminal. The web UI has a separate JioTV OTP flow under **Settings**. Extras has its own connection and OTP flow, also under **Settings**. Confirm which account flow you are using.
+Check the phone number, the visible app error and server output. The CLI flow is `jiotv login otp`; it prompts in the terminal. The web UI has a separate JioTV OTP flow under **Settings**. JioTV+ has its own connection and OTP flow, also under **Settings**. Confirm which account flow you are using.
 
 ### Solution
 
-Request one new OTP, wait for it, and enter that latest code promptly. For Extras, select the intended connection if the interface offers a choice. Do not send an OTP to anyone or include it in diagnostics. If delivery repeatedly fails, wait and contact the provider through its official support route.
+Request one new OTP, wait for it, and enter that latest code promptly. For JioTV+, select the intended connection if the interface offers a choice. Do not send an OTP to anyone or include it in diagnostics. If delivery repeatedly fails, wait and contact the provider through its official support route.
 
 ### Verification
 
-Reopen **Settings** and confirm JioTV shows as connected. For Extras, confirm it is enabled and connected. Try loading the channel list.
+Reopen **Settings** and confirm JioTV shows as connected. For JioTV+, confirm it is enabled and connected. Try loading the channel list.
 
 ### Further help
 
-Provide which login flow failed, approximate time, platform and redacted error. See [Connect JioTV](../account-connect-jiotv/index.md) and [Extras guide](../account-extras/index.md).
+Provide which login flow failed, approximate time, platform and redacted error. See [Connect JioTV](../account-connect-jiotv/index.md) and [JioTV+ guide](../account-extras/index.md).
 
 ## Web admin password or browser session does not work
 
@@ -94,31 +94,31 @@ Confirm connected status, reload the channel list, then test one channel in the 
 
 Report whether the failure affects browser playback, IPTV, or both, plus a redacted server error and time. See [IPTV playlists](../using-iptv-playlists/index.md) and [data and logs](../configuration-storage-logs/index.md).
 
-## Extras is missing, disconnected or says a plan is required
+## JioTV+ is missing, disconnected or says a plan is required
 
 ### Symptoms
 
-Extras channels are absent, the UI says Extras is not enabled or connected, OTP fails, or playback reports that content is not in the plan.
+JioTV+ channels are absent, the UI says JioTV+ is not enabled or connected, OTP fails, or playback reports that content is not in the plan.
 
 ### Possible causes
 
-- Extras is disabled by configuration or explicitly locked in Settings.
-- The separate Extras account has not been connected.
+- JioTV+ is disabled by configuration or explicitly locked in Settings.
+- The separate JioTV+ account has not been connected.
 - The account does not have the required entitlement for that item.
-- The Extras service or catalogue request failed upstream.
+- The JioTV+ service or catalogue request failed upstream.
 
 ### Diagnosis
 
-In **Settings**, check whether Extras is enabled and connected. If the page offers **Unlock** or **Lock**, note that this UI gate can override the configured default. Then check whether the channel is marked as Extras and whether the message names a plan/entitlement problem. An enabled switch does not itself grant a subscription.
+In **Settings**, check whether JioTV+ is enabled and connected. If the page offers **Unlock** or **Lock**, note that this UI gate can override the configured default. Then check whether the channel is marked as JioTV+ and whether the message names a plan/entitlement problem. An enabled switch does not itself grant a subscription.
 
 ### Solution
 
-Enable Extras in the supported configuration or unlock it in Settings, then complete the Extras OTP flow separately from JioTV login. Choose the intended connection when prompted. If the UI says the account lacks a plan, check the subscription with the provider; do not try to bypass the entitlement.
+Enable JioTV+ in the supported configuration or unlock it in Settings, then complete the JioTV+ OTP flow separately from JioTV login. Choose the intended connection when prompted. If the UI says the account lacks a plan, check the subscription with the provider; do not try to bypass the entitlement.
 
 ### Verification
 
-Confirm **Settings** reports Extras connected, refresh Channels, and try an item your account is entitled to. Test a regular JioTV channel to distinguish the two sources.
+Confirm **Settings** reports JioTV+ connected, refresh Channels, and try an item your account is entitled to. Test a regular JioTV channel to distinguish the two sources.
 
 ### Further help
 
-Provide the Settings status labels and exact redacted message. See [Extras guide](../account-extras/index.md), [configuration reference](../configuration-reference/index.md), and [channel playback](../troubleshooting-channels-and-playback/index.md).
+Provide the Settings status labels and exact redacted message. See [JioTV+ guide](../account-extras/index.md), [configuration reference](../configuration-reference/index.md), and [channel playback](../troubleshooting-channels-and-playback/index.md).

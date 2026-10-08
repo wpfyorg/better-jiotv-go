@@ -1,8 +1,8 @@
 ---
 title: What Is JioTV?
-description: Understand live channels, programme guide, IPTV playlists, Extras and on-demand video.
+description: Understand live channels, programme guide, IPTV playlists, JioTV+ and on-demand video.
 category: Getting Started
-keywords: [about JioTV, features, Extras, TV+, live, IPTV]
+keywords: [about JioTV, features, JioTV+, TV+, live, IPTV]
 ---
 
 # What Is JioTV?
@@ -13,14 +13,14 @@ It can provide:
 
 - A channel list with search, category and language filters, HD and availability indicators.
 - An in-browser live player with quality controls, programme details, and a programme guide.
-- Movies and series in **On demand**, subject to Extras connectivity, catalogues and provider rights.
+- Movies and series in **On demand**, subject to JioTV+ connectivity, catalogues and provider rights.
 - An **M3U playlist** (a list of channel stream links) and an **XMLTV/EPG guide** (a TV schedule file) for compatible IPTV applications.
 - Admin access, connection status, and account setup in **Settings**.
 - A slim server build with IPTV features and no Svelte web interface.
 
-## JioTV account and Extras
+## JioTV account and JioTV+
 
-A **JioTV account** provides the normal JioTV channel source. **Extras** (previously called TV+) is a second, optional account/source. Extras is disabled by default, and availability depends on how the server was built and configured. An Extras subscription or provider entitlement may be needed for some titles and channels. A channel shown on screen is not a promise that your account can play it.
+A **JioTV account** provides the normal JioTV channel source. **JioTV+** is the optional second account and source; the older name **Extras** still appears in some places. JioTV+ is disabled by default, and availability depends on how the server was configured. A JioTV+ subscription or provider entitlement may be needed for some titles and channels. A channel shown on screen is not a promise that your account can play it.
 
 You also create a separate **admin password** to protect the JioTV web interface. This password is not your JioTV mobile-number login.
 

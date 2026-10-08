@@ -48,7 +48,7 @@ The screenshot shows the **setup notice**, not the password-entry form. Use the 
 3. Enter the code that arrives for your account and finish the sign-in.
 4. Check that the JioTV card says **Logged in**.
 
-This is separate from the admin password. If **Extra channels** appears, it is an optional source and has its own connection flow.
+This is separate from the admin password. If **JioTV+** appears, it is an optional source and has its own connection flow.
 
 See [Connect your account](../account-connect-jiotv/index.md) if you need help.
 

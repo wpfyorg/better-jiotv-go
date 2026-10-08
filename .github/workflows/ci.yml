@@ -36,3 +36,5 @@ jobs:
       - run: cargo test ${{ matrix.features }}
       - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
       - run: sh scripts/tests/install-test.sh
+      - run: sh scripts/tests/onboard-test.sh
+      - run: sh scripts/tests/onboard-ps1-test.sh

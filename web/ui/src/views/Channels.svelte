@@ -118,14 +118,14 @@
   <div class="unlock-notice" role="status">
     <span class="unlock-icon" aria-hidden="true">✓</span>
     <div class="unlock-copy">
-      <strong>Extra channels unlocked</strong>
+      <strong>JioTV+ unlocked</strong>
       <span>
         {#if unlockNotice.refreshFailed}
-          The channel list could not be refreshed. Reload the page to see the extra channels.
+          The channel list could not be refreshed. Reload the page to see the JioTV+ channels.
         {:else if unlockNotice.connected}
-          The extra source is connected; its channels are listed below.
+          JioTV+ is connected; its channels are listed below.
         {:else}
-          Login with number with access to the extra in Settings to be able to play its channels.
+          Sign in with a number that has JioTV+ access in Settings to play its channels.
         {/if}
       </span>
     </div>
@@ -145,7 +145,7 @@
     {#each languages as l}<option>{l}</option>{/each}
   </select>
   <label class="toggle"><input type="checkbox" bind:checked={hdOnly} /> HD</label>
-  <label class="toggle"><input type="checkbox" bind:checked={extrasOnly} /> Extra channels only</label>
+  <label class="toggle"><input type="checkbox" bind:checked={extrasOnly} /> JioTV+ only</label>
   <label class="toggle"><input type="checkbox" bind:checked={showUnplayable} /> Show unavailable</label>
 </section>
 
@@ -157,7 +157,7 @@
   {#if nonePlayable}
     <p class="availability-note">
       Nothing in this catalogue is currently available to play. Showing the channels so the catalogue stays visible.
-      Check <a href="#/settings">Settings</a> to connect JioTV or Extra channels.
+      Check <a href="#/settings">Settings</a> to connect JioTV or JioTV+.
     </p>
   {/if}
   <p class="muted count">{visible.length} of {channels.length} channels</p>
@@ -169,7 +169,7 @@
             <img src={c.logo} alt="" loading="lazy" decoding="async" />
             {#if (mixedSources && c.extras) || c.requiresSubscription}
               <span class="flags">
-                {#if mixedSources && c.extras}<span class="flag flag-extras">Extra</span>{/if}
+                {#if mixedSources && c.extras}<span class="flag flag-extras">TV+</span>{/if}
                 {#if c.requiresSubscription}<span class="flag flag-premium">Subscription required</span>{/if}
               </span>
             {/if}

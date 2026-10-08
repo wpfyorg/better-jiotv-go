@@ -2,7 +2,7 @@
 title: Configuration Reference
 description: Verified TOML keys, JIOTV environment variables, defaults and accepted values.
 category: Configuration
-keywords: [config, TOML, JIOTV, environment variables, defaults, debug, extras]
+keywords: [config, TOML, JIOTV, environment variables, defaults, debug, tv_plus]
 ---
 
 # Configuration Reference
@@ -20,7 +20,7 @@ If `--config` is omitted, it searches the current working directory, in this ord
 title = "Home TV"
 epg = true
 drm = true
-extras = false
+tv_plus = false
 disable_auth = false
 debug = false
 log_to_stdout = true
@@ -39,7 +39,7 @@ Save, start with `jiotv --config ./jiotv_go.toml serve`, then open `http://local
 | `disable_ts_handler` | `JIOTV_DISABLE_TS_HANDLER` | `false` | Boolean. Avoid local TS/AAC segment proxying when supported; change only when diagnosing HLS. |
 | `disable_logout` | `JIOTV_DISABLE_LOGOUT` | `false` | Boolean. Hide/disable JioTV logout when true. |
 | `drm` | `JIOTV_DRM` | `true` | Boolean. Allow the protected DASH pathway; does not bypass DRM. |
-| `extras` | `JIOTV_EXTRAS` | `false` | Boolean. Enable optional Extras account integration. Requires a build with Extras support. |
+| `tv_plus` | `JIOTV_TVPLUS` | `false` | Boolean. Enable the optional JioTV+ account. Needs a JioFiber or AirFiber login. |
 | `disable_auth` | `JIOTV_DISABLE_AUTH` | `false` | Boolean. Disable app access checks. Dangerous on reachable networks; use only with a trusted external access control. |
 | `title` | `JIOTV_TITLE` | `"JioTV Go"` | Display title; any TOML string. |
 | `disable_url_encryption` | `JIOTV_DISABLE_URL_ENCRYPTION` | `false` | Boolean. Disable encryption of local proxy parameters. Leave false. |
@@ -53,6 +53,6 @@ Save, start with `jiotv --config ./jiotv_go.toml serve`, then open `http://local
 
 Boolean environment values must be `true` or `false` in lowercase (as Rust's parser expects). Example: `JIOTV_EPG=true jiotv serve`. For integer lists, use `JIOTV_DEFAULT_LANGUAGES=1,6`.
 
-Older deployments may use the TOML alias `tvplus` or `JIOTV_TVPLUS`. Prefer `extras` and `JIOTV_EXTRAS`; the newer environment variable takes precedence over the older one. `JIOTV_TUNNEL_TOKEN` is also accepted for the optional Cloudflare tunnel flag. Update uses `JIOTV_UPDATE_TOKEN` for private repository access, when required.
+The TOML key is `tv_plus` and the environment variable is `JIOTV_TVPLUS`. The previous names `extras` and `JIOTV_EXTRAS` are still accepted, so an older config file or unit file keeps working; `JIOTV_TVPLUS` takes precedence when both are set. `JIOTV_TUNNEL_TOKEN` is also accepted for the optional Cloudflare tunnel flag. Update uses `JIOTV_UPDATE_TOKEN` for private repository access, when required.
 
 For runtime listening options, see [CLI commands](../configuration-cli/index.md); for protection see [Network and HTTPS](../configuration-network-security/index.md); for storage see [Data and logs](../configuration-storage-logs/index.md).

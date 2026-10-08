@@ -272,16 +272,16 @@
           if (!navigator.onLine) {
             setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
           } else {
-            setPlayerState("extras-unavailable", "Extras", "Extras status unavailable", "We could not check the extras account right now. Wait a moment and try again.");
+            setPlayerState("extras-unavailable", "JioTV+", "JioTV+ status unavailable", "We could not check the JioTV+ account right now. Wait a moment and try again.");
           }
           return;
         }
         if (!status?.extras?.enabled) {
-          setPlayerState("extras-status", "Extras", "Extras is not enabled", "Enable extras in account settings, then return here to start playback.");
+          setPlayerState("extras-status", "JioTV+", "JioTV+ is not enabled", "Enable JioTV+ in account settings, then return here to start playback.");
           return;
         }
         if (!status?.extras?.connected) {
-          setPlayerState("extras-signin", "Extras", "Connect extras to play", "This channel comes from extras. Connect the extras account, then return here to start playback.");
+          setPlayerState("extras-signin", "JioTV+", "Connect JioTV+ to play", "This channel comes from JioTV+. Connect the JioTV+ account, then return here to start playback.");
           return;
         }
       }

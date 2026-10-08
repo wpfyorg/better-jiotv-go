@@ -15,7 +15,9 @@ pkg install curl
 curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | sh
 ```
 
-The binary is installed in Termux's `$PREFIX/bin`. Start the server and complete login:
+The binary is installed in Termux's `$PREFIX/bin`. The installer also runs the guided setup in the Termux terminal: build (`full` or `slim`), account (JioTV, JioTV+, or Fastway when the release supports it), the address other devices will use, an optional Cloudflare tunnel, and the account sign-in. Arrow keys select and Enter confirms.
+
+To start and sign in later instead, or if you skipped the questions with `JIOTV_ONBOARD=never`:
 
 ```sh
 jiotv login otp

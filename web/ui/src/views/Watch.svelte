@@ -27,6 +27,7 @@
   let showQualityMenu = $state(false);
   let showMoreMenu = $state(false);
   let cleanup = null;
+  let cleanupChain = Promise.resolve();
   let runID = 0;
   let activityTimer = null;
   let toastTimer = null;
@@ -49,6 +50,17 @@
 
   function setPlayerState(kind, eyebrow, title, detail = "") {
     playerState = { kind, eyebrow, title, detail };
+  }
+
+  function stopActiveSession() {
+    const stop = cleanup;
+    cleanup = null;
+    const previous = cleanupChain;
+    cleanupChain = (async () => {
+      await previous.catch(() => {});
+      await stop?.();
+    })();
+    return cleanupChain;
   }
 
   function showPlaybackFailure(kind, message = "", status = null) {
@@ -237,8 +249,8 @@
   async function start(channelID, q) {
     const thisRun = ++runID;
     const isCurrent = () => thisRun === runID;
-    await cleanup?.();
-    cleanup = null;
+    await stopActiveSession();
+    if (!isCurrent()) return;
     setPlayerState("loading", "Live TV", "Starting live TV…", "");
     paused = false;
     muted = Boolean(video?.muted);
@@ -350,7 +362,12 @@
 
   onMount(() => {
     const clockTimer = setInterval(updateClock, 1000);
-    const onOffline = () => setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
+    const onOffline = () => {
+      runID += 1;
+      video?.pause();
+      setPlayerState("offline", "Connection issue", "You’re offline", "Reconnect to the internet, then try the stream again.");
+      void stopActiveSession();
+    };
     const onOnline = () => {
       setPlayerState("reconnecting", "Live TV", "Reconnecting live stream…", "");
       start(id, quality);
@@ -371,7 +388,8 @@
     runID += 1;
     clearTimeout(activityTimer);
     clearTimeout(toastTimer);
-    cleanup?.();
+    video?.pause();
+    void stopActiveSession();
   });
 </script>
 

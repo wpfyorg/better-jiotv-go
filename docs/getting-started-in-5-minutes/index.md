@@ -37,7 +37,9 @@ The setup page asks you to choose and repeat an **admin password** with at least
 
 **Important:** If you opened just `/` before setting a password, the page tells you to use the **Web setup** link from the terminal or run `jiotv admin password` on the server.
 
-![Initial admin setup page, captured from a clean local JioTV server](../images/first-launch-setup.png)
+![Setup notice at the normal JioTV web address before an admin password is configured](../images/first-launch-setup.png)
+
+The screenshot shows the **setup notice**, not the password-entry form. Use the private **Web setup** link from the terminal to open that form.
 
 ## 4. Connect your JioTV account
 

@@ -69,18 +69,83 @@ fn asset_for(variant: &str, target: &str, windows: bool) -> String {
     format!("jiotv-{variant}-{target}{}", if windows { ".exe" } else { "" })
 }
 
-/// Parses "v1.2.3" or "1.2.3" into comparable numbers.
-fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+#[derive(Debug, PartialEq, Eq)]
+struct Version {
+    core: (u64, u64, u64),
+    pre: Option<Vec<PreId>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreId {
+    Numeric(u64),
+    Text(String),
+}
+
+impl PreId {
+    fn cmp_semver(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        match (self, other) {
+            (PreId::Numeric(a), PreId::Numeric(b)) => a.cmp(b),
+            (PreId::Numeric(_), PreId::Text(_)) => Ordering::Less,
+            (PreId::Text(_), PreId::Numeric(_)) => Ordering::Greater,
+            (PreId::Text(a), PreId::Text(b)) => a.cmp(b),
+        }
+    }
+}
+
+/// Parses "v1.2.3", "1.2.3-beta.1" or "1.2.3+build" into a comparable
+/// version. A missing patch is treated as zero, matching the tags this
+/// project has published.
+fn parse_version(v: &str) -> Option<Version> {
     let v = v.trim().trim_start_matches('v');
-    let v = v.split(['-', '+']).next()?;
-    let mut parts = v.split('.').map(|p| p.parse::<u64>().ok());
-    Some((parts.next()??, parts.next().flatten().unwrap_or(0), parts.next().flatten().unwrap_or(0)))
+    let v = v.split('+').next()?;
+    let (core, pre) = match v.split_once('-') {
+        Some((core, pre)) => (core, (!pre.is_empty()).then_some(pre)),
+        None => (v, None),
+    };
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
+    let core = (
+        parts.next()??,
+        parts.next().flatten().unwrap_or(0),
+        parts.next().flatten().unwrap_or(0),
+    );
+    let pre = pre.map(|pre| {
+        pre.split('.')
+            .map(|id| match id.parse::<u64>() {
+                Ok(n) => PreId::Numeric(n),
+                Err(_) => PreId::Text(id.to_string()),
+            })
+            .collect()
+    });
+    Some(Version { core, pre })
+}
+
+fn compare_pre(a: &[PreId], b: &[PreId]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for (left, right) in a.iter().zip(b) {
+        match left.cmp_semver(right) {
+            Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    a.len().cmp(&b.len())
 }
 
 fn is_newer(tag: &str, current: &str) -> bool {
-    match (parse_version(tag), parse_version(current)) {
-        (Some(t), Some(c)) => t > c,
-        _ => false,
+    let (Some(tag), Some(current)) = (parse_version(tag), parse_version(current)) else {
+        return false;
+    };
+    match tag.core.cmp(&current.core) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => match (&tag.pre, &current.pre) {
+            (None, None) => false,
+            (None, Some(_)) => true,
+            (Some(_), None) => false,
+            (Some(tag_pre), Some(current_pre)) => {
+                compare_pre(tag_pre, current_pre) == std::cmp::Ordering::Greater
+            }
+        },
     }
 }
 
@@ -262,6 +327,17 @@ mod tests {
         assert!(!is_newer("v0.1.0", "0.1.0"));
         assert!(!is_newer("v0.1.0-rc1", "0.1.0"));
         assert!(!is_newer("nightly", "0.1.0"));
+    }
+
+    #[test]
+    fn prerelease_versions_order_before_the_stable_release() {
+        assert!(is_newer("v1.5.0", "1.5.0-beta.1"));
+        assert!(!is_newer("v1.5.0-beta.1", "1.5.0"));
+        assert!(is_newer("v1.5.0-beta.2", "1.5.0-beta.1"));
+        assert!(is_newer("v1.5.0-beta.10", "1.5.0-beta.2"));
+        assert!(!is_newer("v1.5.0-beta.1", "1.5.0-beta.2"));
+        assert!(is_newer("v1.5.0-rc.1", "1.5.0-beta.2"));
+        assert!(!is_newer("v1.5.0-beta.2", "1.5.0-rc.1"));
     }
 
     #[test]

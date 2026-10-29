@@ -12,6 +12,13 @@ arch=$4
 app_version=$5
 case "$format" in opkg|apk) ;; *) echo "invalid package format: $format" >&2; exit 2 ;; esac
 
+# APK reserves the hyphen for the package release and expects a prerelease
+# suffix after an underscore. Normalise 1.5.0-beta.1 to 1.5.0_beta.1 so the
+# same version is valid for both opkg and apk.
+case "$app_version" in
+  *-*) app_version="${app_version%%-*}_${app_version#*-}" ;;
+esac
+
 index="https://downloads.openwrt.org/releases/${sdk_version}/targets/${target}/"
 listing=$(curl -fsSL "$index")
 archive=$(printf '%s' "$listing" | grep -Eo 'openwrt-sdk-[^" ]+\.tar\.(zst|xz)' | head -n 1 || true)

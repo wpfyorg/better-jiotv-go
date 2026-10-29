@@ -21,6 +21,7 @@ title = "Home TV"
 epg = true
 drm = true
 extras = false
+fastway = false
 disable_auth = false
 debug = false
 log_to_stdout = true
@@ -40,6 +41,7 @@ Save, start with `jiotv --config ./jiotv_go.toml serve`, then open `http://local
 | `disable_logout` | `JIOTV_DISABLE_LOGOUT` | `false` | Boolean. Hide/disable JioTV logout when true. |
 | `drm` | `JIOTV_DRM` | `true` | Boolean. Allow the protected DASH pathway; does not bypass DRM. |
 | `extras` | `JIOTV_EXTRAS` | `false` | Boolean. Enable optional Extras account integration. Requires a build with Extras support. |
+| `fastway` | `JIOTV_FASTWAY` | `false` | Boolean. Enable the optional Fastway Live TV provider. Connect an account with `jiotv fastway login` or Settings before channels appear. |
 | `disable_auth` | `JIOTV_DISABLE_AUTH` | `false` | Boolean. Disable app access checks. Dangerous on reachable networks; use only with a trusted external access control. |
 | `title` | `JIOTV_TITLE` | `"JioTV Go"` | Display title; any TOML string. |
 | `disable_url_encryption` | `JIOTV_DISABLE_URL_ENCRYPTION` | `false` | Boolean. Disable encryption of local proxy parameters. Leave false. |
@@ -54,5 +56,7 @@ Save, start with `jiotv --config ./jiotv_go.toml serve`, then open `http://local
 Boolean environment values must be `true` or `false` in lowercase (as Rust's parser expects). Example: `JIOTV_EPG=true jiotv serve`. For integer lists, use `JIOTV_DEFAULT_LANGUAGES=1,6`.
 
 Older deployments may use the TOML alias `tvplus` or `JIOTV_TVPLUS`. Prefer `extras` and `JIOTV_EXTRAS`; the newer environment variable takes precedence over the older one. `JIOTV_TUNNEL_TOKEN` is also accepted for the optional Cloudflare tunnel flag. Update uses `JIOTV_UPDATE_TOKEN` for private repository access, when required.
+
+When more than one alternate source is connected, Fastway takes priority over Extras, and Extras takes priority over the JioTV catalogue. See [Connect Fastway Live TV](../account-fastway/index.md).
 
 For runtime listening options, see [CLI commands](../configuration-cli/index.md); for protection see [Network and HTTPS](../configuration-network-security/index.md); for storage see [Data and logs](../configuration-storage-logs/index.md).

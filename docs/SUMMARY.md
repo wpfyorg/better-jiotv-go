@@ -36,6 +36,7 @@ Browse in order, or choose the task you need. The categories and article metadat
   - [Connect Your JioTV Account](account-connect-jiotv/index.md)
   - [Switch to Another JioTV Account](account-switch-jiotv/index.md)
   - [Connect Extra Channels](account-extras/index.md)
+  - [Connect Fastway Live TV](account-fastway/index.md)
   - [Admin Sessions and Sign Out](account-sessions/index.md)
 
 ## Using JioTV

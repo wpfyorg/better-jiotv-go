@@ -2,7 +2,7 @@
 title: CLI Commands and Options
 description: Reference for the current Rust jiotv command and its server flags.
 category: Configuration
-keywords: [CLI, serve, login, update, epg, key, autostart, TLS, port]
+keywords: [CLI, serve, login, update, epg, key, autostart, TLS, port, fastway]
 ---
 
 # CLI Commands and Options
@@ -15,6 +15,7 @@ Run `jiotv --help` to see the installed binary's command list. These commands ar
 | `jiotv login otp` | Sign in to the JioTV provider account by OTP from the server terminal. |
 | `jiotv login reset` | Clear JioTV login state. |
 | `jiotv extras login` / `jiotv extras logout` | Connect/disconnect the optional Extras source when built/enabled. |
+| `jiotv fastway login` / `jiotv fastway logout` | Connect/disconnect the optional Fastway provider when `fastway = true` / `JIOTV_FASTWAY=true`. |
 | `jiotv admin password` | Set an admin password from the CLI. |
 | `jiotv key show` / `jiotv key rotate` | Show or replace the IPTV access key. Treat its output as confidential. |
 | `jiotv epg generate` / `jiotv epg delete` | Generate the current guide or remove its cache. |

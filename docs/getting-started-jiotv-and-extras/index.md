@@ -7,7 +7,9 @@ keywords: [JioTV, Extras, TV+, provider, subscription, channels, on demand]
 
 # JioTV and Extras: Which Account Do You Need?
 
-JioTV has two possible content sources. Start with **JioTV** if you want live channels. **Extras** is an optional connection for additional channels, movies and shows. The older name **TV+** may appear in older guides or settings.
+JioTV has two built-in content sources. Start with **JioTV** if you want live channels. **Extras** is an optional connection for additional channels, movies and shows. The older name **TV+** may appear in older guides or settings.
+
+A third optional source, **Fastway Live TV**, can be enabled separately. It uses its own username/password and, while connected, replaces the active catalogue; it takes priority over Extras and JioTV. See [Connect Fastway Live TV](../account-fastway/index.md).
 
 | | JioTV | Extras (TV+) |
 | --- | --- | --- |

@@ -25,7 +25,7 @@ jiotv admin password
 jiotv serve --host 0.0.0.0 --tls
 ```
 
-Keep Termux open while the foreground server runs. On the phone, use `https://localhost:5443/`; other devices on the same trusted network can use the phone's LAN address. Android may restrict background processes or network access when the app is idle. Termux autostart adds a command to its `bash.bashrc` and starts JioTV in the background when a shell opens:
+Keep Termux open while the foreground server runs. On the phone, use `https://localhost:5443/`; other devices on the same trusted network can use the phone's LAN address. Android may restrict background processes or network access when the app is idle. Termux autostart saves the current `JIOTV_*` settings, including a named-tunnel token, in a private environment file, then adds a command to `bash.bashrc` to start JioTV in the background when a shell opens:
 
 ```sh
 jiotv autostart

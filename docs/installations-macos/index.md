@@ -31,7 +31,7 @@ In a terminal, the installer also asks how the server should be set up: build (`
 The same settings can be supplied up front to skip the questions:
 
 ```sh
-JIOTV_VARIANT=slim JIOTV_PROVIDER=jiotv JIOTV_TUNNEL=none sh install.sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | JIOTV_VARIANT=slim JIOTV_PROVIDER=jiotv JIOTV_TUNNEL=none sh
 ```
 
 `JIOTV_ONBOARD=never` turns the flow off. Piping the script into `sh` is fine because prompts read `/dev/tty`, not the pipe; with no terminal the installer behaves exactly as it does without this option.

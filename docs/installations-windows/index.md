@@ -21,7 +21,7 @@ Close and reopen PowerShell if `jiotv` is not found.
 
 In a PowerShell window, the installer switches to a guided setup after downloading: build (`full` or `slim`), account (JioTV, JioTV+, or Fastway when the release supports it), the address other devices will use, whether to expose the server through Cloudflare, and then the account sign-in. Use the arrow keys (or `j`/`k`, or the number keys) and press Enter.
 
-The sign-in step asks for the mobile number and the one-time password inside the wizard, where the OTP is entered masked and the provider's own output is captured rather than printed over the screen. For JioTV+ the wizard lists the connections registered to the number and asks which one to use; Fastway signs in with a username and password instead. Nothing is stored by the installer itself, and a failed sign-in leaves the binary installed with the command to retry printed at the end.
+The sign-in step asks for the mobile number and one-time password inside the wizard. The OTP is masked, and provider output is captured rather than printed over the screen. For JioTV+ the wizard lists registered connections and asks which one to use; Fastway signs in with a username and password instead. The installer does not store the mobile number or OTP. It saves the selected provider and any named-tunnel token in your Windows user environment. A failed sign-in leaves the binary installed and prints a retry command.
 
 Skip the questions by setting the environment before running the script, or turn the flow off entirely:
 
@@ -31,9 +31,9 @@ $env:JIOTV_PROVIDER = 'jiotv'
 $env:JIOTV_TUNNEL = 'none'
 ```
 
-`JIOTV_ONBOARD=never` keeps the plain non-interactive install. Redirected output (CI, scheduled tasks) skips the flow automatically.
+`$env:JIOTV_ONBOARD = 'never'` keeps the plain non-interactive install. Redirected output (CI, scheduled tasks) skips the flow automatically.
 
-Then start the server if you exited before that step:
+The installer configures the account but does not start the server. Start it after setup:
 
 ```powershell
 jiotv login otp
@@ -41,7 +41,7 @@ jiotv admin password
 jiotv serve --host 0.0.0.0 --tls
 ```
 
-Enter the OTP in the terminal. Open `https://localhost:5443/` on the same PC and accept the self-signed certificate warning. Other devices on your trusted LAN can use `https://<this-PC-ip>:5443/`; find the address with `ipconfig`. IPTV players use the HTTP playlist on port `5001`. The `slim` build has no browser interface.
+Enter the OTP in the terminal. The installer configures the account but does not start the server; run the printed `jiotv serve` command after setup. Open `https://localhost:5443/` on the same PC and accept the self-signed certificate warning. Other devices on your trusted LAN can use `https://<this-PC-ip>:5443/`; find the address with `ipconfig`. IPTV players use the authenticated playlist URL printed by the installer. The `slim` build has no browser interface.
 
 The installer accepts `-Variant full|slim`, `-Version latest|<version>`, `-InstallDir <directory>`, and `-Repo <owner/repository>`. For example, to install a specific release in a custom directory:
 

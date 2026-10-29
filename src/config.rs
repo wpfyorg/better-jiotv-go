@@ -104,8 +104,8 @@ impl Config {
         env_bool!(drm, "JIOTV_DRM");
         // `tv_plus` is the documented key; `JIOTV_EXTRAS` is the previous name
         // and is still accepted so existing deployments keep working.
-        env_bool!(extras, "JIOTV_TVPLUS");
         env_bool!(extras, "JIOTV_EXTRAS");
+        env_bool!(extras, "JIOTV_TVPLUS");
         env_bool!(disable_auth, "JIOTV_DISABLE_AUTH");
         env_str!(title, "JIOTV_TITLE");
         env_bool!(disable_url_encryption, "JIOTV_DISABLE_URL_ENCRYPTION");
@@ -195,7 +195,7 @@ mod tests {
         std::env::set_var("JIOTV_TVPLUS", "true");
         std::env::set_var("JIOTV_EXTRAS", "false");
         let cfg = Config::load(None).unwrap();
-        assert!(!cfg.extras);
+        assert!(cfg.extras);
         std::env::remove_var("JIOTV_TVPLUS");
         std::env::remove_var("JIOTV_EXTRAS");
     }

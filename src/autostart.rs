@@ -115,6 +115,37 @@ fn env_file(path_prefix: &str) -> String {
     out
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn termux_env_path() -> anyhow::Result<PathBuf> {
+    let home = std::env::var("HOME").map_err(|_| anyhow::anyhow!("HOME is not set"))?;
+    Ok(PathBuf::from(home).join(".config/jiotv/jiotv.env"))
+}
+
+fn shell_env_file(path_prefix: &str) -> String {
+    let mut vars: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k.starts_with("JIOTV_") && k != "JIOTV_PATH_PREFIX")
+        .collect();
+    vars.push(("JIOTV_PATH_PREFIX".to_string(), path_prefix.to_string()));
+    vars.sort();
+    let mut out = String::from("# Written by `jiotv autostart`; keep this file private.\n");
+    for (key, value) in vars {
+        out.push_str(&format!("export {key}={}\n", shell_quote(&value)));
+    }
+    out
+}
+
+fn termux_start_line(exe: &Path, env: &Path, serve_args: &str) -> String {
+    format!(
+        ". {}\n{} background start --args {} {TERMUX_MARKER}\n",
+        shell_quote(&env.display().to_string()),
+        shell_quote(&exe.display().to_string()),
+        shell_quote(serve_args),
+    )
+}
+
 fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -143,7 +174,7 @@ fn systemctl(user: bool, args: &[&str]) -> anyhow::Result<()> {
 /// `jiotv autostart [--args "serve flags"]`.
 pub fn install(serve_args: &str, config: Option<&str>, path_prefix: &str) -> anyhow::Result<()> {
     if is_termux() {
-        return install_termux(serve_args);
+        return install_termux(serve_args, path_prefix);
     }
     if !has_systemd() {
         anyhow::bail!(
@@ -210,15 +241,17 @@ fn termux_rc() -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(format!("{prefix}/etc/bash.bashrc")))
 }
 
-fn install_termux(serve_args: &str) -> anyhow::Result<()> {
+fn install_termux(serve_args: &str, path_prefix: &str) -> anyhow::Result<()> {
     let rc = termux_rc()?;
     let existing = std::fs::read_to_string(&rc).unwrap_or_default();
+    let env = termux_env_path()?;
+    write_private(&env, &shell_env_file(path_prefix))?;
     if existing.contains(TERMUX_MARKER) {
-        println!("Autostart is already set up in {}.", rc.display());
+        println!("Autostart is already set up in {} (environment in {}).", rc.display(), env.display());
         return Ok(());
     }
     let exe = std::env::current_exe()?.canonicalize()?;
-    let line = format!("{} background start --args \"{}\" {TERMUX_MARKER}\n", exe.display(), serve_args.replace('"', "\\\""));
+    let line = termux_start_line(&exe, &env, serve_args);
     let mut contents = existing;
     if !contents.is_empty() && !contents.ends_with('\n') {
         contents.push('\n');
@@ -234,6 +267,9 @@ fn remove_termux() -> anyhow::Result<()> {
     let existing = std::fs::read_to_string(&rc).unwrap_or_default();
     let kept: String = existing.lines().filter(|l| !l.contains(TERMUX_MARKER)).map(|l| format!("{l}\n")).collect();
     std::fs::write(&rc, kept)?;
+    if let Ok(env) = termux_env_path() {
+        let _ = std::fs::remove_file(env);
+    }
     println!("Removed autostart from {}.", rc.display());
     Ok(())
 }
@@ -264,5 +300,32 @@ mod tests {
     fn env_file_pins_the_store_path() {
         let env = env_file("/var/lib/jiotv/");
         assert!(env.contains("JIOTV_PATH_PREFIX=\"/var/lib/jiotv/\"\n"));
+    }
+
+    #[test]
+    fn shell_quote_preserves_single_quotes() {
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn termux_autostart_sources_private_environment_before_starting() {
+        let key = "JIOTV_AUTOSTART_TEST_TOKEN";
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, "token with 'quote'");
+        let contents = shell_env_file("/data/data/com.termux/files/home/.jiotv/");
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+
+        assert!(contents.contains("export JIOTV_PATH_PREFIX='/data/data/com.termux/files/home/.jiotv/'\n"));
+        assert!(contents.contains("export JIOTV_AUTOSTART_TEST_TOKEN='token with '\\''quote'\\'''\n"));
+        let line = termux_start_line(
+            Path::new("/data/data/com.termux/files/usr/bin/jiotv"),
+            Path::new("/data/data/com.termux/files/home/.config/jiotv/jiotv.env"),
+            "--host 0.0.0.0 --tls --tunnel",
+        );
+        assert!(line.starts_with(". '/data/data/com.termux/files/home/.config/jiotv/jiotv.env'\n"));
+        assert!(line.contains("background start --args '--host 0.0.0.0 --tls --tunnel'"));
     }
 }

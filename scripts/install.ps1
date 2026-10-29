@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('full', 'slim')][string]$Variant = 'full',
+    [ValidateSet('full', 'slim')][string]$Variant,
     [string]$Version = 'latest',
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\JioTV'),
     [string]$Repo = 'wpfyorg/better-jiotv-go',
@@ -8,12 +8,21 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($env:JIOTV_INSTALL_TLS -eq '0') { $NoTls = $true }
 
-$VariantExplicit = [bool]$env:JIOTV_VARIANT
+$VariantExplicit = $PSBoundParameters.ContainsKey('Variant')
+if ($env:JIOTV_VARIANT) {
+    if ($env:JIOTV_VARIANT -notin @('full', 'slim')) { throw 'JIOTV_VARIANT must be full or slim' }
+    if (-not $VariantExplicit) { $Variant = $env:JIOTV_VARIANT }
+    $VariantExplicit = $true
+}
+if (-not $Variant) { $Variant = 'full' }
 $Onboard = if ($env:JIOTV_ONBOARD) { $env:JIOTV_ONBOARD } else { 'auto' }
 if ($Onboard -notin @('auto', 'always', 'never')) { throw 'JIOTV_ONBOARD must be auto, always or never' }
 $Provider = if ($env:JIOTV_PROVIDER) { $env:JIOTV_PROVIDER } else { '' }
+if ($Provider -in @('tv+', 'tvplus')) { $Provider = 'extras' }
+if ($Provider -notin @('', 'jiotv', 'extras', 'fastway')) { throw 'JIOTV_PROVIDER must be jiotv, tv+ or fastway' }
 $PublicHost = if ($env:JIOTV_PUBLIC_HOST) { $env:JIOTV_PUBLIC_HOST } else { '' }
 $Tunnel = if ($env:JIOTV_TUNNEL) { $env:JIOTV_TUNNEL } else { '' }
+if ($Tunnel -notin @('', 'none', 'temp', 'named')) { throw 'JIOTV_TUNNEL must be none, temp, or named' }
 $TunnelToken = if ($env:JIOTV_TUNNEL_TOKEN) { $env:JIOTV_TUNNEL_TOKEN } else { '' }
 
 # Same rule as the shell installer: only a real console drives the flow, so
@@ -28,6 +37,16 @@ function Write-Ok([string]$Text) { Write-Host "  + $Text" -ForegroundColor Green
 function Write-Warn2([string]$Text) { Write-Host "  ! $Text" -ForegroundColor Yellow }
 function Write-Fail([string]$Text) { Write-Host "  x $Text" -ForegroundColor Red }
 function Write-Step([string]$Text) { Write-Host ''; Write-Host "  * $Text" -ForegroundColor Cyan; Write-Host '' }
+
+function Set-UserEnvironment([string]$Name, [AllowNull()][string]$Value) {
+    if ([string]::IsNullOrEmpty($Value)) {
+        [Environment]::SetEnvironmentVariable($Name, $null, 'User')
+        Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
+        return
+    }
+    [Environment]::SetEnvironmentVariable($Name, $Value, 'User')
+    Set-Item -LiteralPath "Env:$Name" -Value $Value
+}
 
 function Show-Banner([string]$Subtitle) {
     Write-Host ''
@@ -349,6 +368,16 @@ try {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $destination = Join-Path $InstallDir 'jiotv.exe'
     $alreadyInstalled = Test-Path -LiteralPath $destination
+    $keepExistingAccount = $false
+    if ($Interactive -and $alreadyInstalled) {
+        Write-Step 'JioTV is already installed here'
+        $update = Select-Option 'Update it in place and keep the current account?' @(
+            @{ Value = $true; Label = 'Yes' },
+            @{ Value = $false; Label = 'No' }
+        )
+        if (-not $update) { Write-Ok 'Left as it was'; return }
+        $keepExistingAccount = $true
+    }
     Copy-Item -LiteralPath $binary -Destination $destination -Force
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $entries = @($userPath -split ';' | Where-Object { $_ })
@@ -362,13 +391,10 @@ try {
     if (-not $NoTls) { $serveLine += ' --tls' }
 
     if ($Interactive) {
-        if ($alreadyInstalled) {
-            Write-Step 'JioTV is already installed here'
-            $update = Select-Option 'Update it in place and keep the current account?' @(
-                @{ Value = $true; Label = 'Yes' },
-                @{ Value = $false; Label = 'No' }
-            )
-            if (-not $update) { Write-Ok 'Left as it was'; return }
+        if ($keepExistingAccount) {
+            Write-Ok 'Updated the binary; existing account and environment settings were kept'
+            Write-Host "  Start it with: $serveLine"
+            return
         }
 
         $jiotv = $destination
@@ -412,7 +438,7 @@ try {
             Write-Host '  Create a tunnel at dash.cloudflare.com, point its public hostname at' -ForegroundColor DarkGray
             Write-Host '  http://localhost:5001, then copy the token from the tunnel' -ForegroundColor DarkGray
             Write-Warn2 'Anyone with that hostname can reach the sign-in page. Keep the admin password strong.'
-            $TunnelToken = Read-Secret 'Cloudflare tunnel token'
+            if (-not $TunnelToken) { $TunnelToken = Read-Secret 'Cloudflare tunnel token' }
             if (-not $TunnelToken.StartsWith('eyJ')) {
                 Write-Warn2 'That does not look like a tunnel token; using a temporary URL instead'
                 $Tunnel = 'temp'
@@ -423,6 +449,17 @@ try {
             Write-Warn2 'Anyone with the address can reach the sign-in page. Keep the admin password strong.'
         }
         if ($Tunnel -ne 'none') { $serveLine += ' --tunnel' }
+
+        $tvPlusEnabled = if ($Provider -eq 'extras') { 'true' } else { 'false' }
+        $fastwayEnabled = if ($Provider -eq 'fastway') { 'true' } else { 'false' }
+        Set-UserEnvironment 'JIOTV_TVPLUS' $tvPlusEnabled
+        Set-UserEnvironment 'JIOTV_FASTWAY' $fastwayEnabled
+        if ($Tunnel -eq 'named' -and $TunnelToken) {
+            Set-UserEnvironment 'JIOTV_TUNNEL_TOKEN' $TunnelToken
+        }
+        else {
+            Set-UserEnvironment 'JIOTV_TUNNEL_TOKEN' $null
+        }
 
         # Sign-in happens inside the wizard: the commands read plain stdin
         # lines, so the number and the OTP are typed here, once.
@@ -457,14 +494,31 @@ try {
             if ($NoTls) { Write-Host "  browser   http://${PublicHost}:5001/" }
             else { Write-Host "  browser   https://${PublicHost}:5443/" }
         }
-        Write-Host "  playlist  http://${PublicHost}:5001/"
+        $playlistPath = (& $jiotv key show 2>$null | Out-String).Trim()
+        if ($playlistPath.StartsWith('http://') -or $playlistPath.StartsWith('https://')) {
+            $playlistUrl = $playlistPath
+        }
+        elseif ($playlistPath.StartsWith('/')) {
+            $playlistUrl = "http://${PublicHost}:5001$playlistPath"
+        }
+        elseif ($playlistPath) {
+            $playlistUrl = "http://${PublicHost}:5001/$playlistPath"
+        }
+        else {
+            $playlistUrl = ''
+        }
+        if ($playlistUrl) { Write-Host "  playlist  $playlistUrl" }
+        else { Write-Warn2 "Could not get the authenticated playlist URL; run 'jiotv key show' after starting the server" }
         if ($Tunnel -ne 'none') { Write-Host '  remote    a Cloudflare tunnel address' }
         Write-Host ''
         if ($TunnelToken) {
-            Write-Host "  Store the tunnel token in the service environment so it survives a restart:"
-            Write-Host "    setx JIOTV_TUNNEL_TOKEN `"$TunnelToken`""
+            Write-Host '  The tunnel token was saved to your user environment without printing it.'
         }
-        Write-Host "  Start it with: $serveLine"
+        $startParts = @()
+        if ($Provider -eq 'extras') { $startParts += "`$env:JIOTV_TVPLUS = 'true'" }
+        if ($Provider -eq 'fastway') { $startParts += "`$env:JIOTV_FASTWAY = 'true'" }
+        $startParts += $serveLine
+        Write-Host "  Start it with: $($startParts -join '; ')"
         Write-Host '  Run this installer again to change the account or the build.'
         Write-Host ''
         return

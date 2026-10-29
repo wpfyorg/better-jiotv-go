@@ -15,6 +15,10 @@ if [ ! -f "$installer" ]; then
 fi
 
 if ! command -v pwsh >/dev/null 2>&1; then
+    if [ -n "${CI:-}" ]; then
+        echo "pwsh is required in CI for the PowerShell onboarding test" >&2
+        exit 1
+    fi
     echo "pwsh is not installed; skipping the PowerShell onboarding test"
     exit 0
 fi

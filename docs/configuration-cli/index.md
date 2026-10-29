@@ -37,7 +37,7 @@ All commands accept `--config PATH`. `--skip-update-check` suppresses the startu
 | `--tunnel` | off | Start a Cloudflare tunnel where supported. |
 | `--tunnel-token` | unset | Named tunnel token; keep private. |
 
-`--tunnel-token` is visible in the process list. Prefer `JIOTV_TUNNEL_TOKEN`, which the guided installer and the OpenWrt service use. `jiotv autostart` records the current `JIOTV_*` variables in a private environment file for the service, so that is where an installer-set account or tunnel choice persists across restarts.
+`--tunnel-token` is visible in the process list. Prefer `JIOTV_TUNNEL_TOKEN`, which the guided installer and OpenWrt service use. `jiotv autostart` records current `JIOTV_*` variables in a private environment file for systemd and Termux autostart. On other systems, persist settings in a user-owned environment file or set them in the shell that starts the server.
 
 Example: `jiotv serve --host 127.0.0.1 --port 5001 --tls`. This serves HTTP on 5001 and HTTPS on 5443. When no certificate files are supplied, the server generates a self-signed certificate; browsers may show a warning until you trust it.
 

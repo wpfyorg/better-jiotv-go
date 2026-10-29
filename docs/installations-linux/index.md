@@ -38,7 +38,7 @@ Run the installer from a terminal and it walks through setup instead of only dro
 
 Piping the script into `sh` still works: every prompt reads `/dev/tty`, never the `curl` pipe. When there is no terminal — Docker, CI, cron, redirected output — the flow is skipped and the installer behaves exactly as it did before.
 
-Sign-in is retried three times. If it still fails, the binary stays installed, the service is left in a working state, and the installer exits non-zero with the command to finish the sign-in later. Passwords and one-time codes are never written to disk by the installer; the tunnel token is stored in the service configuration.
+Sign-in is retried up to three times. If it still fails, the binary stays installed, no service is installed or started, and the installer exits non-zero with the command to finish sign-in later. Passwords and one-time codes are never written to disk by the installer; the tunnel token is stored in the service configuration when a service is installed.
 
 ## Start and sign in
 

@@ -43,11 +43,15 @@ mkdir -m 700 "$tmp"
 # Restores the terminal and removes the working directory on every exit path,
 # including a half-entered prompt.
 ui_cleanup() {
+  if [ -n "${ob_stopped_service:-}" ]; then ob_restart_existing_service >/dev/null 2>&1 || true; fi
   ui_raw_leave 2>/dev/null || true
   [ -z "${ob_fifo:-}" ] || exec 5>&- 2>/dev/null || true
   rm -rf "${tmp:-}" 2>/dev/null || true
 }
-trap 'ui_cleanup' 0 HUP INT TERM
+trap 'ui_cleanup' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 say() { printf '%s==>%s %s\n' "$ui_grey" "$ui_reset" "$*"; }
 note() { printf '    %s\n' "$*"; }
@@ -439,12 +443,14 @@ ob_choose_tunnel() {
     named)
       printf '  %sCreate a tunnel at dash.cloudflare.com, point its public hostname at\n  http://localhost:5001, then copy the token from the tunnel%s\n' "$ui_dim" "$ui_reset"
       ui_warn "Anyone with that hostname can reach the sign-in page. Keep the admin password strong."
-      ui_password "Cloudflare tunnel token"
-      tunnel_token=$ui_result
+      if [ -z "$tunnel_token" ]; then
+        ui_password "Cloudflare tunnel token"
+        tunnel_token=$ui_result
+      fi
       case "$tunnel_token" in
         eyJ*) ;;
-        '') ui_fail "No token entered; using a temporary URL instead"; tunnel=temp ;;
-        *) ui_warn "That does not look like a Cloudflare tunnel token"; tunnel=temp ;;
+        '') ui_fail "No token entered; using a temporary URL instead"; tunnel=temp; tunnel_token= ;;
+        *) ui_warn "That does not look like a Cloudflare tunnel token"; tunnel=temp; tunnel_token= ;;
       esac
       ;;
   esac
@@ -643,26 +649,106 @@ ob_serve_args() {
   printf '%s\n' "$ob_args"
 }
 
+ob_shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+ob_write_shell_env() {
+  [ "$openwrt" = true ] && return 0
+  ob_env_home=${HOME:-$install_dir}
+  ob_env_dir=${XDG_CONFIG_HOME:-$ob_env_home/.config}/jiotv
+  mkdir -p "$ob_env_dir"
+  chmod 700 "$ob_env_dir" 2>/dev/null || true
+  ob_env_file=$ob_env_dir/installer.env
+  ob_tvplus_enabled=false
+  ob_fastway_enabled=false
+  [ "$provider" != extras ] || ob_tvplus_enabled=true
+  [ "$provider" != fastway ] || ob_fastway_enabled=true
+  (
+    umask 077
+    {
+      printf 'export JIOTV_TVPLUS=%s\n' "$(ob_shell_quote "$ob_tvplus_enabled")"
+      printf 'export JIOTV_FASTWAY=%s\n' "$(ob_shell_quote "$ob_fastway_enabled")"
+      [ -z "$tunnel_token" ] || printf 'export JIOTV_TUNNEL_TOKEN=%s\n' "$(ob_shell_quote "$tunnel_token")"
+    } >"$ob_env_file"
+  )
+  chmod 600 "$ob_env_file"
+}
+
 ob_install_service() {
   ob_bin=$1
   ob_service=0
-  [ "$start_service" = 1 ] || return 0
   JIOTV_TVPLUS=$( [ "$provider" = extras ] && echo true || echo false )
   JIOTV_FASTWAY=$( [ "$provider" = fastway ] && echo true || echo false )
   export JIOTV_TVPLUS JIOTV_FASTWAY
   if [ -n "$tunnel_token" ]; then export JIOTV_TUNNEL_TOKEN="$tunnel_token"; fi
+  ob_write_shell_env
+  [ "$start_service" = 1 ] || return 0
   if "$ob_bin" autostart --args "$(ob_serve_args)" >"$tmp/autostart.log" 2>&1; then
     ui_ok "Installed as a service and started"
     ob_service=1
+    ob_stopped_service=
   else
     ob_service=0
-    ui_warn "Could not install a boot service here; start it yourself with: jiotv $(ob_serve_args)"
+    if [ -n "${ob_stopped_service:-}" ]; then ob_restart_existing_service >/dev/null 2>&1 || true; fi
+    ui_warn "Could not install a boot service here; use the start command in the summary"
   fi
+}
+
+ob_restart_existing_service() {
+  case "${ob_stopped_service:-}" in
+    system) systemctl start jiotv ;;
+    user) systemctl --user start jiotv ;;
+    *) return 1 ;;
+  esac
+  ob_stopped_service=
+}
+
+ob_jiotv_process_running() {
+  if command -v pgrep >/dev/null 2>&1; then
+    pgrep -x jiotv >/dev/null 2>&1
+  elif command -v pidof >/dev/null 2>&1; then
+    [ -n "$(pidof jiotv 2>/dev/null || true)" ]
+  else
+    return 1
+  fi
+}
+
+ob_stop_existing_service() {
+  ob_stopped_service=
+  command -v systemctl >/dev/null 2>&1 || return 0
+  if systemctl is-active --quiet jiotv 2>/dev/null; then
+    ob_stopped_service=system
+    systemctl stop jiotv || return 1
+  elif systemctl --user is-active --quiet jiotv 2>/dev/null; then
+    ob_stopped_service=user
+    systemctl --user stop jiotv || return 1
+  else
+    # Do not sign in while an unmanaged/foreground server may still write its
+    # in-memory store over the credentials being updated by this installer.
+    ob_jiotv_process_running && return 1
+    return 0
+  fi
+  ob_waited=0
+  while [ "$ob_waited" -lt "$ready_timeout" ]; do
+    case "$ob_stopped_service" in
+      system) systemctl is-active --quiet jiotv 2>/dev/null || { ob_jiotv_process_running || return 0; } ;;
+      user) systemctl --user is-active --quiet jiotv 2>/dev/null || { ob_jiotv_process_running || return 0; } ;;
+    esac
+    ob_waited=$((ob_waited + 1))
+    sleep 1
+  done
+  return 1
 }
 
 ob_summary() {
   ob_bin=$1
   ob_ip=${public_host:-localhost}
+  case "$ob_ip" in
+    \[*\]) ob_url_ip=$ob_ip ;;
+    *:*) ob_url_ip="[$ob_ip]" ;;
+    *) ob_url_ip=$ob_ip ;;
+  esac
   ob_http=5001
   ob_https=5443
   if [ "$openwrt" = true ]; then
@@ -686,19 +772,28 @@ ob_summary() {
       printf '  %sbrowser%s   %shttp://%s:%s/%s\n' "$ui_dim" "$ui_reset" "$ui_bold" "$ob_ip" "$ob_http" "$ui_reset"
     fi
   fi
-  printf '  %splaylist%s  http://%s:%s/\n' "$ui_dim" "$ui_reset" "$ob_ip" "$ob_http"
+  if "$ob_bin" key show >"$tmp/playlist-path" 2>/dev/null; then
+    ob_playlist_path=$(cat "$tmp/playlist-path")
+    case "$ob_playlist_path" in
+      http://*|https://*) ob_playlist_url=$ob_playlist_path ;;
+      /*) ob_playlist_url="http://$ob_url_ip:$ob_http$ob_playlist_path" ;;
+      *) ob_playlist_url="http://$ob_url_ip:$ob_http/$ob_playlist_path" ;;
+    esac
+    printf '  %splaylist%s  %s\n' "$ui_dim" "$ui_reset" "$ob_playlist_url"
+  else
+    ui_warn "Could not get the authenticated playlist URL; run 'jiotv key show' after starting the server"
+  fi
   case "$tunnel" in
     temp) printf '  %sremote%s    a trycloudflare.com address, printed by the service each start\n' "$ui_dim" "$ui_reset" ;;
     named) printf '  %sremote%s    your Cloudflare hostname\n' "$ui_dim" "$ui_reset" ;;
   esac
-  if "$ob_bin" key show >"$tmp/key.log" 2>&1; then
-    if [ -s "$tmp/key.log" ]; then
-      printf '  %saccess%s    %s\n' "$ui_dim" "$ui_reset" "$(cat "$tmp/key.log")"
-    fi
-  fi
   printf '\n'
   if [ "$ob_service" != 1 ]; then
-    printf '  Start it with: %sjiotv %s%s\n' "$ui_bold" "$(ob_serve_args)" "$ui_reset"
+    if [ -n "${ob_env_file:-}" ]; then
+      printf '  Start it with: %s. %s && jiotv serve %s%s\n' "$ui_bold" "$(ob_shell_quote "$ob_env_file")" "$(ob_serve_args)" "$ui_reset"
+    else
+      printf '  Start it with: %sjiotv serve %s%s\n' "$ui_bold" "$(ob_serve_args)" "$ui_reset"
+    fi
   fi
   if [ "$variant" = full ]; then
     printf '  Open the address above and sign in with the admin password.\n'
@@ -803,7 +898,10 @@ if [ "$openwrt" = true ]; then
   # terminal login cannot overwrite the state the server writes at start.
   ob_creds_done=0
   if onboard_enabled; then
-    if "$init_script" running >/dev/null 2>&1; then stop_service || true; fi
+    if ! stop_service; then
+      ui_fail "Could not stop the existing service; account setup was not started"
+      exit 1
+    fi
     ob_choose_provider /usr/bin/jiotv
     ob_choose_host
     ob_choose_tunnel
@@ -976,6 +1074,19 @@ fi
 [ -n "$install_dir" ] || { echo "HOME is unset; set JIOTV_INSTALL_DIR" >&2; exit 1; }
 was_installed=false
 [ -x "$install_dir/jiotv" ] && was_installed=true
+ob_existing_update=false
+if [ "$was_installed" = true ] && onboard_enabled; then
+  ui_step "JioTV is already installed here"
+  if ! ui_confirm "Update it in place and keep the current account?" yes; then
+    ui_ok "Left as it was"
+    exit 0
+  fi
+  ob_existing_update=true
+fi
+if [ "$ob_existing_update" = true ] && ! ob_stop_existing_service; then
+  ui_fail "Could not stop the existing service; the installed binary was left unchanged"
+  exit 1
+fi
 mkdir -p "$install_dir"
 if command -v install >/dev/null 2>&1; then install -m 0755 "$tmp/$asset" "$install_dir/jiotv"
 else cp "$tmp/$asset" "$install_dir/jiotv" && chmod 0755 "$install_dir/jiotv"
@@ -985,31 +1096,46 @@ case ":${PATH:-}:" in *":$install_dir:"*) ;; *) echo "Add $install_dir to PATH t
 
 if onboard_enabled; then
   jiotv_bin=$install_dir/jiotv
-  if [ "$was_installed" = true ]; then
-    ui_step "JioTV is already installed here"
-    if ! ui_confirm "Update it in place and keep the current account?" yes; then
-      ui_ok "Left as it was"
-      exit 0
+  if [ "$ob_existing_update" = true ]; then
+    if [ "$start_service" = 1 ] && ob_restart_existing_service; then
+      ui_ok "Updated and restarted the existing JioTV service; account settings were kept"
+    else
+      ui_ok "Updated; the existing account settings were kept"
+      ui_note "If JioTV was already running, restart it to load the updated binary."
+      [ "$start_service" = 1 ] || ob_stopped_service=
     fi
+    exit 0
   fi
   ob_choose_provider "$jiotv_bin"
   ob_choose_host
   ob_choose_tunnel
+  if ! ob_stop_existing_service; then
+    ui_fail "Could not stop the existing service; account setup was not started"
+    exit 1
+  fi
+  JIOTV_TVPLUS=$( [ "$provider" = extras ] && echo true || echo false )
+  JIOTV_FASTWAY=$( [ "$provider" = fastway ] && echo true || echo false )
+  export JIOTV_TVPLUS JIOTV_FASTWAY
+  if [ -n "$tunnel_token" ]; then export JIOTV_TUNNEL_TOKEN="$tunnel_token"; fi
+  ob_write_shell_env
   if ob_credentials "$jiotv_bin"; then
     ob_admin_password "$jiotv_bin"
     ob_install_service "$jiotv_bin"
     ob_summary "$jiotv_bin"
+    [ "$start_service" = 1 ] || ob_stopped_service=
     exit 0
   fi
-  ob_dialog_show
-  ob_dialog_show
   ui_fail "The install is complete but the account is not connected"
   case "$provider" in
     extras) ob_login_cmd=${ob_tvplus_args:-'extras login'} ;;
     fastway) ob_login_cmd='fastway login' ;;
     *) ob_login_cmd='login otp' ;;
   esac
-  printf '\n  Sign in when you are ready: %sjiotv %s%s\n\n' "$ui_bold" "$ob_login_cmd" "$ui_reset"
+  if [ -n "${ob_env_file:-}" ]; then
+    printf '\n  Sign in when you are ready: . %s && jiotv %s\n\n' "$(ob_shell_quote "$ob_env_file")" "$ob_login_cmd"
+  else
+    printf '\n  Sign in when you are ready: %sjiotv %s%s\n\n' "$ui_bold" "$ob_login_cmd" "$ui_reset"
+  fi
   exit 1
 fi
 

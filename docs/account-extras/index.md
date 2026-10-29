@@ -7,7 +7,7 @@ keywords: [JioTV+, account, OTP, JioTV+ channels, TV+]
 
 # Connect JioTV+
 
-**JioTV+** is an optional second source. It appears in Settings only when `tv_plus` is enabled in the server configuration. It requires a separate registered mobile number and an eligible plan.
+**JioTV+** is an optional second source. It appears in Settings when `tv_plus` is enabled and the account has not been locked. A **Lock** selection is saved and overrides the server setting across restarts; unlock JioTV+ from **Channels** with the account's unlock code. It requires a separate registered mobile number and an eligible plan.
 
 1. Open **Settings** and find **JioTV+ channels**.
 2. Enter the registered 10-digit mobile number and select **Continue**.
@@ -20,4 +20,4 @@ keywords: [JioTV+, account, OTP, JioTV+ channels, TV+]
 
 To disconnect, select **Disconnect** on the card and confirm. **Lock** turns off the JioTV+ source without disconnecting its provider account; it does not sign out the web interface. The server may hide provider logout controls when logout is disabled in its configuration.
 
-If the source is unavailable in Settings, check that this is a JioTV+-enabled server build and that JioTV+ is enabled in [server configuration](../configuration-reference/index.md).
+If the source is unavailable in Settings, check the `tv_plus` setting in [server configuration](../configuration-reference/index.md) and whether JioTV+ has been locked. A saved lock must be cleared from **Channels** with the unlock code; changing `tv_plus` alone does not clear it.

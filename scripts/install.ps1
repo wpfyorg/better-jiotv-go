@@ -460,6 +460,12 @@ try {
         else {
             Set-UserEnvironment 'JIOTV_TUNNEL_TOKEN' $null
         }
+        $providerEnv = switch ($Provider) {
+            'extras'  { "`$env:JIOTV_TVPLUS = 'true'; `$env:JIOTV_FASTWAY = 'false'; " }
+            'fastway' { "`$env:JIOTV_TVPLUS = 'false'; `$env:JIOTV_FASTWAY = 'true'; " }
+            default   { "`$env:JIOTV_TVPLUS = 'false'; `$env:JIOTV_FASTWAY = 'false'; " }
+        }
+        $serveLine = "$providerEnv$serveLine"
 
         # Sign-in happens inside the wizard: the commands read plain stdin
         # lines, so the number and the OTP are typed here, once.
@@ -514,11 +520,7 @@ try {
         if ($TunnelToken) {
             Write-Host '  The tunnel token was saved to your user environment without printing it.'
         }
-        $startParts = @()
-        if ($Provider -eq 'extras') { $startParts += "`$env:JIOTV_TVPLUS = 'true'" }
-        if ($Provider -eq 'fastway') { $startParts += "`$env:JIOTV_FASTWAY = 'true'" }
-        $startParts += $serveLine
-        Write-Host "  Start it with: $($startParts -join '; ')"
+        Write-Host "  Start it with: $serveLine"
         Write-Host '  Run this installer again to change the account or the build.'
         Write-Host ''
         return

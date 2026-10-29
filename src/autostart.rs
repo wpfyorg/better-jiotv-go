@@ -139,11 +139,29 @@ fn shell_env_file(path_prefix: &str) -> String {
 
 fn termux_start_line(exe: &Path, env: &Path, serve_args: &str) -> String {
     format!(
-        ". {}\n{} background start --args {} {TERMUX_MARKER}\n",
+        ". {}; {} background start --args {} {TERMUX_MARKER}\n",
         shell_quote(&env.display().to_string()),
         shell_quote(&exe.display().to_string()),
         shell_quote(serve_args),
     )
+}
+
+fn termux_rc_contents(existing: &str, start_line: &str) -> (String, bool) {
+    let already_set_up = existing.contains(TERMUX_MARKER);
+    let mut contents = if already_set_up {
+        existing
+            .lines()
+            .filter(|line| !line.contains(TERMUX_MARKER))
+            .map(|line| format!("{line}\n"))
+            .collect()
+    } else {
+        existing.to_string()
+    };
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(start_line);
+    (contents, already_set_up)
 }
 
 fn write_private(path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -246,19 +264,16 @@ fn install_termux(serve_args: &str, path_prefix: &str) -> anyhow::Result<()> {
     let existing = std::fs::read_to_string(&rc).unwrap_or_default();
     let env = termux_env_path()?;
     write_private(&env, &shell_env_file(path_prefix))?;
-    if existing.contains(TERMUX_MARKER) {
-        println!("Autostart is already set up in {} (environment in {}).", rc.display(), env.display());
-        return Ok(());
-    }
     let exe = std::env::current_exe()?.canonicalize()?;
     let line = termux_start_line(&exe, &env, serve_args);
-    let mut contents = existing;
-    if !contents.is_empty() && !contents.ends_with('\n') {
-        contents.push('\n');
-    }
-    contents.push_str(&line);
+    let (contents, already_set_up) = termux_rc_contents(&existing, &line);
     std::fs::write(&rc, contents)?;
-    println!("jiotv will start in the background when Termux opens ({}).", rc.display());
+    if already_set_up {
+        println!("Updated JioTV autostart in {} (environment in {}).", rc.display(), env.display());
+    } else {
+        println!("jiotv will start in the background when Termux opens ({}).", rc.display());
+        println!("Settings from JIOTV_* variables are in {} (readable only by you).", env.display());
+    }
     Ok(())
 }
 
@@ -325,7 +340,16 @@ mod tests {
             Path::new("/data/data/com.termux/files/home/.config/jiotv/jiotv.env"),
             "--host 0.0.0.0 --tls --tunnel",
         );
-        assert!(line.starts_with(". '/data/data/com.termux/files/home/.config/jiotv/jiotv.env'\n"));
+        assert!(line.starts_with(". '/data/data/com.termux/files/home/.config/jiotv/jiotv.env'; "));
         assert!(line.contains("background start --args '--host 0.0.0.0 --tls --tunnel'"));
+    }
+
+    #[test]
+    fn termux_autostart_replaces_stale_arguments() {
+        let old = "alias ll='ls -l'\n/home/jiotv background start --args '--host 0.0.0.0' # jiotv autostart\n";
+        let new = ". '/home/.config/jiotv/jiotv.env'; /home/jiotv background start --args '--host 0.0.0.0 --tunnel' # jiotv autostart\n";
+        let (contents, was_set_up) = termux_rc_contents(old, new);
+        assert!(was_set_up);
+        assert_eq!(contents, "alias ll='ls -l'\n".to_string() + new);
     }
 }

@@ -31,6 +31,8 @@ Keep Termux open while the foreground server runs. On the phone, use `https://lo
 jiotv autostart
 ```
 
+If you configure a named tunnel when setting up autostart manually, include its serve flags: `jiotv autostart --args "--tls --tunnel"`. Autostart saves the current `JIOTV_*` values privately and refreshes its startup command when you run it again with different flags.
+
 Remove that startup entry with `jiotv autostart remove`. Update with `jiotv update`. See [Update and uninstall](../maintenance-update-uninstall/index.md) and [data, backups and logs](../configuration-storage-logs/index.md).
 
 ## Verify and troubleshoot

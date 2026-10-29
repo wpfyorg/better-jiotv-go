@@ -365,13 +365,18 @@ impl Client {
         let mut req = self
             .http
             .post(format!("{}/{}", e.auth, e.send_otp))
-            .header(reqwest::header::USER_AGENT, CLIENT_USER_AGENT);
+            .header(reqwest::header::USER_AGENT, CLIENT_USER_AGENT)
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            );
         for (k, v) in self.login_headers() {
             req = req.header(&k, v);
         }
         req = req
             .header("number", n)
-            .header("identifierid", identifier_id);
+            .header("identifierid", identifier_id)
+            .body("");
         let resp = req.send().await?;
         check_status(&resp, "sendotp")?;
         Ok(resp.json().await?)
@@ -1569,7 +1574,7 @@ mod tests {
     /// back, per the project's rule against live calls in tests.
     #[tokio::test]
     async fn full_login_flow_against_mock_server() {
-        use wiremock::matchers::{method, path};
+        use wiremock::matchers::{body_string, header, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let auth_server = MockServer::start().await;
@@ -1577,6 +1582,11 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/apis/v3.2/stbotplogin/sendotp"))
+            .and(header(
+                "content-type",
+                "application/x-www-form-urlencoded",
+            ))
+            .and(body_string(""))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "code": 0, "message": "ok", "identifier": "redacted-identifier", "fttxIds": []
             })))

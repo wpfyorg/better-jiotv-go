@@ -7,12 +7,14 @@ on:
       - 'docs/**'
       - '.github/workflows/docs.yml'
       - 'scripts/check-doc-links.py'
+      - 'scripts/build-docs-pages.py'
   pull_request:
     types: [labeled, synchronize, reopened]
     paths:
       - 'docs/**'
       - '.github/workflows/docs.yml'
       - 'scripts/check-doc-links.py'
+      - 'scripts/build-docs-pages.py'
 
 permissions:
   contents: read
@@ -23,7 +25,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  validate:
+  build:
     # Pull requests run only after Codex review is clean: the `codex-clean` label
     # is added once the review has no open findings. Pushes to main always run.
     # A "skipped" result on an unlabeled pull request means CI has not run, not
@@ -34,4 +36,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@mdbook
+      - uses: actions/configure-pages@v5
       - run: python3 scripts/check-doc-links.py
+      - run: python3 scripts/build-docs-pages.py
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/book
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

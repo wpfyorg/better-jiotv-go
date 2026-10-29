@@ -7,7 +7,7 @@ keywords: [JioTV+, account, OTP, JioTV+ channels, TV+]
 
 # Connect JioTV+
 
-**JioTV+** is an optional second source. It appears in Settings only when JioTV+ is enabled in the server configuration and the build includes JioTV+ support. It may use a registered mobile number and an eligible plan.
+**JioTV+** is an optional second source. It appears in Settings only when `tv_plus` is enabled in the server configuration. It requires a separate registered mobile number and an eligible plan.
 
 1. Open **Settings** and find **JioTV+ channels**.
 2. Enter the registered 10-digit mobile number and select **Continue**.

@@ -867,6 +867,16 @@ mod tests {
     }
 
     #[test]
+    fn extras_epg_day_offset_uses_programme_epoch() {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        assert_eq!(epg_day_offset_from_epoch(now_ms - 3 * DAY_MS), 3);
+        assert_eq!(epg_day_offset_from_epoch(now_ms + DAY_MS), 0);
+    }
+
+    #[test]
     fn day_offset_is_zero_without_a_server_date() {
         assert_eq!(web_epg_day_offset(br#"{"epg":[]}"#), 0);
         assert_eq!(web_epg_day_offset(b"not json"), 0);

@@ -232,24 +232,33 @@
 
   $effect(() => {
     const current = id;
+    let stale = false;
     channel = null;
     guide = [];
     guideError = "";
     guideLoading = true;
     programToast = "";
     loadChannels()
-      .then((list) => (channel = list.find((c) => c.id === current) ?? null))
+      .then((list) => {
+        if (!stale) channel = list.find((c) => c.id === current) ?? null;
+      })
       .catch(() => {});
     api(`/epg/${encodeURIComponent(current)}/0`)
       .then((d) => {
+        if (stale) return;
         const now = Date.now();
         guide = (d?.epg ?? []).filter((p) => p.endEpoch > now).slice(0, 8);
+        guideError = "";
         guideLoading = false;
       })
       .catch((err) => {
+        if (stale) return;
         guideError = err.message;
         guideLoading = false;
       });
+    return () => {
+      stale = true;
+    };
   });
 
   async function start(channelID, q) {

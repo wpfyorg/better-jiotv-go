@@ -769,7 +769,8 @@ if [ "$openwrt" = true ]; then
   else
     pattern="^${package_name}_.*_${package_arch}\\.ipk$"
   fi
-  asset=$(sed -n 's/.*"name":[[:space:]]*"\([^"]*\)".*/\1/p' "$tmp/release.json" | grep -E "$pattern" | head -n 1 || true)
+  # Extract each name separately: GitHub can return all assets on one JSON line.
+  asset=$(grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]*"' "$tmp/release.json" | sed 's/^[^"]*"name"[[:space:]]*:[[:space:]]*"\([^"]*\)"$/\1/' | grep -E "$pattern" | head -n 1 || true)
   [ -n "$asset" ] || { echo "no $variant OpenWrt package found for $machine in $tag" >&2; exit 1; }
 
   base="https://github.com/${repo}/releases/download/${tag}"

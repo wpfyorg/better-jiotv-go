@@ -27,6 +27,14 @@ done
 printf '%s\n' "$url" >>"$JIOTV_TEST_LOG"
 case "$url" in
   https://api.github.com/*)
+    if [ "${JIOTV_TEST_COMPACT_JSON:-0}" = 1 ]; then
+      printf '{"tag_name":"v1.3.3","name":"v1.3.3","assets":[' >"$out"
+      if [ -n "${JIOTV_TEST_EXTRA_ASSET_NAME:-}" ]; then
+        printf '{"name":"%s"},' "$JIOTV_TEST_EXTRA_ASSET_NAME" >>"$out"
+      fi
+      printf '{"name":"%s"},{"name":"SHA256SUMS"}]}\n' "$JIOTV_TEST_ASSET_NAME" >>"$out"
+      exit 0
+    fi
     {
       echo '{'
       echo '  "tag_name": "v1.3.3",'
@@ -171,6 +179,42 @@ fi
 test -f "${3:-}"
 EOF
 chmod +x "$tmp/bin/apk"
+
+# Compact GitHub responses must select the requested package even when other
+# variants precede it and SHA256SUMS is the final asset on the same line.
+run_compact_openwrt_case() {
+  compact_variant=$1
+  compact_asset=$2
+  compact_other_asset=$3
+  compact_log="$tmp/compact-$compact_asset"
+  JIOTV_PLATFORM=openwrt JIOTV_VARIANT=$compact_variant JIOTV_START_SERVICE=0 \
+    JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+    JIOTV_TEST_COMPACT_JSON=1 JIOTV_TEST_ASSET_NAME=$compact_asset \
+    JIOTV_TEST_EXTRA_ASSET_NAME=$compact_other_asset JIOTV_TEST_LOG="$compact_log-downloads" \
+    JIOTV_TEST_PACKAGE_LOG="$compact_log-package" JIOTV_INIT_SCRIPT="$tmp/bin/jiotv-init" \
+    PATH="$tmp/bin:$PATH" sh "$root/scripts/install.sh" >"$compact_log-output"
+  grep -F "/$compact_asset" "$compact_log-downloads" >/dev/null
+  grep -F "$compact_asset" "$compact_log-package" >/dev/null
+  grep -F 'Checksum verified' "$compact_log-output" >/dev/null
+  if grep -F "/$compact_other_asset" "$compact_log-downloads" >/dev/null; then
+    echo "compact release selected the wrong package: $compact_other_asset" >&2
+    exit 1
+  fi
+  printf 'compact OpenWrt release OK: %s\n' "$compact_asset"
+}
+run_compact_openwrt_case full jiotv-1.3.3-r1_aarch64_cortex-a53.apk jiotv-slim-1.3.3-r1_aarch64_cortex-a53.apk
+run_compact_openwrt_case slim jiotv-slim-1.3.3-r1_aarch64_cortex-a53.apk jiotv-1.3.3-r1_aarch64_cortex-a53.apk
+# A compact response without this architecture still fails before installation.
+if JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 JIOTV_TEST_PACKAGE_ARCH=aarch64 \
+  JIOTV_TEST_COMPACT_JSON=1 JIOTV_TEST_ASSET_NAME=jiotv-1.3.3-r1_x86_64.apk \
+  JIOTV_TEST_LOG="$tmp/compact-missing-downloads" JIOTV_TEST_PACKAGE_LOG="$tmp/compact-missing-package" \
+  PATH="$tmp/bin:$PATH" sh "$root/scripts/install.sh" >"$tmp/compact-missing-output" 2>&1; then
+  echo "compact release without a matching package unexpectedly installed" >&2
+  exit 1
+fi
+grep -F 'no full OpenWrt package found' "$tmp/compact-missing-output" >/dev/null
+test ! -e "$tmp/compact-missing-package"
+
 openwrt_apk=jiotv-1.3.3-r1_x86_64.apk
 openwrt_slim_apk=jiotv-slim-1.3.3-r1_x86_64.apk
 JIOTV_PLATFORM=openwrt JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=x86_64 \
@@ -345,6 +389,8 @@ fi
 test -f "${2:-}"
 EOF
 chmod +x "$tmp/bin/opkg"
+run_compact_openwrt_case full jiotv_1.3.3-r1_aarch64_cortex-a53.ipk jiotv-slim_1.3.3-r1_aarch64_cortex-a53.ipk
+run_compact_openwrt_case slim jiotv-slim_1.3.3-r1_aarch64_cortex-a53.ipk jiotv_1.3.3-r1_aarch64_cortex-a53.ipk
 openwrt_ipk=jiotv-slim_1.3.3-r1_aarch64_cortex-a53.ipk
 JIOTV_PLATFORM=openwrt JIOTV_VARIANT=slim JIOTV_TEST_OS=Linux JIOTV_TEST_MACHINE=aarch64 \
   JIOTV_TEST_ASSET_NAME=$openwrt_ipk JIOTV_TEST_LOG="$tmp/openwrt-ipk-downloads" \

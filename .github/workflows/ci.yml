@@ -38,3 +38,4 @@ jobs:
       - run: sh scripts/tests/install-test.sh
       - run: sh scripts/tests/onboard-test.sh
       - run: sh scripts/tests/onboard-ps1-test.sh
+      - run: sh scripts/tests/jiotv-token-test.sh

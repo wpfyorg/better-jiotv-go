@@ -19,7 +19,7 @@ The server can hold three accounts. Your network decides which one you have:
 - **JioTV+** is the optional second source. It is off until `tv_plus = true` (or `JIOTV_TVPLUS=true`) is set, and it needs its own sign-in with the JioFiber or AirFiber number, separate from JioTV.
 - **Fastway** is only offered when the installed release supports it.
 
-The installers list only the accounts the downloaded release supports and print this same hint above the account menu. The older name **JioTV+** still appears in older guides, in some error messages and as a command alias; `jiotv tv+ login` keeps working, but `jiotv tv+ login` is the current spelling.
+The installers list only the accounts the downloaded release supports and print this same hint above the account menu. The older name **Extras** may still appear in older guides and error messages. `jiotv extras login` remains a command alias; `jiotv tv+ login` is the current spelling.
 
 ## Check which source is active
 

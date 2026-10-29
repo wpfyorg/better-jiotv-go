@@ -124,10 +124,10 @@ start_flow() {
   # script, which rejects a FIFO on stdin but accepts a pipe, so `cat` turns the
   # FIFO into one. util-linux script takes the command with -c instead.
   if script --version 2>/dev/null | grep -qi 'util-linux'; then
-    JIOTV_INSTALL_DIR="$flow_dir" HOME="$flow_dir/home" JIOTV_TUNNEL="${JIOTV_TEST_TUNNEL:-}" JIOTV_TUNNEL_TOKEN="${JIOTV_TEST_TUNNEL_TOKEN:-}" PATH="$tmp/bin:$PATH" \
+    JIOTV_INSTALL_DIR="$flow_dir" HOME="$flow_dir/home" XDG_CONFIG_HOME="$flow_dir/home/.config" JIOTV_TUNNEL="${JIOTV_TEST_TUNNEL:-}" JIOTV_TUNNEL_TOKEN="${JIOTV_TEST_TUNNEL_TOKEN:-}" PATH="$tmp/bin:$PATH" \
       sh -c 'cat "$1" | script -q -c "sh $2" /dev/null >"$3" 2>&1' _ "$tmp/in" "$root/scripts/install.sh" "$flow_out" &
   else
-    JIOTV_INSTALL_DIR="$flow_dir" HOME="$flow_dir/home" JIOTV_TUNNEL="${JIOTV_TEST_TUNNEL:-}" JIOTV_TUNNEL_TOKEN="${JIOTV_TEST_TUNNEL_TOKEN:-}" PATH="$tmp/bin:$PATH" \
+    JIOTV_INSTALL_DIR="$flow_dir" HOME="$flow_dir/home" XDG_CONFIG_HOME="$flow_dir/home/.config" JIOTV_TUNNEL="${JIOTV_TEST_TUNNEL:-}" JIOTV_TUNNEL_TOKEN="${JIOTV_TEST_TUNNEL_TOKEN:-}" PATH="$tmp/bin:$PATH" \
       sh -c 'cat "$1" | script -q /dev/null sh "$2" >"$3" 2>&1' _ "$tmp/in" "$root/scripts/install.sh" "$flow_out" &
   fi
   flow_pid=$!

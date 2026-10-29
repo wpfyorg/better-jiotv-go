@@ -374,7 +374,7 @@ ob_choose_provider() {
   ob_add jiotv "JioTV       live channels and programme guide - any network"
   [ -n "$ob_tvplus_args" ] &&
     ob_add extras "JioTV+      extra channels, movies and shows - JioFiber/AirFiber"
-  ob_binary_supports "$ob_bin" 'fastway' &&
+  ob_binary_supports "$ob_bin" 'fastway login' &&
     ob_add fastway "Fastway     live TV from a Fastway subscription - Fastway/ACT"
   if [ -n "$provider" ]; then
     case "|$ob_vals|" in

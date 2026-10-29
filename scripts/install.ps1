@@ -407,7 +407,7 @@ try {
         elseif ($help -match 'extras login') { $TvPlusCmd = 'extras login' }
         $providers = @(@{ Value = 'jiotv'; Label = 'JioTV       live channels and programme guide - any network' })
         if ($TvPlusCmd) { $providers += @{ Value = 'extras'; Label = 'JioTV+      extra channels, movies and shows - JioFiber/AirFiber' } }
-        if ($help -match 'fastway') { $providers += @{ Value = 'fastway'; Label = 'Fastway     live TV from a Fastway subscription - Fastway/ACT' } }
+        if ($help -match 'fastway login') { $providers += @{ Value = 'fastway'; Label = 'Fastway     live TV from a Fastway subscription - Fastway/ACT' } }
 
         if (-not ($providers.Value -contains $Provider)) { $Provider = '' }
         if (-not $Provider) {

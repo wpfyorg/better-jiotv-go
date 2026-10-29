@@ -135,7 +135,7 @@ start_flow() {
 }
 send() { printf '%s' "$1" >&6; }
 enter() { printf '\r' >&6; }
-finish_flow() { exec 6>&-; wait "$flow_pid" || true; }
+finish_flow() { exec 6>&-; wait "$flow_pid"; }
 
 # ---- default path: full build, JioTV account ------------------------------
 start_flow "$tmp/install" "$tmp/out"

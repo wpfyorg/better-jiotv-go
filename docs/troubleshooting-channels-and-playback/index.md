@@ -16,13 +16,13 @@ Channels do not appear, the list is empty, or only some categories/languages are
 ### Possible causes
 
 - The JioTV account is not connected or the channel request failed.
-- Search, category, language or Extras-only filters hide results.
+- Search, category, language or JioTV+-only filters hide results.
 - The selected account/source does not provide those channels.
 - The provider catalogue is temporarily unavailable.
 
 ### Diagnosis
 
-Check **Settings** for JioTV and Extras status. Clear the search field and reset category, language and Extras-only filters in Channels. Reload once, then check server output. Compare the UI list with the account's available content; do not assume every provider channel is available to every account.
+Check **Settings** for JioTV and JioTV+ status. Clear the search field and reset category, language and JioTV+-only filters in Channels. Reload once, then check server output. Compare the UI list with the account's available content; do not assume every provider channel is available to every account.
 
 ### Solution
 
@@ -30,11 +30,11 @@ Reconnect JioTV if disconnected. Reset the filters and choose the intended sourc
 
 ### Verification
 
-Confirm a normal channel appears with filters cleared. Test one JioTV channel and one Extras channel only if both accounts are configured.
+Confirm a normal channel appears with filters cleared. Test one JioTV channel and one JioTV+ channel only if both accounts are configured.
 
 ### Further help
 
-Include filters used, account status labels, whether the issue affects all categories, and a redacted error. See [channel navigation](../using-live-tv/index.md), [account setup](../account-connect-jiotv/index.md), and [Extras](../account-extras/index.md).
+Include filters used, account status labels, whether the issue affects all categories, and a redacted error. See [channel navigation](../using-live-tv/index.md), [account setup](../account-connect-jiotv/index.md), and [JioTV+](../account-extras/index.md).
 
 ## A channel never starts or reports stream unavailable
 
@@ -51,7 +51,7 @@ The player stays on loading, shows “Stream unavailable from provider,” “Pl
 
 ### Diagnosis
 
-Try another channel in the same source, then retry the failing channel. Check whether it is marked Extras or subscription-required. Compare browser playback with an IPTV client only if that client is already configured. Check the server output for the request time. Do not infer a DRM failure from a generic loading spinner alone.
+Try another channel in the same source, then retry the failing channel. Check whether it is marked JioTV+ or subscription-required. Compare browser playback with an IPTV client only if that client is already configured. Check the server output for the request time. Do not infer a DRM failure from a generic loading spinner alone.
 
 ### Solution
 
@@ -103,7 +103,7 @@ The UI identifies a subscription requirement or playback is rejected by the prov
 ### Possible causes
 
 - The selected channel/content needs an entitlement absent from the active account.
-- JioTV and Extras accounts differ; a channel belongs to the other source.
+- JioTV and JioTV+ accounts differ; a channel belongs to the other source.
 - Provider access was denied or the provider returned an account-specific refusal.
 
 ### Diagnosis
@@ -112,7 +112,7 @@ Check the channel's source badge and subscription marker, then check the corresp
 
 ### Solution
 
-Use the account and subscription that include the content, or choose another available channel. For Extras, complete its separate login and verify the plan with the provider. There is no supported entitlement bypass.
+Use the account and subscription that include the content, or choose another available channel. For JioTV+, complete its separate login and verify the plan with the provider. There is no supported entitlement bypass.
 
 ### Verification
 
@@ -120,4 +120,4 @@ Try an entitled channel from the same account. If that works while the restricte
 
 ### Further help
 
-Provide the exact message and source badge without sharing account identifiers or URLs. See [account and Extras troubleshooting](../troubleshooting-accounts-and-extras/index.md).
+Provide the exact message and source badge without sharing account identifiers or URLs. See [account and JioTV+ troubleshooting](../troubleshooting-accounts-and-extras/index.md).

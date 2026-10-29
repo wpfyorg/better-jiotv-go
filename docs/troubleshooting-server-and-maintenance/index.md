@@ -26,7 +26,7 @@ Check the server's startup output and use the exact address for its listener. Te
 
 ### Solution
 
-Start the server with the intended LAN bind address and port, and permit that traffic on the trusted LAN. Use the full build for the web UI. Sign in again using the admin password and the same hostname/protocol. For account settings, use JioTV or Extras OTP as appropriate; these are separate from the admin login.
+Start the server with the intended LAN bind address and port, and permit that traffic on the trusted LAN. Use the full build for the web UI. Sign in again using the admin password and the same hostname/protocol. For account settings, use JioTV or JioTV+ OTP as appropriate; these are separate from the admin login.
 
 ### Verification
 

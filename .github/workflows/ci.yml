@@ -36,4 +36,24 @@ jobs:
       - run: cargo test ${{ matrix.features }}
       - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
       - run: sh scripts/tests/install-test.sh
+      - run: sh scripts/tests/onboard-test.sh
+      - run: sh scripts/tests/onboard-ps1-test.sh
       - run: sh scripts/tests/jiotv-token-test.sh
+
+  windows-installer:
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'codex-clean')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse the Windows installer
+        shell: pwsh
+        run: |
+          $errors = $null
+          $tokens = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path scripts/install.ps1), [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+      - name: Smoke-test Windows installation without onboarding
+        shell: pwsh
+        run: ./scripts/tests/install-ps1-smoke-test.ps1

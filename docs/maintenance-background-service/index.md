@@ -19,6 +19,8 @@ sudo env JIOTV_PATH_PREFIX=/var/lib/jiotv jiotv autostart --args "--host 0.0.0.0
 
 For a user service, use `jiotv autostart --args "--host 0.0.0.0 --tls"`. The command enables and starts the service. A user service may need lingering enabled to run at boot without an active login; the command prints the appropriate hint.
 
+The guided installer calls this command after sign-in, which is how the account and tunnel choices reach the service: `jiotv autostart` copies the current `JIOTV_*` environment into the generated environment file, including `JIOTV_TUNNEL_TOKEN`.
+
 Check status and logs:
 
 ```sh

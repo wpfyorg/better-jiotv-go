@@ -7,7 +7,7 @@ keywords: [switch account, JioTV, login reset, logout, OTP, change number, accou
 
 # Switch to Another JioTV Account
 
-The server currently uses **one active JioTV provider account** at a time. There is no multi-account picker in the web interface. To use a different mobile number, sign out of the current JioTV connection and sign in again. Your **admin password** and optional **Extra channels** connection are separate.
+The server currently uses **one active JioTV provider account** at a time. There is no multi-account picker in the web interface. To use a different mobile number, sign out of the current JioTV connection and sign in again. Your **admin password** and optional **JioTV+ channels** connection are separate.
 
 ## Switch in Settings
 
@@ -25,15 +25,15 @@ The account card shown below is from a clean server before login. It illustrates
 
 ## Switch using the CLI
 
-If logout is disabled in Settings, or you manage a headless server, use the commands below. **Stop the JioTV service first.** Run both commands as the service's operating-system user with the same resolved `JIOTV_PATH_PREFIX` and configuration as the service, so the running process cannot overwrite the new state.
+If logout is disabled in Settings, or you manage a headless server, use the commands below. Stop JioTV **before** changing the credentials so the running process does not overwrite the new state.
 
 ```sh
 jiotv login reset
 jiotv login otp
 ```
 
-The first command clears the JioTV login; the second prompts for the new number and OTP. **Restart JioTV after both commands** using your original command or service manager. For OpenWrt, follow its [service-management instructions](../maintenance-openwrt/index.md). For a Docker install, prefer the Settings workflow unless you know how to run commands against the container's persistent volume.
+Both commands must run as the **same operating-system user and with the same configuration/data directory** used by the server. The first clears the JioTV login; the second prompts for the new number and OTP. Then restart JioTV using your original command or service manager. For OpenWrt, follow its [service-management instructions](../maintenance-openwrt/index.md). For a Docker install, prefer the Settings workflow unless you know how to run commands against the container's persistent volume.
 
 ## If switching does not work
 
-If the old account still appears, ensure you stopped the correct server and used its actual data directory. If the OTP fails, request a fresh one. If channels differ after login, the new account may have different entitlements; see [login troubleshooting](../troubleshooting-accounts-and-extras/index.md). Switching JioTV does not automatically reconnect or disconnect [Extra channels](../account-extras/index.md).
+If the old account still appears, ensure you stopped the correct server and used its actual data directory. If the OTP fails, request a fresh one. If channels differ after login, the new account may have different entitlements; see [login troubleshooting](../troubleshooting-accounts-and-extras/index.md). Switching JioTV does not automatically reconnect or disconnect [JioTV+ channels](../account-extras/index.md).

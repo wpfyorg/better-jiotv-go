@@ -21,6 +21,6 @@ The JioTV account supplies channels from your account. It is separate from the a
 
 If the OTP fails or expires, request a fresh code and enter it promptly. If the channel list is empty, refresh the page and check the account status in Settings.
 
-For first-time server setup, see [First Launch and Admin Setup](../getting-started-first-launch/index.md). To connect the optional source, see [Connect Extra Channels](../account-extras/index.md).
+For first-time server setup, see [First Launch and Admin Setup](../getting-started-first-launch/index.md). To connect the optional source, see [Connect JioTV+](../account-extras/index.md).
 
 To replace an existing account, follow [Switch to Another JioTV Account](../account-switch-jiotv/index.md).

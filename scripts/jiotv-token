@@ -107,7 +107,11 @@ switch_mode() {
 
   stamp=$(date +%Y%m%d-%H%M%S)-$$
   backup="$DATA_DIR/store_v4.toml.bak.$stamp"
-  cp -p "$STORE" "$backup"
+  if ! cp -p "$STORE" "$backup"; then
+    rm -f "$backup" || true
+    "$SERVICE" start >/dev/null 2>&1 || true
+    die "could not back up store"
+  fi
 
   tmp="$STORE.new.$$"
   if ! awk -v re="$ALL_RE" '$0 !~ re { print }' "$STORE" > "$tmp"; then
@@ -120,8 +124,12 @@ switch_mode() {
     "$SERVICE" start >/dev/null 2>&1 || true
     die "could not restore snapshot"
   fi
-  chmod 600 "$tmp"
-  mv "$tmp" "$STORE"
+  if ! chmod 600 "$tmp" || ! mv "$tmp" "$STORE"; then
+    rm -f "$tmp" || true
+    cp -p "$backup" "$STORE" || true
+    "$SERVICE" start >/dev/null 2>&1 || true
+    die "could not replace store"
+  fi
 
   if ! uci set "jiotv.main.extras=$extras_value" || ! uci commit jiotv; then
     cp -p "$backup" "$STORE"

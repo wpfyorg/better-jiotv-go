@@ -20,9 +20,13 @@ Choose your server device first:
 | Raspberry Pi or Linux mini-computer | [Raspberry Pi and SBC](../installations-sbc/index.md) |
 | Android with a terminal app | [Termux](../installations-termux/index.md) |
 | Docker host | [Docker and Compose](../installations-docker/index.md) |
-| Existing downloaded executable | [Manual binary](../installations-build-from-source/index.md) |
+| Existing downloaded executable | [Manual binary](../installations-manual-binary/index.md) |
 | Developer with a Rust toolchain | [Build from source](../installations-build-from-source/index.md) |
 
-The **full** build serves the web interface. A **slim** build has no web interface and is for IPTV clients. Extras is optional and depends on how the binary was built. Select the full build if this is your first installation.
+The **full** build serves the web interface. A **slim** build has no web interface and is for IPTV clients. JioTV+ is optional, stays off until it is enabled, and needs a separate account; select the full build if this is your first installation.
+
+The Linux, macOS, Windows and OpenWrt installers run a guided setup when they have a terminal: choose the build, choose the account (JioTV, JioTV+, or Fastway when the release supports it), confirm the LAN address, decide whether to use a Cloudflare tunnel, and sign in. Docker and unattended installs skip it and use the documented environment variables instead.
+
+Which account you need depends on your network: JioTV works on any network, JioTV+ needs a JioFiber or AirFiber login, and Fastway needs a Fastway subscription or an ACT connection.
 
 After installing, use [Getting Started in 5 Minutes](../getting-started-in-5-minutes/index.md). If your browser runs on another device, read [Access JioTV on your home network](../configuration-network-security/index.md).

@@ -14,7 +14,7 @@ Before changing anything, note the app version, install type, browser or IPTV pl
 ## Choose a problem
 
 - [Installation, startup, architecture, permissions and ports](../troubleshooting-installation-startup/index.md)
-- [JioTV login, OTP, sessions, tokens and Extras](../troubleshooting-accounts-and-extras/index.md)
+- [JioTV login, OTP, sessions, tokens and JioTV+](../troubleshooting-accounts-and-extras/index.md)
 - [Channels, loading, buffering and subscriptions](../troubleshooting-channels-and-playback/index.md)
 - [HLS, DASH, DRM, Widevine, licenses and browser security](../troubleshooting-protected-playback/index.md)
 - [EPG, missing channels, playlists and mode changes](../troubleshooting-epg-and-playlists/index.md)
@@ -26,7 +26,7 @@ For setup instructions see [Getting started](../getting-started-in-5-minutes/ind
 
 1. Confirm the server is running and use the address and port configured for that installation.
 2. Reload the page once and try another channel. This helps separate a single-channel issue from a server-wide issue.
-3. Check **Settings** for JioTV, Extras and EPG status. The browser UI's admin login and the JioTV account login are separate.
+3. Check **Settings** for JioTV, JioTV+ and EPG status. The browser UI's admin login and the JioTV account login are separate.
 4. Check the server output around the failure time. Share only a short, redacted excerpt with support.
 5. Avoid repeatedly requesting OTPs or changing account, proxy, TLS or firewall settings without evidence.
 

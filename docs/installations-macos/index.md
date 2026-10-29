@@ -24,7 +24,21 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
+## Guided setup
+
+In a terminal, the installer also asks how the server should be set up: build (`full` or `slim`), account (JioTV, JioTV+, or Fastway when that release supports it), the LAN address other devices will use, whether to expose it through Cloudflare, and the account sign-in. Arrow keys select, Enter confirms, and Ctrl-C cancels without leaving the terminal in a broken state.
+
+The same settings can be supplied up front to skip the questions:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wpfyorg/better-jiotv-go/main/scripts/install.sh | JIOTV_VARIANT=slim JIOTV_PROVIDER=jiotv JIOTV_TUNNEL=none sh
+```
+
+`JIOTV_ONBOARD=never` turns the flow off. Piping the script into `sh` is fine because prompts read `/dev/tty`, not the pipe; with no terminal the installer behaves exactly as it does without this option.
+
 ## First run
+
+The guided setup connects the account for you. To do it by hand instead:
 
 ```sh
 jiotv login otp

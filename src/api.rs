@@ -589,7 +589,7 @@ pub async fn extras_unlock(
 
 /// `POST /api/extras/lock` — the Settings page's "Lock" button. The stored
 /// false value explicitly overrides the `extras` config/env default, so a
-/// router configured with `JIOTV_EXTRAS=true` can still be locked from UI.
+/// router configured with `JIOTV_TVPLUS=true` can still be locked from UI.
 pub async fn extras_lock(State(state): State<SharedState>) -> Response {
     if let Err(e) = state.store.set(crate::unlock::STORE_KEY_UNLOCKED, "false") {
         tracing::warn!("extras lock: cannot save: {e}");

@@ -15,12 +15,13 @@ for source in root.rglob("*.md"):
     if source.name not in {"README.md", "SUMMARY.md"}:
         if source.name != "index.md" or source.parent == root:
             errors.append(f"{source.relative_to(root)}: expected WTFM layout docs/<slug>/index.md")
-        if not text.startswith("---\n"):
+        frontmatter = re.match(r"\A---\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", text, re.S)
+        if not frontmatter:
             errors.append(f"{source.relative_to(root)}: missing frontmatter")
         else:
-            fields = text.split("---", 2)[1]
+            fields = frontmatter.group(1)
             for key in ("title", "description", "category", "keywords"):
-                if not re.search(rf"^{key}:\s*\S", fields, re.M):
+                if not re.search(rf"^{key}:[ \t]*\S[^\r\n]*$", fields, re.M):
                     errors.append(f"{source.relative_to(root)}: missing {key} metadata")
     text = re.sub(r"```.*?```|~~~.*?~~~", "", text, flags=re.S)
     for match in link_re.finditer(text):

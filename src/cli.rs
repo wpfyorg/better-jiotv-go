@@ -103,10 +103,10 @@ pub fn parse() -> anyhow::Result<Args> {
                 Some("reset") | Some("logout") | Some("lo") => Command::LoginReset,
                 Some(other) => anyhow::bail!("unknown login subcommand: {other}"),
             },
-            Some("extras") => match positionals.get(1).map(String::as_str) {
+            Some("tv+") | Some("tvplus") | Some("extras") => match positionals.get(1).map(String::as_str) {
                 Some("login") => Command::ExtrasLogin,
                 Some("logout") => Command::ExtrasLogout,
-                other => anyhow::bail!("usage: jiotv extras login|logout (got {other:?})"),
+                other => anyhow::bail!("usage: jiotv tv+ login|logout (got {other:?})"),
             },
             Some("fastway") => match positionals.get(1).map(String::as_str) {
                 Some("login") => Command::FastwayLogin,

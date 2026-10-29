@@ -7,7 +7,7 @@ keywords: [Fastway, provider, account, DASH, Widevine, PallyCon, channels]
 
 # Connect Fastway Live TV
 
-**Fastway** is an optional third-party live-TV source. It is separate from the JioTV account and from Extras, and it is disabled by default. A Fastway subscription is required; the server never grants or bypasses provider entitlements.
+**Fastway** is an optional third-party live-TV source. It is separate from the JioTV account and from JioTV+ (formerly called Extras), and it is disabled by default. A Fastway subscription is required; the server never grants or bypasses provider entitlements.
 
 ## Enable Fastway
 
@@ -47,17 +47,17 @@ The password is kept locally because Fastway has no refresh-token endpoint; the 
 ## What changes while Fastway is connected
 
 - Fastway channels replace the JioTV catalogue in **Channels**, the M3U playlist and the XMLTV guide. Local custom channels remain available.
-- If both Fastway and Extras are connected, Fastway takes priority. Disconnecting Fastway falls back to Extras, then to JioTV.
+- If both Fastway and JioTV+ are connected, Fastway takes priority. Disconnecting Fastway falls back to JioTV+, then to JioTV.
 - Only channels the Fastway account is subscribed to are listed. A channel can still be unavailable if the provider rejects playback or the plan does not include it.
 - Use **Fastway only** in **Channels** to narrow a mixed list, and look for the **Fastway** badge on channel tiles.
 - Fastway playback is DASH. Protected channels use Widevine through the provider's PallyCon license service; the server proxies the license request but does not decrypt or bypass DRM. See [Protected playback troubleshooting](../troubleshooting-protected-playback/index.md).
 - IPTV clients receive Fastway channels as `/live/mpd/...` entries with `inputstream.adaptive` and `manifest_type=mpd`.
 
-Fastway does not use the Extras unlock-code gate. It is controlled by the `fastway` configuration flag and the saved login.
+Fastway does not use the JioTV+ unlock-code gate. It is controlled by the `fastway` configuration flag and the saved login.
 
 ## Disconnect
 
-Select **Disconnect** on the Fastway card, or run `jiotv fastway logout`. Disconnecting removes the saved Fastway login and returns the active catalogue to Extras or JioTV. If the server sets `disable_logout = true`, the web interface hides provider disconnect controls; the CLI command still works.
+Select **Disconnect** on the Fastway card, or run `jiotv fastway logout`. Disconnecting removes the saved Fastway login and returns the active catalogue to JioTV+ or JioTV. If the server sets `disable_logout = true`, the web interface hides provider disconnect controls; the CLI command still works.
 
 ## Troubleshooting
 

@@ -11,7 +11,7 @@ keywords: [live TV, channels, filters, player, programme guide, EPG]
 
 1. Select **Channels** in the top navigation.
 2. Type part of a channel name in **Search channels**, or choose a **Category** or **Language**.
-3. Turn on **HD** to show HD channels, **Extra channels only** to show that source, or **Show unavailable** to include channels not playable for the current account.
+3. Turn on **HD** to show HD channels, **JioTV+ only** to show that source, or **Show unavailable** to include channels not playable for the current account.
 4. Select a channel tile.
 
 Your filters are saved in this browser. **Expected result:** the channel opens in the live player. A dimmed tile or subscription label means the current account may not be able to play it.

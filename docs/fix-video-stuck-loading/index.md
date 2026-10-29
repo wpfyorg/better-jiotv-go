@@ -16,7 +16,7 @@ The provider has no usable stream for that channel, the account is not entitled 
 ## Diagnosis
 1. Wait for a detailed player error, then note its exact wording.
 2. Select **All channels** and try a different channel available to your account.
-3. In **Settings**, verify the corresponding JioTV or Extra channels account is connected.
+3. In **Settings**, verify the corresponding JioTV or JioTV+ account is connected.
 4. Compare one browser with another on a secure address (HTTPS or localhost). Look at the server's output for the failure time.
 
 ## Solution

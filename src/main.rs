@@ -342,11 +342,11 @@ async fn serve(
     let state = build_app_state(&cfg, &path_prefix, store, access.clone(), secure)?;
     if state.extras.enabled() {
         println!(
-            "extras enabled{}",
+            "JioTV+ enabled{}",
             if state.extras.connected() {
                 " (logged in)"
             } else {
-                " (run `jiotv extras login`)"
+                " (run `jiotv tv+ login`)"
             }
         );
     }
@@ -651,7 +651,7 @@ async fn extras_login_cli(store: &store::Store) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("could not send the OTP: {e}"))?;
     }
     if resp.identifier.is_empty() {
-        anyhow::bail!("extras did not send an OTP");
+        anyhow::bail!("JioTV+ did not send an OTP");
     }
 
     print!("OTP: ");
@@ -667,7 +667,7 @@ async fn extras_login_cli(store: &store::Store) -> anyhow::Result<()> {
         cr.save(store)?;
     }
     match result {
-        Ok(_) => println!("extras login saved. Restart the server to use it."),
+        Ok(_) => println!("JioTV+ login saved. Restart the server to use it."),
         Err(e) => anyhow::bail!("login failed: {e}"),
     }
     Ok(())
@@ -675,7 +675,7 @@ async fn extras_login_cli(store: &store::Store) -> anyhow::Result<()> {
 
 fn extras_logout_cli(store: &store::Store) -> anyhow::Result<()> {
     extras::delete_credentials(store)?;
-    println!("extras login deleted.");
+    println!("JioTV+ login deleted.");
     Ok(())
 }
 
@@ -810,7 +810,7 @@ fn print_help() {
          \x20 --tls-cert/--tls-key  PEM files to use (both or neither); without them a self-signed\n  \
          \x20                  certificate is created in <data dir>/tls/ on first start and reused\n  \
          login otp | login reset\n  \
-         extras login | extras logout   (off by default; needs extras = true / JIOTV_EXTRAS=true)\n  \
+         tv+ login | tv+ logout   (off by default; needs tv_plus = true / JIOTV_TVPLUS=true)\n  \
          fastway login | fastway logout (off by default; needs fastway = true / JIOTV_FASTWAY=true)\n  \
          epg generate | epg delete\n  \
          admin password\n  \

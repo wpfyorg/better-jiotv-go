@@ -7,7 +7,7 @@ keywords: [quick start, first run, JioTV account, OTP, watch channel, setup link
 
 # Getting Started in 5 Minutes
 
-This is the shortest path from a new installation to browsing live channels. You need your own JioTV account and a computer or router that can run the server. **Five minutes** is the approximate hands-on setup time; downloads and OTP delivery may take longer.
+This is the shortest path from a new installation to browsing live channels. It requires the **full** build, which includes the browser interface; the slim build is for IPTV clients and has no web UI. You need your own JioTV account and a computer or router that can run the server. **Five minutes** is the approximate hands-on setup time; downloads and OTP delivery may take longer.
 
 ## 1. Install JioTV
 
@@ -21,7 +21,7 @@ Review downloaded scripts before running them if that suits your security policy
 
 ## 2. Start the server
 
-In a terminal:
+If the guided installer has already started the service, use the address it printed and do not start a second copy. Otherwise, start it in a terminal:
 
 ```sh
 jiotv serve
@@ -48,7 +48,7 @@ The screenshot shows the **setup notice**, not the password-entry form. Use the 
 3. Enter the code that arrives for your account and finish the sign-in.
 4. Check that the JioTV card says **Logged in**.
 
-This is separate from the admin password. If **Extra channels** appears, it is an optional source and has its own connection flow.
+This is separate from the admin password. If **JioTV+** appears, it is an optional source and has its own connection flow.
 
 See [Connect your account](../account-connect-jiotv/index.md) if you need help.
 

@@ -16,9 +16,9 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub disable_logout: bool,
     pub drm: bool,
-    /// `extras` is the current config key; `tvplus` is accepted silently so
-    /// an existing config file from before the rename keeps working.
-    #[serde(alias = "tvplus")]
+    /// `tv_plus` is the documented config key. `extras` (the previous name)
+    /// and `tvplus` are still accepted so existing config files keep working.
+    #[serde(rename = "tv_plus", alias = "extras", alias = "tvplus")]
     pub extras: bool,
     /// Enables the optional Fastway Live TV provider. It still needs
     /// `jiotv fastway login` (or the Settings card) before channels appear.
@@ -106,10 +106,10 @@ impl Config {
         env_bool!(disable_ts_handler, "JIOTV_DISABLE_TS_HANDLER");
         env_bool!(disable_logout, "JIOTV_DISABLE_LOGOUT");
         env_bool!(drm, "JIOTV_DRM");
-        // `JIOTV_EXTRAS` is the current env var; `JIOTV_TVPLUS` is accepted
-        // silently as a fallback so an existing deployment keeps working.
-        env_bool!(extras, "JIOTV_TVPLUS");
+        // `tv_plus` is the documented key; `JIOTV_EXTRAS` is the previous name
+        // and is still accepted so existing deployments keep working.
         env_bool!(extras, "JIOTV_EXTRAS");
+        env_bool!(extras, "JIOTV_TVPLUS");
         env_bool!(fastway, "JIOTV_FASTWAY");
         env_bool!(disable_auth, "JIOTV_DISABLE_AUTH");
         env_str!(title, "JIOTV_TITLE");
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn old_env_var_name_still_works() {
+    fn documented_env_var_turns_tv_plus_on() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("JIOTV_TVPLUS", "true");
         let cfg = Config::load(None).unwrap();
@@ -186,24 +186,45 @@ mod tests {
     }
 
     #[test]
-    fn new_env_var_name_wins_over_old() {
+    fn deprecated_env_var_name_still_works() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("JIOTV_EXTRAS", "true");
+        let cfg = Config::load(None).unwrap();
+        assert!(cfg.extras);
+        std::env::remove_var("JIOTV_EXTRAS");
+    }
+
+    #[test]
+    fn documented_env_var_wins_over_deprecated() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("JIOTV_TVPLUS", "true");
         std::env::set_var("JIOTV_EXTRAS", "false");
         let cfg = Config::load(None).unwrap();
-        assert!(!cfg.extras);
+        assert!(cfg.extras);
         std::env::remove_var("JIOTV_TVPLUS");
         std::env::remove_var("JIOTV_EXTRAS");
     }
 
     #[test]
-    fn old_toml_key_name_still_works() {
+    fn documented_toml_key_is_parsed() {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("jiotv_go.toml");
-        std::fs::write(&path, "tvplus = true\n").unwrap();
+        std::fs::write(&path, "tv_plus = true\n").unwrap();
         let cfg = Config::load(Some(path.to_str().unwrap())).unwrap();
         assert!(cfg.extras);
+    }
+
+    #[test]
+    fn deprecated_toml_key_names_still_work() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for key in ["extras", "tvplus"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("jiotv_go.toml");
+            std::fs::write(&path, format!("{key} = true\n")).unwrap();
+            let cfg = Config::load(Some(path.to_str().unwrap())).unwrap();
+            assert!(cfg.extras, "{key} should still enable the TV+ source");
+        }
     }
 
     #[test]

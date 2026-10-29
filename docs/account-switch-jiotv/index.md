@@ -7,7 +7,7 @@ keywords: [switch account, JioTV, login reset, logout, OTP, change number, accou
 
 # Switch to Another JioTV Account
 
-The server currently uses **one active JioTV provider account** at a time. There is no multi-account picker in the web interface. To use a different mobile number, sign out of the current JioTV connection and sign in again. Your **admin password** and optional **Extra channels** connection are separate.
+The server currently uses **one active JioTV provider account** at a time. There is no multi-account picker in the web interface. To use a different mobile number, sign out of the current JioTV connection and sign in again. Your **admin password** and optional **JioTV+ channels** connection are separate.
 
 ## Switch in Settings
 
@@ -36,4 +36,4 @@ Both commands must run as the **same operating-system user and with the same con
 
 ## If switching does not work
 
-If the old account still appears, ensure you stopped the correct server and used its actual data directory. If the OTP fails, request a fresh one. If channels differ after login, the new account may have different entitlements; see [login troubleshooting](../troubleshooting-accounts-and-extras/index.md). Switching JioTV does not automatically reconnect or disconnect [Extra channels](../account-extras/index.md).
+If the old account still appears, ensure you stopped the correct server and used its actual data directory. If the OTP fails, request a fresh one. If channels differ after login, the new account may have different entitlements; see [login troubleshooting](../troubleshooting-accounts-and-extras/index.md). Switching JioTV does not automatically reconnect or disconnect [JioTV+ channels](../account-extras/index.md).

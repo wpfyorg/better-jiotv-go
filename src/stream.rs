@@ -316,6 +316,9 @@ pub(crate) async fn fetch_live(
         anyhow::bail!("channel {channel_id} is not available for the active account");
     }
     let is_custom = state.custom_channels.contains(channel_id);
+    if let Some(content_id) = state.fastway.route(channel_id) {
+        return state.fastway.live(&content_id).await;
+    }
     if let Some(content_id) = state
         .extras
         .route(channel_id, state.tv.logged_in(), is_custom)
@@ -666,13 +669,15 @@ async fn live_impl_inner(
 
     let mut live_url = television::select_best_live_hls_url(&live, quality);
     if live_url.is_empty() {
-        // A extras channel with only DASH: send the player to the MPD route.
+        // A provider-backed DASH-only channel: send the player to the MPD
+        // route. Fastway's whole catalogue is DASH, including clear channels.
         let is_custom = state.custom_channels.contains(id);
+        let via_fastway = state.fastway.route(id).is_some();
         let via_extras = state
             .extras
             .route(id, state.tv.logged_in(), is_custom)
             .is_some();
-        if via_extras && television::has_dash(&live) {
+        if (via_fastway || via_extras) && television::has_dash(&live) {
             let prefix_str = prefix.as_ref().map(|p| p.0 .0.clone()).unwrap_or_default();
             return Redirect::to(&format!("{prefix_str}/live/mpd/{id}?q={quality}"))
                 .into_response();
@@ -1360,7 +1365,7 @@ async fn proxy_segment(
 ) -> (u16, Vec<u8>, Option<String>) {
     let ua = url::Url::parse(url)
         .ok()
-        .and_then(|u| u.host_str().map(|h| state.extras.player_user_agent_for(h)))
+        .and_then(|u| u.host_str().map(|h| state.player_user_agent_for(h)))
         .unwrap_or(television::PLAYER_USER_AGENT);
     let mut req = state.http.get(url).header(header::USER_AGENT, ua);
     if let Some(t) = hdnea.filter(|t| !t.is_empty()) {
@@ -1730,6 +1735,7 @@ mod tests {
             dash_state: Default::default(),
             epg_state: Default::default(),
             extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
+            fastway: Arc::new(crate::fastway_state::FastwayState::new(false)),
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
@@ -2249,6 +2255,7 @@ mod tests {
             dash_state: Default::default(),
             epg_state: Default::default(),
             extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
+            fastway: Arc::new(crate::fastway_state::FastwayState::new(false)),
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),

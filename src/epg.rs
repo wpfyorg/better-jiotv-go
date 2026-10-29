@@ -90,6 +90,9 @@ fn snapshot_fingerprint(
             hash_field(&mut hasher, &state.extras.account_fingerprint());
             hash_field(&mut hasher, &state.extras.entitlement_fingerprint());
         }
+        crate::state::ActiveProduct::Fastway => {
+            hash_field(&mut hasher, &state.fastway.account_fingerprint());
+        }
     }
 
     // XMLTV currently contains only upstream channels. Sorting makes this a
@@ -425,6 +428,10 @@ pub async fn regenerate_for_state(state: &Arc<AppState>) -> anyhow::Result<()> {
             generate_xml_gz_from_sources(&state.http, Vec::new(), extra_sources, extra_programmes)
                 .await?
         }
+        crate::state::ActiveProduct::Fastway => {
+            let (sources, programmes) = state.fastway.epg_source(&state.store).await?;
+            generate_xml_gz_from_sources(&state.http, Vec::new(), sources, programmes).await?
+        }
     };
 
     // Entitlement/catalogue state can change while network EPG requests are
@@ -583,6 +590,9 @@ pub async fn web_epg_handler(
         )
             .into_response();
     }
+    if let Some(content_id) = crate::fastway::content_id(&channel_id) {
+        return fastway_web_epg(&state, content_id, &offset).await;
+    }
     if let Some(content_id) = crate::extras::content_id::content_id(&channel_id) {
         return extras_web_epg(&state, content_id, &offset).await;
     }
@@ -617,6 +627,36 @@ pub async fn web_epg_handler(
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body))
         .unwrap()
+}
+
+/// The web guide for a Fastway channel, in the same shape as JioTV's. Fastway
+/// EPG epochs are seconds; the UI expects milliseconds.
+async fn fastway_web_epg(state: &AppState, content_id: &str, offset: &str) -> Response {
+    let offset = match offset.parse::<i64>() {
+        Ok(o) if o >= 0 => o,
+        _ => return (StatusCode::BAD_REQUEST, "Invalid offset").into_response(),
+    };
+    let programmes = match state
+        .fastway
+        .web_epg(content_id, offset, &state.store)
+        .await
+    {
+        Ok(p) => p,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let entries: Vec<serde_json::Value> = programmes
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "showname": p.title,
+                "description": p.description,
+                "startEpoch": p.start_epoch.saturating_mul(1000),
+                "endEpoch": p.end_epoch.saturating_mul(1000),
+                "episodePoster": "",
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({ "epg": entries })).into_response()
 }
 
 /// The web guide for a extras channel, in the same shape as JioTV's.
@@ -784,6 +824,7 @@ mod tests {
             dash_state: Default::default(),
             epg_state: Default::default(),
             extras: extras_state,
+            fastway: Arc::new(crate::fastway_state::FastwayState::new(false)),
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(http)),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),

@@ -4,6 +4,7 @@
   import CopyField from "../lib/CopyField.svelte";
   import JioTVLogin from "../lib/JioTVLogin.svelte";
   import ExtrasLogin from "../lib/ExtrasLogin.svelte";
+  import FastwayLogin from "../lib/FastwayLogin.svelte";
   import { plainHttpOrigin } from "../lib/origin.js";
 
   let status = $state(null);
@@ -25,7 +26,9 @@
   }
 
   async function logout(which) {
-    if (!confirm(`Log out of ${which === "jiotv" ? "JioTV" : "the extra source"}?`)) return;
+    const label =
+      which === "jiotv" ? "JioTV" : which === "fastway" ? "Fastway" : "the extra source";
+    if (!confirm(`Log out of ${label}?`)) return;
     try {
       await api(`/api/${which}/logout`, { method: "POST" });
       await loginChanged();
@@ -111,6 +114,21 @@
           <ExtrasLogin ondone={loginChanged} />
         {/if}
         <button class="btn" onclick={lockExtras}>Lock</button>
+      </section>
+    {/if}
+
+    {#if status.fastway?.enabled}
+      <section class="card">
+        <h2>Fastway</h2>
+        {#if status.fastway.connected}
+          <p class="ok">Connected</p>
+          {#if !status.logoutDisabled}<button class="btn" onclick={() => logout("fastway")}>Disconnect</button>{/if}
+        {:else}
+          <p class="muted">
+            Use the Fastway account for your subscription. While connected, its channels replace the JioTV catalogue.
+          </p>
+          <FastwayLogin ondone={loginChanged} />
+        {/if}
       </section>
     {/if}
 

@@ -203,6 +203,7 @@ pub async fn status(State(state): State<SharedState>) -> Response {
         "version": env!("CARGO_PKG_VERSION"),
         "jiotv": {"loggedIn": state.tv.logged_in()},
         "extras": {"enabled": state.extras.enabled(), "connected": state.extras.connected()},
+        "fastway": {"enabled": state.fastway.enabled(), "connected": state.fastway.connected()},
         "catalogue": {
             "activeProduct": state.active_product().as_str(),
             "extrasEntitlementsAvailable": state.extras.entitlements_available(),
@@ -233,6 +234,7 @@ struct ApiChannel {
     language: String,
     hd: bool,
     extras: bool,
+    fastway: bool,
     catchup: bool,
     #[serde(rename = "requiresSubscription")]
     requires_subscription: bool,
@@ -262,6 +264,7 @@ pub async fn channels(State(state): State<SharedState>) -> Response {
                 language: crate::television::language_name(ch.language).to_string(),
                 hd: ch.is_hd,
                 extras: ch.id.starts_with(crate::extras::ID_PREFIX),
+                fastway: ch.id.starts_with(crate::fastway::ID_PREFIX),
                 catchup: ch.is_catchup_available,
                 requires_subscription: ch.requires_subscription(),
                 playable: state.is_playable(&ch.id),
@@ -478,6 +481,70 @@ pub async fn extras_status_get(State(state): State<SharedState>) -> Response {
     Json(json!({"status": true, "extras": extras_status(&state)})).into_response()
 }
 
+#[derive(Deserialize)]
+pub struct FastwayLoginBody {
+    username: String,
+    password: String,
+}
+
+fn fastway_status(state: &AppState) -> serde_json::Value {
+    json!({"enabled": state.fastway.enabled(), "connected": state.fastway.connected()})
+}
+
+pub async fn fastway_status_get(State(state): State<SharedState>) -> Response {
+    Json(json!({"status": true, "fastway": fastway_status(&state)})).into_response()
+}
+
+/// `POST /api/fastway/login` — connects the optional Fastway provider. The
+/// credentials are saved in the local runtime store so the server can renew an
+/// expired token without asking the user again.
+pub async fn fastway_login(
+    State(state): State<SharedState>,
+    Json(body): Json<FastwayLoginBody>,
+) -> Response {
+    if !state.fastway.enabled() {
+        return err(StatusCode::BAD_REQUEST, "fastway is not enabled");
+    }
+    if body.username.trim().is_empty() || body.password.is_empty() {
+        return err(
+            StatusCode::BAD_REQUEST,
+            "username and password are required",
+        );
+    }
+    // Fastway installs the new credentials as soon as its login response
+    // arrives, so rotate only after success: a rejected password must not cut
+    // off viewers of the account that is still connected.
+    match state
+        .fastway
+        .login(&body.username, &body.password, &state.store)
+        .await
+    {
+        Ok(()) => {
+            state.invalidate_context();
+            crate::epg::trigger_regeneration(&state);
+            Json(json!({"status": true, "fastway": fastway_status(&state)})).into_response()
+        }
+        Err(e) => err(StatusCode::BAD_REQUEST, e.to_string()),
+    }
+}
+
+/// `POST /api/fastway/logout` — disconnects Fastway and falls back to the next
+/// active provider.
+pub async fn fastway_logout(State(state): State<SharedState>) -> Response {
+    if state.config.disable_logout {
+        return err(StatusCode::FORBIDDEN, "logout is disabled");
+    }
+    state.invalidate_context();
+    match state.fastway.logout(&state.store).await {
+        Ok(()) => {
+            state.invalidate_context();
+            crate::epg::trigger_regeneration(&state);
+            Json(json!({"status": true})).into_response()
+        }
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
 /// `POST /api/extras/unlock`. Only reached when the channel search box's
 /// own shape test decided the query looked like an unlock code (see
 /// `unlock.rs`), so this never sees an ordinary search. Rate-limited per IP
@@ -653,6 +720,18 @@ mod tests {
         store: Arc<Store>,
         extras: Arc<crate::extras_state::ExtrasState>,
     ) -> Arc<AppState> {
+        state_with_fastway(
+            store,
+            extras,
+            Arc::new(crate::fastway_state::FastwayState::new(false)),
+        )
+    }
+
+    fn state_with_fastway(
+        store: Arc<Store>,
+        extras: Arc<crate::extras_state::ExtrasState>,
+        fastway: Arc<crate::fastway_state::FastwayState>,
+    ) -> Arc<AppState> {
         Arc::new(AppState {
             config: Config::default(),
             path_prefix: String::new(),
@@ -667,6 +746,7 @@ mod tests {
             dash_state: Default::default(),
             epg_state: Default::default(),
             extras,
+            fastway,
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),
@@ -856,6 +936,99 @@ mod tests {
         assert_eq!(s.secure.current_epoch(), before);
     }
 
+    /// Fastway state with a mock login endpoint. The state is enabled but not
+    /// connected until a login succeeds.
+    async fn fastway_state_with_mock_login(
+        login_body: serde_json::Value,
+    ) -> (Arc<AppState>, wiremock::MockServer) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/apiv2/credentials/loginMini"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(login_body))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().to_str().unwrap()).unwrap());
+        std::mem::forget(dir);
+        let http = reqwest::Client::new();
+        let fastway = Arc::new(crate::fastway_state::FastwayState::new(true));
+        fastway.init(&http, &store);
+        fastway.set_endpoints_for_test(crate::fastway::Endpoints {
+            api: server.uri(),
+            license: "http://license.test/ri/licenseManager.do".to_string(),
+        });
+        let s = state_with_fastway(
+            store,
+            Arc::new(crate::extras_state::ExtrasState::new(false, None)),
+            fastway,
+        );
+        (s, server)
+    }
+
+    fn fastway_login_body() -> FastwayLoginBody {
+        FastwayLoginBody {
+            username: "test-user".into(),
+            password: "test-password".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fastway_login_connects_and_rotates_the_context() {
+        let (s, _server) = fastway_state_with_mock_login(json!({
+            "status_code": 200,
+            "error_code": 0,
+            "error_description": "",
+            "extra_data": "",
+            "response_object": [{"access_token": "test-token"}]
+        }))
+        .await;
+        let before = s.secure.current_epoch();
+        let resp = fastway_login(State(s.clone()), Json(fastway_login_body())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await;
+        assert_eq!(body["fastway"]["enabled"], true);
+        assert_eq!(body["fastway"]["connected"], true);
+        assert!(s.fastway.connected());
+        assert!(s.secure.current_epoch() > before);
+    }
+
+    #[tokio::test]
+    async fn fastway_login_rejects_bad_credentials_without_rotating_the_context() {
+        let (s, _server) = fastway_state_with_mock_login(json!({
+            "status_code": 704,
+            "error_code": 0,
+            "error_description": "WRONG_PASSWORD",
+            "extra_data": "Username and password do not match",
+            "response_object": []
+        }))
+        .await;
+        let before = s.secure.current_epoch();
+        let resp = fastway_login(State(s.clone()), Json(fastway_login_body())).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(!s.fastway.connected());
+        assert_eq!(s.secure.current_epoch(), before);
+    }
+
+    #[tokio::test]
+    async fn fastway_login_is_rejected_when_the_provider_is_disabled() {
+        let s = state();
+        let resp = fastway_login(State(s.clone()), Json(fastway_login_body())).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert!(!s.fastway.connected());
+    }
+
+    #[tokio::test]
+    async fn fastway_status_reports_enabled_and_connected() {
+        let s = state();
+        let body = response_json(fastway_status_get(State(s)).await).await;
+        assert_eq!(body["fastway"]["enabled"], false);
+        assert_eq!(body["fastway"]["connected"], false);
+    }
+
     #[test]
     fn channel_serializes_subscription_requirement_for_the_ui() {
         let channel = ApiChannel {
@@ -866,6 +1039,7 @@ mod tests {
             language: String::new(),
             hd: false,
             extras: false,
+            fastway: false,
             catchup: false,
             requires_subscription: true,
             playable: true,

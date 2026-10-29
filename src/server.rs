@@ -68,6 +68,9 @@ fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/api/auth/logout", post(crate::api::auth_logout))
         .route("/api/status", get(crate::api::status))
         .route("/api/extras/status", get(crate::api::extras_status_get))
+        .route("/api/fastway/status", get(crate::api::fastway_status_get))
+        .route("/api/fastway/login", post(crate::api::fastway_login))
+        .route("/api/fastway/logout", post(crate::api::fastway_logout))
         .route("/api/channels", get(crate::api::channels))
         .route("/api/account/password", post(crate::api::account_password))
         .route("/api/key/rotate", post(crate::api::rotate_key))
@@ -369,6 +372,7 @@ async fn channels_or_playlist(
         &channels,
         &opts,
         |id| state.is_drm_channel(id),
+        |id| state.is_dash_channel(id),
         |id| state.is_playable(id),
     );
 
@@ -496,6 +500,7 @@ mod tests {
             dash_state: Default::default(),
             epg_state: Default::default(),
             extras: Arc::new(crate::extras_state::ExtrasState::new(false, None)),
+            fastway: Arc::new(crate::fastway_state::FastwayState::new(false)),
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),

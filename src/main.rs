@@ -10,6 +10,8 @@ mod drm_channels;
 mod epg;
 mod extras;
 mod extras_state;
+mod fastway;
+mod fastway_state;
 mod keyed_locks;
 mod login;
 mod secureurl;
@@ -70,6 +72,8 @@ fn main() -> anyhow::Result<()> {
         cli::Command::LoginReset => login_reset(&store),
         cli::Command::ExtrasLogin => runtime.block_on(extras_login_cli(&store)),
         cli::Command::ExtrasLogout => extras_logout_cli(&store),
+        cli::Command::FastwayLogin => runtime.block_on(fastway_login_cli(&store)),
+        cli::Command::FastwayLogout => fastway_logout_cli(&store),
         cli::Command::AdminPassword => admin_password(&access, &path_prefix),
         cli::Command::KeyShow => show_key(&access),
         cli::Command::KeyRotate => rotate_key(&access),
@@ -346,6 +350,16 @@ async fn serve(
             }
         );
     }
+    if state.fastway.enabled() {
+        println!(
+            "fastway enabled{}",
+            if state.fastway.connected() {
+                " (logged in)"
+            } else {
+                " (run `jiotv fastway login`)"
+            }
+        );
+    }
 
     // Validating the XMLTV cache needs the active channel catalogue, which can
     // mean remote API calls with no timeout, so it runs off the startup path:
@@ -515,6 +529,8 @@ fn build_app_state(
     };
     let extras_state = Arc::new(extras_state::ExtrasState::new(cfg.extras, stored_override));
     extras_state.init(&http, &store);
+    let fastway_state = Arc::new(fastway_state::FastwayState::new(cfg.fastway));
+    fastway_state.init(&http, &store);
 
     Ok(Arc::new(state::AppState {
         config: cfg.clone(),
@@ -530,6 +546,7 @@ fn build_app_state(
         dash_state: Default::default(),
         epg_state: Default::default(),
         extras: extras_state,
+        fastway: fastway_state,
         vod_state: Default::default(),
         public_ip: Arc::new(unlock::PublicIp::new(http)),
         unlock_limiter: Arc::new(unlock::AttemptLimiter::default()),
@@ -662,6 +679,33 @@ fn extras_logout_cli(store: &store::Store) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn fastway_login_cli(store: &store::Store) -> anyhow::Result<()> {
+    let device = fastway::Device::load_or_create(store)?;
+    let client = fastway::Client::new(reqwest::Client::new(), device);
+
+    print!("Fastway username: ");
+    std::io::stdout().flush()?;
+    let mut username = String::new();
+    std::io::stdin().read_line(&mut username)?;
+    let username = username.trim();
+    let password = rpassword_prompt("Fastway password: ")?;
+
+    match client.login(username, &password).await {
+        Ok(creds) => {
+            creds.save(store)?;
+            println!("Fastway login saved. Restart the server to use it.");
+            Ok(())
+        }
+        Err(e) => anyhow::bail!("login failed: {e}"),
+    }
+}
+
+fn fastway_logout_cli(store: &store::Store) -> anyhow::Result<()> {
+    fastway::delete_credentials(store)?;
+    println!("Fastway login deleted.");
+    Ok(())
+}
+
 fn login_reset(store: &store::Store) -> anyhow::Result<()> {
     println!("Deleting existing login file if exists");
     login::clear(store)?;
@@ -767,6 +811,7 @@ fn print_help() {
          \x20                  certificate is created in <data dir>/tls/ on first start and reused\n  \
          login otp | login reset\n  \
          extras login | extras logout   (off by default; needs extras = true / JIOTV_EXTRAS=true)\n  \
+         fastway login | fastway logout (off by default; needs fastway = true / JIOTV_FASTWAY=true)\n  \
          epg generate | epg delete\n  \
          admin password\n  \
          key show | key rotate\n  \

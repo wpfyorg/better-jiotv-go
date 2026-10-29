@@ -12,20 +12,28 @@
   })();
 
   let channels = $state([]);
-  // When every listed channel comes from extras the pill tells the viewer nothing.
-  const mixedSources = $derived(channels.some((c) => c.extras) && channels.some((c) => !c.extras));
+  // When every listed channel comes from one alternate provider the pill tells
+  // the viewer nothing.
+  const mixedSources = $derived(
+    channels.some((c) => c.extras || c.fastway) &&
+      channels.some((c) => !c.extras && !c.fastway),
+  );
   let error = $state("");
   let loading = $state(true);
   let query = $state("");
   let category = $state(saved.category ?? "");
   let language = $state(saved.language ?? "");
   let extrasOnly = $state(saved.extrasOnly ?? false);
+  let fastwayOnly = $state(saved.fastwayOnly ?? false);
   let hdOnly = $state(saved.hdOnly ?? false);
   let showUnplayable = $state(saved.showUnplayable ?? false);
 
   $effect(() => {
     try {
-      localStorage.setItem("channelFilters", JSON.stringify({ category, language, extrasOnly, hdOnly, showUnplayable }));
+      localStorage.setItem(
+        "channelFilters",
+        JSON.stringify({ category, language, extrasOnly, fastwayOnly, hdOnly, showUnplayable }),
+      );
     } catch {}
   });
 
@@ -93,6 +101,7 @@
       (c) =>
         (showUnplayable || nonePlayable || c.playable) &&
         (!extrasOnly || c.extras) &&
+        (!fastwayOnly || c.fastway) &&
         (!hdOnly || c.hd) &&
         (!category || c.category === category) &&
         (!language || c.language === language) &&
@@ -146,6 +155,7 @@
   </select>
   <label class="toggle"><input type="checkbox" bind:checked={hdOnly} /> HD</label>
   <label class="toggle"><input type="checkbox" bind:checked={extrasOnly} /> Extra channels only</label>
+  <label class="toggle"><input type="checkbox" bind:checked={fastwayOnly} /> Fastway only</label>
   <label class="toggle"><input type="checkbox" bind:checked={showUnplayable} /> Show unavailable</label>
 </section>
 
@@ -157,7 +167,7 @@
   {#if nonePlayable}
     <p class="availability-note">
       Nothing in this catalogue is currently available to play. Showing the channels so the catalogue stays visible.
-      Check <a href="#/settings">Settings</a> to connect JioTV or Extra channels.
+      Check <a href="#/settings">Settings</a> to connect JioTV, Extra channels or Fastway.
     </p>
   {/if}
   <p class="muted count">{visible.length} of {channels.length} channels</p>
@@ -167,9 +177,10 @@
         <a class="tile" class:off={!c.playable} href={"#/watch/" + encodeURIComponent(c.id)} title={c.playable ? c.name : c.name + " (unavailable for the current account)"}>
           <span class="logo">
             <img src={c.logo} alt="" loading="lazy" decoding="async" />
-            {#if (mixedSources && c.extras) || c.requiresSubscription}
+            {#if (mixedSources && (c.extras || c.fastway)) || c.requiresSubscription}
               <span class="flags">
                 {#if mixedSources && c.extras}<span class="flag flag-extras">Extra</span>{/if}
+                {#if mixedSources && c.fastway}<span class="flag flag-fastway">Fastway</span>{/if}
                 {#if c.requiresSubscription}<span class="flag flag-premium">Subscription required</span>{/if}
               </span>
             {/if}
@@ -278,5 +289,6 @@
   .flags { position: absolute; top: 6px; right: 6px; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; max-width: calc(100% - 12px); }
   .flag { padding: 1px 6px; border-radius: 999px; font-size: 10px; font-weight: 700; line-height: 1.4; letter-spacing: 0.02em; white-space: nowrap; }
   .flag-extras { background: #7ea3ff; color: #0b1020; }
+  .flag-fastway { background: var(--ok); color: #062015; }
   .flag-premium { background: #f4b740; color: #2a1c00; }
 </style>

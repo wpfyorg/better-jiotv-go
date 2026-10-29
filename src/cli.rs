@@ -7,6 +7,8 @@ pub enum Command {
     LoginReset,
     ExtrasLogin,
     ExtrasLogout,
+    FastwayLogin,
+    FastwayLogout,
     AdminPassword,
     KeyShow,
     KeyRotate,
@@ -105,6 +107,11 @@ pub fn parse() -> anyhow::Result<Args> {
                 Some("login") => Command::ExtrasLogin,
                 Some("logout") => Command::ExtrasLogout,
                 other => anyhow::bail!("usage: jiotv extras login|logout (got {other:?})"),
+            },
+            Some("fastway") => match positionals.get(1).map(String::as_str) {
+                Some("login") => Command::FastwayLogin,
+                Some("logout") => Command::FastwayLogout,
+                other => anyhow::bail!("usage: jiotv fastway login|logout (got {other:?})"),
             },
             Some("admin") => match positionals.get(1).map(String::as_str) {
                 Some("password") => Command::AdminPassword,

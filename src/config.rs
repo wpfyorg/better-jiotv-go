@@ -20,6 +20,9 @@ pub struct Config {
     /// an existing config file from before the rename keeps working.
     #[serde(alias = "tvplus")]
     pub extras: bool,
+    /// Enables the optional Fastway Live TV provider. It still needs
+    /// `jiotv fastway login` (or the Settings card) before channels appear.
+    pub fastway: bool,
     pub disable_auth: bool,
     pub title: String,
     pub disable_url_encryption: bool,
@@ -46,6 +49,7 @@ impl Default for Config {
             disable_logout: false,
             drm: true,
             extras: false,
+            fastway: false,
             disable_auth: false,
             title: "JioTV Go".to_string(),
             disable_url_encryption: false,
@@ -106,6 +110,7 @@ impl Config {
         // silently as a fallback so an existing deployment keeps working.
         env_bool!(extras, "JIOTV_TVPLUS");
         env_bool!(extras, "JIOTV_EXTRAS");
+        env_bool!(fastway, "JIOTV_FASTWAY");
         env_bool!(disable_auth, "JIOTV_DISABLE_AUTH");
         env_str!(title, "JIOTV_TITLE");
         env_bool!(disable_url_encryption, "JIOTV_DISABLE_URL_ENCRYPTION");

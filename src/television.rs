@@ -40,6 +40,7 @@ pub const CATEGORY_MAP: &[(i64, &str)] = &[
     (17, "Educational"),
     (18, "Shopping"),
     (19, "JioDarshan"),
+    (20, "Regional"),
 ];
 
 pub const LANGUAGE_MAP: &[(i64, &str)] = &[
@@ -870,7 +871,7 @@ fn live_dash_hdnea_tokens(result: &LiveUrlOutput) -> Vec<String> {
     tokens
 }
 
-fn finish_live_result(result: &mut LiveUrlOutput) {
+pub(crate) fn finish_live_result(result: &mut LiveUrlOutput) {
     let tokens = live_hdnea_tokens(result);
     let hls_tokens = live_hls_hdnea_tokens(result);
     let dash_tokens = live_dash_hdnea_tokens(result);
@@ -1015,6 +1016,7 @@ pub fn generate_m3u_playlist(
     channels: &[Channel],
     opts: &PlaylistOptions,
     is_drm_channel: impl Fn(&str) -> bool,
+    is_dash_channel: impl Fn(&str) -> bool,
     is_playable: impl Fn(&str) -> bool,
 ) -> String {
     let mut out = String::new();
@@ -1066,6 +1068,19 @@ pub fn generate_m3u_playlist(
             }
             props.push('\n');
             (url, props)
+        } else if is_dash_channel(&ch.id) {
+            // Clear DASH (Fastway): the player still needs to be told the
+            // manifest is an MPD, but there is no license to configure.
+            let mut url = format!("{}/live/mpd/{}", opts.host_url, ch.id);
+            if !opts.quality.is_empty() {
+                url.push_str("?q=");
+                url.push_str(opts.quality);
+            }
+            (
+                url,
+                "#KODIPROP:inputstream=inputstream.adaptive\n#KODIPROP:inputstream.adaptive.manifest_type=mpd\n"
+                    .to_string(),
+            )
         } else {
             let url = if !opts.quality.is_empty() {
                 format!("{}/live/{}/{}.m3u8", opts.host_url, opts.quality, ch.id)
@@ -1424,7 +1439,7 @@ mod tests {
             skip_genres: "",
             sub_filter: "",
         };
-        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| true);
+        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| false, |_| true);
         assert!(m3u.starts_with("#EXTM3U"));
         assert!(m3u.contains("tvg-id=\"154\""));
         assert!(m3u.contains("http://localhost:5001/live/154.m3u8"));
@@ -1441,9 +1456,26 @@ mod tests {
             skip_genres: "",
             sub_filter: "",
         };
-        let m3u = generate_m3u_playlist(&channels, &opts, |_| true, |_| true);
+        let m3u = generate_m3u_playlist(&channels, &opts, |_| true, |_| false, |_| true);
         assert!(m3u.contains("http://h/live/mpd/999"));
         assert!(m3u.contains("KODIPROP:inputstream.adaptive.license_key=http://h/live/key/999"));
+    }
+
+    #[test]
+    fn clear_dash_channel_gets_mpd_without_a_license() {
+        let channels = vec![channel("fw_7", "Clear DASH", 5, 1)];
+        let opts = PlaylistOptions {
+            host_url: "http://h",
+            quality: "",
+            split_category: "",
+            languages: "",
+            skip_genres: "",
+            sub_filter: "",
+        };
+        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| true, |_| true);
+        assert!(m3u.contains("http://h/live/mpd/fw_7"));
+        assert!(m3u.contains("manifest_type=mpd"));
+        assert!(!m3u.contains("license_key"));
     }
 
     #[test]
@@ -1460,7 +1492,7 @@ mod tests {
             skip_genres: "",
             sub_filter: "",
         };
-        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| true);
+        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| false, |_| true);
         assert!(m3u.contains("Hindi Ch"));
         assert!(!m3u.contains("English Ch"));
     }
@@ -1478,7 +1510,7 @@ mod tests {
             skip_genres: "",
             sub_filter: "hide",
         };
-        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| true);
+        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| false, |_| true);
         assert!(!m3u.contains("Premium Ch"));
         assert!(m3u.contains("Free Ch"));
     }
@@ -1494,7 +1526,7 @@ mod tests {
             skip_genres: "",
             sub_filter: "",
         };
-        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| false);
+        let m3u = generate_m3u_playlist(&channels, &opts, |_| false, |_| false, |_| false);
         assert_eq!(m3u.trim(), "#EXTM3U x-tvg-url=\"http://h/epg.xml.gz\"");
     }
 }

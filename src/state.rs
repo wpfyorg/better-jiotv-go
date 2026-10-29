@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::custom_channels::CustomChannels;
 use crate::dash::DashState;
 use crate::extras_state::ExtrasState;
+use crate::fastway_state::FastwayState;
 use crate::secureurl::SecureUrl;
 use crate::store::Store;
 use crate::stream::RenderCaches;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 pub enum ActiveProduct {
     Tv,
     Extras,
+    Fastway,
 }
 
 impl ActiveProduct {
@@ -20,6 +22,7 @@ impl ActiveProduct {
         match self {
             ActiveProduct::Tv => "tv",
             ActiveProduct::Extras => "extras",
+            ActiveProduct::Fastway => "fastway",
         }
     }
 }
@@ -45,6 +48,7 @@ pub struct AppState {
     pub dash_state: DashState,
     pub epg_state: crate::epg::EpgState,
     pub extras: Arc<ExtrasState>,
+    pub fastway: Arc<FastwayState>,
     pub vod_state: crate::vod::VodState,
     /// The server's cached public IPv4, used to compute today's extras
     /// unlock code. See `unlock.rs`.
@@ -105,10 +109,13 @@ impl AppState {
     }
 
     /// Product selection follows the authenticated session that can actually
-    /// supply the alternate catalogue. Locking or logging out of extras
-    /// immediately falls back to the TV catalogue.
+    /// supply the alternate catalogue. Fastway takes priority when connected,
+    /// then extras; otherwise the TV catalogue. Locking or logging out of an
+    /// alternate provider immediately falls back to the next one.
     pub fn active_product(&self) -> ActiveProduct {
-        if self.extras.connected() {
+        if self.fastway.connected() {
+            ActiveProduct::Fastway
+        } else if self.extras.connected() {
             ActiveProduct::Extras
         } else {
             ActiveProduct::Tv
@@ -122,6 +129,10 @@ impl AppState {
         &self,
     ) -> anyhow::Result<Vec<crate::television::Channel>> {
         match self.active_product() {
+            ActiveProduct::Fastway => {
+                self.fastway.refresh_catalogue_if_needed(&self.store).await;
+                Ok(self.fastway.catalogue_channels())
+            }
             ActiveProduct::Extras => {
                 self.extras.refresh_catalogue_if_needed(&self.tv).await;
                 Ok(self.extras.catalogue_channels())
@@ -143,6 +154,10 @@ impl AppState {
             return true;
         }
         match self.active_product() {
+            ActiveProduct::Fastway => {
+                self.fastway.refresh_catalogue_if_needed(&self.store).await;
+                self.fastway.contains_catalogue_channel(id)
+            }
             ActiveProduct::Extras => {
                 self.extras.refresh_catalogue_if_needed(&self.tv).await;
                 self.extras.contains_catalogue_channel(id)
@@ -156,14 +171,19 @@ impl AppState {
         }
     }
 
-    /// Mirrors `isDRMChannel`: DRM state comes from the extras learned map when
-    /// the channel routes through extras, else the static JioTV DRM list.
-    /// Callers on a hot path that needs a fresh mirrors lookup should await
-    /// `extras.refresh_catalogue_if_needed` first (playlist/channels
-    /// handlers already do).
+    /// Mirrors `isDRMChannel`: DRM state comes from the provider when the
+    /// channel routes through Fastway or extras, else the static JioTV DRM
+    /// list. Fastway clear channels are DASH without a license and therefore
+    /// report `false` here; use `is_dash_channel` for the container choice.
+    /// Callers on a hot path that needs a fresh catalogue should await the
+    /// provider's `refresh_*_if_needed` first (playlist/channels handlers
+    /// already do).
     pub fn is_drm_channel(&self, id: &str) -> bool {
         if !self.config.drm {
             return false;
+        }
+        if FastwayState::is_fastway_channel(id) {
+            return self.fastway.is_drm(id);
         }
         match self
             .extras
@@ -185,6 +205,21 @@ impl AppState {
         }
     }
 
+    /// Whether the channel is DASH even without a Widevine license. Fastway's
+    /// whole catalogue is DASH, so its clear channels still use `/live/mpd`.
+    pub fn is_dash_channel(&self, id: &str) -> bool {
+        FastwayState::is_fastway_channel(id) && self.fastway.is_dash(id)
+    }
+
+    /// The user agent a provider's CDN expects for manifests and segments.
+    pub fn player_user_agent_for(&self, host: &str) -> &'static str {
+        if self.fastway.is_cdn_host(host) {
+            crate::fastway::PLAYER_USER_AGENT
+        } else {
+            self.extras.player_user_agent_for(host)
+        }
+    }
+
     /// Whether a channel from the already-filtered effective catalogue can
     /// be started with the active account.
     pub fn is_playable(&self, id: &str) -> bool {
@@ -192,6 +227,7 @@ impl AppState {
             return true;
         }
         match self.active_product() {
+            ActiveProduct::Fastway => self.fastway.connected(),
             ActiveProduct::Extras => self.extras.connected(),
             ActiveProduct::Tv => self.tv.logged_in(),
         }
@@ -221,6 +257,7 @@ mod tests {
             dash_state: Default::default(),
             epg_state: Default::default(),
             extras: Arc::new(ExtrasState::new(false, None)),
+            fastway: Arc::new(FastwayState::new(false)),
             vod_state: Default::default(),
             public_ip: Arc::new(crate::unlock::PublicIp::new(reqwest::Client::new())),
             unlock_limiter: Arc::new(crate::unlock::AttemptLimiter::default()),

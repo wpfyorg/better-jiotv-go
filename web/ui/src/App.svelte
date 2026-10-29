@@ -12,21 +12,23 @@
 
   let auth = $state({ loading: true, passwordSet: false, authenticated: false });
   let extrasActive = $state(false);
+  let fastwayActive = $state(false);
   let extrasStatusPromise = null;
 
   async function refreshExtrasStatus() {
     if (!auth.authenticated) {
       extrasActive = false;
+      fastwayActive = false;
       return;
     }
     if (extrasStatusPromise) return extrasStatusPromise;
     extrasStatusPromise = (async () => {
-      try {
-        const status = await api("/api/extras/status");
-        extrasActive = status?.extras?.enabled === true && status?.extras?.connected === true;
-      } catch {
-        extrasActive = false;
-      }
+      const [extras, fastway] = await Promise.all([
+        api("/api/extras/status").catch(() => null),
+        api("/api/fastway/status").catch(() => null),
+      ]);
+      extrasActive = extras?.extras?.enabled === true && extras?.extras?.connected === true;
+      fastwayActive = fastway?.fastway?.enabled === true && fastway?.fastway?.connected === true;
     })();
     try {
       await extrasStatusPromise;
@@ -43,6 +45,7 @@
     } catch {
       auth = { loading: false, passwordSet: true, authenticated: false };
       extrasActive = false;
+      fastwayActive = false;
     }
   }
 
@@ -50,6 +53,7 @@
     await api("/api/auth/logout", { method: "POST" }).catch(() => {});
     auth = { ...auth, authenticated: false };
     extrasActive = false;
+    fastwayActive = false;
   }
 
   onMount(() => {
@@ -67,6 +71,7 @@
     const onSignedOut = () => {
       auth = { ...auth, authenticated: false };
       extrasActive = false;
+      fastwayActive = false;
     };
     window.addEventListener("jiotv:signed-out", onSignedOut);
     return () => {
@@ -88,6 +93,11 @@
       <a class="brand" href="#/">JioTV Go</a>
       {#if extrasActive}
         <span class="extras-active" role="img" aria-label="Extras connected" title="Extras connected">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
+        </span>
+      {/if}
+      {#if fastwayActive}
+        <span class="fastway-active" role="img" aria-label="Fastway connected" title="Fastway connected">
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg>
         </span>
       {/if}
@@ -134,7 +144,8 @@
   }
   .brand-group { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
   .brand { font-weight: 800; font-size: 17px; letter-spacing: -.025em; text-decoration: none; }
-  .extras-active {
+  .extras-active,
+  .fastway-active {
     display: grid;
     width: 16px;
     height: 16px;
@@ -143,7 +154,9 @@
     color: var(--success, #34d399);
     background: color-mix(in srgb, currentColor 15%, transparent);
   }
-  .extras-active svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .fastway-active { color: var(--ok); }
+  .extras-active svg,
+  .fastway-active svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   nav {
     display: flex;
     min-width: 0;
@@ -175,8 +188,10 @@
     .bar { gap: 10px; padding: 9px 12px; }
     .brand-group { gap: 4px; }
     .brand { font-size: 15px; }
-    .extras-active { width: 14px; height: 14px; }
-    .extras-active svg { width: 9px; height: 9px; }
+    .extras-active,
+    .fastway-active { width: 14px; height: 14px; }
+    .extras-active svg,
+    .fastway-active svg { width: 9px; height: 9px; }
     nav a, .link { display: inline-flex; align-items: center; min-height: 40px; padding: 0 8px; font-size: 12px; }
     main { padding: 14px 10px 40px; }
   }
